@@ -3,6 +3,7 @@ pub mod adapters;
 pub mod backup;
 pub mod discover;
 pub mod formats;
+pub mod generic_adapter;
 pub mod run;
 
 pub use adapter::AgentAdapter;

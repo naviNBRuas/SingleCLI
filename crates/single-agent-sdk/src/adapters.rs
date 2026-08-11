@@ -198,6 +198,19 @@ pub fn for_agent(name: &str) -> Option<Box<dyn AgentAdapter>> {
     }
 }
 
+/// Same as `for_agent`, but falls back to a user-defined custom agent
+/// (`<custom_agents_dir>/<name>.toml`, see `single-core::custom_agents`)
+/// when `name` isn't one of the five built-in agents. This is the seam
+/// that lets a new CLI agent be added without recompiling SingleCLI.
+pub fn for_agent_with_custom(name: &str, custom_agents_dir: &Path) -> Option<Box<dyn AgentAdapter>> {
+    if let Some(builtin) = for_agent(name) {
+        return Some(builtin);
+    }
+    let (defs, _errors) = single_core::custom_agents::load_all(custom_agents_dir).ok()?;
+    let def = defs.into_iter().find(|d| d.name == name)?;
+    Some(Box::new(crate::generic_adapter::GenericAdapter::new(def)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

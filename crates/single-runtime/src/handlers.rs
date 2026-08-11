@@ -1,6 +1,6 @@
 use crate::context::Context;
 use crate::{bootstrap, doctor, integrations, memory};
-use single_agent_sdk::adapters::for_agent;
+use single_agent_sdk::adapters::for_agent_with_custom;
 use single_core::registry::AgentDefinition;
 use single_protocol::{
     AgentInfo, McpServerInfo, Request, Response, ResponseData, RuntimeStatus,
@@ -18,14 +18,14 @@ fn dispatch(ctx: &Context, request: Request) -> anyhow::Result<ResponseData> {
         Request::Status => Ok(ResponseData::Status(status(ctx))),
         Request::Doctor => Ok(ResponseData::Doctor(doctor::run(ctx))),
         Request::AgentList => {
-            let agents = ctx.registry.iter().map(to_agent_info).collect();
+            let agents = ctx.registry.iter().map(|def| to_agent_info(def, ctx)).collect();
             Ok(ResponseData::Agents(agents))
         }
         Request::AgentInspect { name } => {
             let def = ctx
                 .find_agent(&name)
                 .ok_or_else(|| anyhow::anyhow!("no such agent: {name}"))?;
-            Ok(ResponseData::Agent(to_agent_info(def)))
+            Ok(ResponseData::Agent(to_agent_info(def, ctx)))
         }
         Request::McpList => {
             let servers = single_core::mcp::load(&ctx.dirs.mcp_registry_file())?;
@@ -255,7 +255,7 @@ fn status(ctx: &Context) -> RuntimeStatus {
     let detected = ctx
         .registry
         .iter()
-        .filter(|a| for_agent(&a.name).map(|ad| ad.discover().detected).unwrap_or(false))
+        .filter(|a| for_agent_with_custom(&a.name, &ctx.dirs.agents_dir()).map(|ad| ad.discover().detected).unwrap_or(false))
         .count();
     RuntimeStatus {
         version: env!("CARGO_PKG_VERSION").to_string(),
@@ -267,8 +267,8 @@ fn status(ctx: &Context) -> RuntimeStatus {
     }
 }
 
-fn to_agent_info(def: &AgentDefinition) -> AgentInfo {
-    let discovery = for_agent(&def.name).map(|a| a.discover());
+fn to_agent_info(def: &AgentDefinition, ctx: &Context) -> AgentInfo {
+    let discovery = for_agent_with_custom(&def.name, &ctx.dirs.agents_dir()).map(|a| a.discover());
     AgentInfo {
         name: def.name.clone(),
         adapter: def.adapter.clone(),

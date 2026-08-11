@@ -4,7 +4,7 @@
 
 use crate::context::Context;
 use anyhow::Result;
-use single_agent_sdk::adapters::for_agent;
+use single_agent_sdk::adapters::for_agent_with_custom;
 use single_protocol::IntegrationResult;
 
 pub fn install_all(ctx: &Context, dry_run: bool) -> Result<IntegrationResult> {
@@ -13,7 +13,7 @@ pub fn install_all(ctx: &Context, dry_run: bool) -> Result<IntegrationResult> {
 
     let mut writes = Vec::new();
     for agent in &ctx.registry {
-        let Some(adapter) = for_agent(&agent.name) else { continue };
+        let Some(adapter) = for_agent_with_custom(&agent.name, &ctx.dirs.agents_dir()) else { continue };
         writes.push(adapter.configure_mcp(&home, &servers, dry_run)?);
     }
     Ok(IntegrationResult { dry_run, writes })
@@ -26,7 +26,7 @@ pub fn uninstall_all(ctx: &Context, dry_run: bool) -> Result<IntegrationResult> 
 
     let mut writes = Vec::new();
     for agent in &ctx.registry {
-        let Some(adapter) = for_agent(&agent.name) else { continue };
+        let Some(adapter) = for_agent_with_custom(&agent.name, &ctx.dirs.agents_dir()) else { continue };
         writes.push(adapter.remove_mcp(&home, &names, dry_run)?);
     }
     Ok(IntegrationResult { dry_run, writes })

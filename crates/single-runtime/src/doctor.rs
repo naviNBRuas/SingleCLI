@@ -1,5 +1,5 @@
 use crate::context::Context;
-use single_agent_sdk::adapters::for_agent;
+use single_agent_sdk::adapters::for_agent_with_custom;
 use single_protocol::{CheckStatus, DoctorCheck, DoctorReport};
 
 pub fn run(ctx: &Context) -> DoctorReport {
@@ -30,7 +30,7 @@ pub fn run(ctx: &Context) -> DoctorReport {
     }
 
     for agent in &ctx.registry {
-        let Some(adapter) = for_agent(&agent.name) else {
+        let Some(adapter) = for_agent_with_custom(&agent.name, &ctx.dirs.agents_dir()) else {
             checks.push(DoctorCheck {
                 name: format!("agent: {}", agent.name),
                 status: CheckStatus::Skipped,

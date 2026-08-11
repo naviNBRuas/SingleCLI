@@ -1,5 +1,6 @@
 pub mod account;
 pub mod config;
+pub mod custom_agents;
 pub mod lsp;
 pub mod mcp;
 pub mod paths;

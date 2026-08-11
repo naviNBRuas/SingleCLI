@@ -16,7 +16,7 @@
 use crate::context::Context;
 use anyhow::{Context as _, Result};
 use rusqlite::{params, Connection, OptionalExtension};
-use single_agent_sdk::adapters::for_agent;
+use single_agent_sdk::adapters::for_agent_with_custom;
 use single_protocol::{TaskRecord, TaskStatus};
 use std::path::Path;
 use std::time::Duration;
@@ -141,7 +141,7 @@ pub struct RunTaskOptions<'a> {
 /// even though there's no live event *stream* yet (spec section 25) — only
 /// a persisted log.
 pub fn run(conn: &Connection, ctx: &Context, opts: RunTaskOptions) -> Result<TaskRecord> {
-    let Some(adapter) = for_agent(opts.agent) else {
+    let Some(adapter) = for_agent_with_custom(opts.agent, &ctx.dirs.agents_dir()) else {
         anyhow::bail!("unknown agent: {}", opts.agent);
     };
     if !adapter.discover().detected {
