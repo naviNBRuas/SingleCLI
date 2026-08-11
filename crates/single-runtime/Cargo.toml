@@ -16,6 +16,8 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 chrono.workspace = true
 directories.workspace = true
+redis.workspace = true
+reqwest.workspace = true
 single-core = { path = "../single-core" }
 single-protocol = { path = "../single-protocol" }
 single-agent-sdk = { path = "../single-agent-sdk" }

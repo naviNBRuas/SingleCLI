@@ -301,6 +301,50 @@ fn dispatch(ctx: &Context, request: Request) -> anyhow::Result<ResponseData> {
             let conn = kg_db(ctx)?;
             Ok(ResponseData::KgGraph(crate::knowledge_graph::read_graph(&conn)?))
         }
+        Request::CacheSet { key, value, ttl_secs } => {
+            let url = redis_url()?;
+            crate::redis_backend::set(&url, &key, &value, ttl_secs)?;
+            Ok(ResponseData::Empty)
+        }
+        Request::CacheGet { key } => {
+            let url = redis_url()?;
+            Ok(ResponseData::CacheValue(crate::redis_backend::get(&url, &key)?))
+        }
+        Request::CacheDelete { key } => {
+            let url = redis_url()?;
+            if !crate::redis_backend::delete(&url, &key)? {
+                anyhow::bail!("no such key: {key}");
+            }
+            Ok(ResponseData::Empty)
+        }
+        Request::CacheList { pattern } => {
+            let url = redis_url()?;
+            Ok(ResponseData::CacheKeys(crate::redis_backend::list_keys(&url, &pattern)?))
+        }
+        Request::CacheStatus => {
+            let url = crate::redis_backend::resolve_url();
+            let reachable = url.as_deref().map(|u| crate::redis_backend::ping(u).is_ok()).unwrap_or(false);
+            Ok(ResponseData::CacheStatus { configured: url.is_some(), url, reachable })
+        }
+        Request::VectorUpsert { collection, id, vector, payload } => {
+            let url = qdrant_url()?;
+            crate::qdrant_backend::upsert_point(&url, &collection, id, &vector, payload)?;
+            Ok(ResponseData::Empty)
+        }
+        Request::VectorSearch { collection, vector, limit } => {
+            let url = qdrant_url()?;
+            Ok(ResponseData::VectorHits(crate::qdrant_backend::search(&url, &collection, &vector, limit)?))
+        }
+        Request::VectorDelete { collection, id } => {
+            let url = qdrant_url()?;
+            crate::qdrant_backend::delete_point(&url, &collection, id)?;
+            Ok(ResponseData::Empty)
+        }
+        Request::VectorStatus => {
+            let url = crate::qdrant_backend::resolve_url();
+            let reachable = url.as_deref().map(|u| crate::qdrant_backend::ping(u).is_ok()).unwrap_or(false);
+            Ok(ResponseData::VectorStatus { configured: url.is_some(), url, reachable })
+        }
         Request::Setup { dry_run } => Ok(ResponseData::SetupPlan(bootstrap::run(ctx, dry_run))),
         Request::InstallIntegrations { dry_run } => {
             Ok(ResponseData::IntegrationResult(integrations::install_all(ctx, dry_run)?))
@@ -328,6 +372,16 @@ fn task_db(ctx: &Context) -> anyhow::Result<rusqlite::Connection> {
     let conn = crate::state::open(&ctx.dirs.db_path())?;
     crate::task::ensure_schema(&conn)?;
     Ok(conn)
+}
+
+fn redis_url() -> anyhow::Result<String> {
+    crate::redis_backend::resolve_url()
+        .ok_or_else(|| anyhow::anyhow!("no Redis configured; set SINGLE_REDIS_URL to enable the working-memory cache"))
+}
+
+fn qdrant_url() -> anyhow::Result<String> {
+    crate::qdrant_backend::resolve_url()
+        .ok_or_else(|| anyhow::anyhow!("no Qdrant configured; set SINGLE_QDRANT_URL to enable the vector store"))
 }
 
 fn kg_db(ctx: &Context) -> anyhow::Result<rusqlite::Connection> {

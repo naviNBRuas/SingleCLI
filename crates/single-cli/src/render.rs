@@ -245,6 +245,43 @@ fn print_data(data: ResponseData) {
                 println!("  {} --[{}]--> {}", r.from_entity, r.relation_type, r.to_entity);
             }
         }
+        ResponseData::CacheValue(value) => match value {
+            Some(v) => println!("{v}"),
+            None => {
+                eprintln!("(no such key)");
+                std::process::exit(1);
+            }
+        },
+        ResponseData::CacheKeys(keys) => {
+            if keys.is_empty() {
+                println!("(no matching keys)");
+            }
+            for k in keys {
+                println!("{k}");
+            }
+        }
+        ResponseData::CacheStatus { configured, url, reachable } => {
+            if !configured {
+                println!("Redis: not configured (set SINGLE_REDIS_URL to enable)");
+            } else {
+                println!("Redis: {} ({})", url.unwrap_or_default(), if reachable { "reachable" } else { "unreachable" });
+            }
+        }
+        ResponseData::VectorHits(hits) => {
+            if hits.is_empty() {
+                println!("(no hits)");
+            }
+            for h in hits {
+                println!("#{:<6} score={:<8.4} {}", h.id, h.score, h.payload);
+            }
+        }
+        ResponseData::VectorStatus { configured, url, reachable } => {
+            if !configured {
+                println!("Qdrant: not configured (set SINGLE_QDRANT_URL to enable)");
+            } else {
+                println!("Qdrant: {} ({})", url.unwrap_or_default(), if reachable { "reachable" } else { "unreachable" });
+            }
+        }
         ResponseData::SetupPlan(plan) => {
             let mode = if plan.dry_run { "dry run" } else { "applied" };
             println!("Setup plan ({mode}):");

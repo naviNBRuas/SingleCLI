@@ -7,6 +7,7 @@
 //! acceptable for Phase 1's single local daemon + local clients.
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -78,6 +79,15 @@ pub enum Request {
     KgGetEntity { name: String },
     KgQuery { term: String },
     KgReadGraph,
+    CacheSet { key: String, value: String, ttl_secs: Option<u64> },
+    CacheGet { key: String },
+    CacheDelete { key: String },
+    CacheList { pattern: String },
+    CacheStatus,
+    VectorUpsert { collection: String, id: u64, vector: Vec<f32>, payload: serde_json::Value },
+    VectorSearch { collection: String, vector: Vec<f32>, limit: u64 },
+    VectorDelete { collection: String, id: u64 },
+    VectorStatus,
     Setup { dry_run: bool },
     InstallIntegrations { dry_run: bool },
     UninstallIntegrations,
@@ -127,6 +137,11 @@ pub enum ResponseData {
     KgEntity(KgEntity),
     KgEntities(Vec<KgEntity>),
     KgGraph(KnowledgeGraphSnapshot),
+    CacheValue(Option<String>),
+    CacheKeys(Vec<String>),
+    CacheStatus { configured: bool, url: Option<String>, reachable: bool },
+    VectorHits(Vec<VectorHit>),
+    VectorStatus { configured: bool, url: Option<String>, reachable: bool },
     Tasks(Vec<TaskRecord>),
     SetupPlan(SetupPlan),
     IntegrationResult(IntegrationResult),
@@ -451,6 +466,13 @@ pub struct KgRelation {
 pub struct KnowledgeGraphSnapshot {
     pub entities: Vec<KgEntity>,
     pub relations: Vec<KgRelation>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VectorHit {
+    pub id: u64,
+    pub score: f32,
+    pub payload: Value,
 }
 
 /// A registered LLM provider (spec section 30): OpenAI, Anthropic,

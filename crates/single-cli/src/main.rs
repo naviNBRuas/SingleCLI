@@ -278,6 +278,57 @@ enum MemoryCommand {
         #[command(subcommand)]
         action: KgCommand,
     },
+    /// Fast ephemeral Redis-backed working memory. Requires SINGLE_REDIS_URL.
+    Cache {
+        #[command(subcommand)]
+        action: CacheCommand,
+    },
+    /// Vector store for RAG (Qdrant-backed). Requires SINGLE_QDRANT_URL.
+    /// Stores/searches pre-computed vectors — turning text into a vector
+    /// (embedding) isn't wired to a live provider yet, see docs/architecture.md.
+    Vector {
+        #[command(subcommand)]
+        action: VectorCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum VectorCommand {
+    /// vector is a comma-separated list of floats, e.g. 0.1,0.2,0.3
+    Upsert {
+        collection: String,
+        id: u64,
+        #[arg(long, value_delimiter = ',')]
+        vector: Vec<f32>,
+        #[arg(long, default_value = "{}")]
+        payload: String,
+    },
+    Search {
+        collection: String,
+        #[arg(long, value_delimiter = ',')]
+        vector: Vec<f32>,
+        #[arg(long, default_value = "5")]
+        limit: u64,
+    },
+    Delete { collection: String, id: u64 },
+    Status,
+}
+
+#[derive(Subcommand)]
+enum CacheCommand {
+    Set {
+        key: String,
+        value: String,
+        #[arg(long)]
+        ttl_secs: Option<u64>,
+    },
+    Get { key: String },
+    Delete { key: String },
+    List {
+        #[arg(default_value = "*")]
+        pattern: String,
+    },
+    Status,
 }
 
 #[derive(Subcommand)]
@@ -646,6 +697,47 @@ fn main() -> anyhow::Result<()> {
                 KgCommand::Show { json } => {
                     let response = client::send(&socket_path, Request::KgReadGraph)?;
                     render::print(response, json);
+                }
+            },
+            MemoryCommand::Cache { action } => match action {
+                CacheCommand::Set { key, value, ttl_secs } => {
+                    let response = client::send(&socket_path, Request::CacheSet { key, value, ttl_secs })?;
+                    render::print(response, false);
+                }
+                CacheCommand::Get { key } => {
+                    let response = client::send(&socket_path, Request::CacheGet { key })?;
+                    render::print(response, false);
+                }
+                CacheCommand::Delete { key } => {
+                    let response = client::send(&socket_path, Request::CacheDelete { key })?;
+                    render::print(response, false);
+                }
+                CacheCommand::List { pattern } => {
+                    let response = client::send(&socket_path, Request::CacheList { pattern })?;
+                    render::print(response, false);
+                }
+                CacheCommand::Status => {
+                    let response = client::send(&socket_path, Request::CacheStatus)?;
+                    render::print(response, false);
+                }
+            },
+            MemoryCommand::Vector { action } => match action {
+                VectorCommand::Upsert { collection, id, vector, payload } => {
+                    let payload: serde_json::Value = serde_json::from_str(&payload)?;
+                    let response = client::send(&socket_path, Request::VectorUpsert { collection, id, vector, payload })?;
+                    render::print(response, false);
+                }
+                VectorCommand::Search { collection, vector, limit } => {
+                    let response = client::send(&socket_path, Request::VectorSearch { collection, vector, limit })?;
+                    render::print(response, false);
+                }
+                VectorCommand::Delete { collection, id } => {
+                    let response = client::send(&socket_path, Request::VectorDelete { collection, id })?;
+                    render::print(response, false);
+                }
+                VectorCommand::Status => {
+                    let response = client::send(&socket_path, Request::VectorStatus)?;
+                    render::print(response, false);
                 }
             },
         },
