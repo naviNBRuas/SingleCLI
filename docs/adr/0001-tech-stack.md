@@ -1,0 +1,81 @@
+# ADR 0001: Rust workspace, Unix-socket JSON-lines IPC, SQLite state
+
+## Status
+
+Accepted — Phase 1.
+
+## Context
+
+SingleCLI needs a long-lived local runtime daemon, a CLI client, and a TUI
+client, all sharing configuration/state, on a Linux-first machine that also
+has Go 1.26 and Node 24 available. The full spec (see project root prompt)
+suggests Rust, a Unix socket, JSON-RPC-ish IPC, and SQLite, but says to
+evaluate alternatives rather than blindly follow that suggestion.
+
+## Decision
+
+**Language/runtime: Rust**, as a Cargo workspace with one crate per layer
+(`single-protocol`, `single-core`, `single-agent-sdk`, `single-runtime`,
+`single-cli`, `single-tui`).
+
+**IPC: newline-delimited JSON over a Unix domain socket**
+(`~/.config/single/state/runtime.sock`), not a full RPC framework
+(tonic/gRPC, JSON-RPC 2.0 with a schema registry, etc).
+
+**State: SQLite** via `rusqlite` (bundled, no system dependency), at
+`~/.config/single/state/single.db`.
+
+**TUI: `ratatui` + `crossterm`.**
+
+## Alternatives considered
+
+- **Go.** Strong for a daemon + CLI (single static binary, good stdlib
+  networking), and available on this machine. Rejected for Phase 1 mainly
+  because Rust's stronger type system pays off specifically for the
+  adapter/capability-negotiation model (spec sections 39-40): illegal
+  states (an agent claiming a capability it can't back) are easier to make
+  unrepresentable with Rust's enums/traits than with Go's interfaces. Not a
+  strong rejection — Go remains a reasonable choice if a future rewrite is
+  ever justified.
+- **Node/TypeScript.** Fastest to prototype, and all four real agent CLIs
+  investigated for Phase 1 (`claude`, `codex`, `opencode`) are themselves
+  Node-adjacent in places. Rejected because a long-lived background daemon
+  is a worse fit for Node's runtime characteristics (memory footprint,
+  startup cost for many short-lived CLI invocations) than a compiled
+  static binary, and distributing a Rust binary to a fresh machine (the
+  user's stated fresh-install use case) avoids requiring Node to be present
+  at all just to run SingleCLI itself.
+- **gRPC/tonic for IPC.** Rejected for Phase 1: it's the right choice once
+  there's a real bidirectional event stream (task progress, agent output
+  streaming — Phase 4 concerns), but for the current request/response
+  surface (status, doctor, agent list, mcp list, setup, integrations) it
+  would add a protobuf toolchain and codegen step for no present benefit.
+  Newline-delimited JSON is trivially debuggable with `socat -,ignoreeof
+  UNIX-CONNECT:runtime.sock` during development, which matters more right
+  now than wire efficiency. The wire types already live in one crate
+  (`single-protocol`) specifically so swapping the framing later doesn't
+  require touching call sites.
+- **A key-value store or flat files instead of SQLite.** Rejected: Phase 1
+  already needs at least one queryable log (the `events` table used for
+  audit history, spec section 32), and SQLite's zero-ops embedded model
+  fits a local single-user tool better than anything requiring a server
+  process.
+
+## Consequences
+
+- Every crate boundary in the workspace mirrors a layer boundary from the
+  spec's architecture diagram (`single-protocol` = wire types,
+  `single-core` = config/registry, `single-agent-sdk` = adapters,
+  `single-runtime` = daemon, `single-cli`/`single-tui` = clients), so
+  adding a new agent adapter (spec section 39) means adding one adapter
+  implementation plus a registry entry, not touching the runtime or CLI.
+- The IPC framing choice means Phase 1 has no true bidirectional event
+  stream yet — `single-tui`'s dashboard polls/refreshes on a key press
+  rather than subscribing to a push feed. `single-protocol::Envelope<T>` is
+  a deliberately unused-for-now seam for that later addition.
+- Because there's no persistent multi-request daemon *required* for
+  one-shot CLI commands (`client.rs`'s in-process fallback), a fresh
+  install where the user has never manually started `single-runtimed`
+  still gets fully working `single doctor`/`single agent list`/etc. Only
+  the TUI insists on a real running daemon, since it's the client that
+  actually wants live IPC semantics.
