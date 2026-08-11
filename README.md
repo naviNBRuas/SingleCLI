@@ -22,7 +22,19 @@ writing one TOML file, no recompilation required.
 
 ## Install
 
-Build from source (no published binary yet):
+**Linux and macOS (x86_64 and arm64):**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/naviNBRuas/SingleCLI/main/install.sh | sh
+```
+
+Downloads the prebuilt `single` and `single-runtimed` binaries for your
+platform from the latest [release](https://github.com/naviNBRuas/SingleCLI/releases)
+to `~/.local/bin` (override with `SINGLE_INSTALL_DIR`). See
+[`install.sh`](install.sh) — it's a plain shell script, read it before
+piping it into `sh` if you want to know exactly what it does.
+
+**From source** (any platform with a Rust toolchain):
 
 ```bash
 cargo build --release --workspace
