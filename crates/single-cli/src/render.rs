@@ -75,9 +75,78 @@ fn print_data(data: ResponseData) {
             }
         }
         ResponseData::McpServers(servers) => {
+            if servers.is_empty() {
+                println!("(no mcp servers registered)");
+            }
             for server in servers {
                 let flag = if server.enabled { "enabled" } else { "disabled" };
                 println!("{:<12} {:<40} [{flag}]", server.name, server.command);
+            }
+        }
+        ResponseData::McpServer(server) => {
+            println!("{}", server.name);
+            println!("  command: {} {}", server.command, server.args.join(" "));
+            println!("  enabled: {}", server.enabled);
+            if !server.env.is_empty() {
+                println!("  env:     {}", server.env.keys().cloned().collect::<Vec<_>>().join(", "));
+            }
+        }
+        ResponseData::LspServers(servers) => {
+            if servers.is_empty() {
+                println!("(no lsp servers registered)");
+            }
+            for server in servers {
+                let flag = if server.enabled { "enabled" } else { "disabled" };
+                println!("{:<12} {:<30} {} [{flag}]", server.name, server.command, server.extensions.join(","));
+            }
+        }
+        ResponseData::LspServer(server) => {
+            println!("{}", server.name);
+            println!("  command:    {} {}", server.command, server.args.join(" "));
+            println!("  extensions: {}", server.extensions.join(", "));
+            println!("  enabled:    {}", server.enabled);
+        }
+        ResponseData::Tools(tools) => {
+            if tools.is_empty() {
+                println!("(no tools registered)");
+            }
+            for tool in tools {
+                let flag = if tool.enabled { "enabled" } else { "disabled" };
+                println!("{:<12} {:?} {:<40} [{flag}]", tool.name, tool.risk_level, tool.description);
+            }
+        }
+        ResponseData::Tool(tool) => {
+            println!("{}", tool.name);
+            println!("  description: {}", tool.description);
+            println!("  risk:        {:?}", tool.risk_level);
+            println!("  enabled:     {}", tool.enabled);
+        }
+        ResponseData::SecretNames(names) => {
+            if names.is_empty() {
+                println!("(no secrets stored)");
+            }
+            for name in names {
+                println!("{name}");
+            }
+        }
+        ResponseData::SecretValue(value) => match value {
+            Some(v) => println!("{v}"),
+            None => {
+                eprintln!("(no such secret)");
+                std::process::exit(1);
+            }
+        },
+        ResponseData::Skills(skills) => {
+            if skills.is_empty() {
+                println!("(no skills installed)");
+            }
+            for skill in skills {
+                println!("{skill}");
+            }
+        }
+        ResponseData::SkillContents(entries) => {
+            for entry in entries {
+                println!("{entry}");
             }
         }
         ResponseData::SetupPlan(plan) => {

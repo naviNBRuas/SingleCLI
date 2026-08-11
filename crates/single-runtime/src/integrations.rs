@@ -9,7 +9,7 @@ use single_protocol::IntegrationResult;
 
 pub fn install_all(ctx: &Context, dry_run: bool) -> Result<IntegrationResult> {
     let home = home_dir()?;
-    let servers = single_core::mcp::load(&ctx.dirs.root().join("mcp.toml"))?;
+    let servers = single_core::mcp::load(&ctx.dirs.mcp_registry_file())?;
 
     let mut writes = Vec::new();
     for agent in &ctx.registry {
@@ -21,7 +21,7 @@ pub fn install_all(ctx: &Context, dry_run: bool) -> Result<IntegrationResult> {
 
 pub fn uninstall_all(ctx: &Context, dry_run: bool) -> Result<IntegrationResult> {
     let home = home_dir()?;
-    let servers = single_core::mcp::load(&ctx.dirs.root().join("mcp.toml"))?;
+    let servers = single_core::mcp::load(&ctx.dirs.mcp_registry_file())?;
     let names: Vec<String> = servers.iter().map(|s| s.name.clone()).collect();
 
     let mut writes = Vec::new();

@@ -17,6 +17,31 @@ pub enum Request {
     AgentList,
     AgentInspect { name: String },
     McpList,
+    McpAdd { server: McpServerSpec },
+    McpRemove { name: String },
+    McpEnable { name: String },
+    McpDisable { name: String },
+    McpInspect { name: String },
+    LspList,
+    LspAdd { server: LspServerSpec },
+    LspRemove { name: String },
+    LspInspect { name: String },
+    ToolList,
+    ToolAdd { tool: ToolSpec },
+    ToolInspect { name: String },
+    ToolEnable { name: String },
+    ToolDisable { name: String },
+    SecretList,
+    SecretSet { name: String, value: String },
+    /// Returns whether the secret exists and its value in one shot — the
+    /// value never passes through the runtime's event log (see
+    /// `single-runtime`'s `handlers.rs`), only through this direct response.
+    SecretGet { name: String },
+    SecretDelete { name: String },
+    SkillList,
+    SkillInstall { name: String, source_path: String },
+    SkillRemove { name: String },
+    SkillInspect { name: String },
     Setup { dry_run: bool },
     InstallIntegrations { dry_run: bool },
     UninstallIntegrations,
@@ -42,6 +67,15 @@ pub enum ResponseData {
     Agents(Vec<AgentInfo>),
     Agent(AgentInfo),
     McpServers(Vec<McpServerInfo>),
+    McpServer(McpServerSpec),
+    LspServers(Vec<LspServerSpec>),
+    LspServer(LspServerSpec),
+    Tools(Vec<ToolSpec>),
+    Tool(ToolSpec),
+    SecretNames(Vec<String>),
+    SecretValue(Option<String>),
+    Skills(Vec<String>),
+    SkillContents(Vec<String>),
     SetupPlan(SetupPlan),
     IntegrationResult(IntegrationResult),
     Profiles(Vec<String>),
@@ -204,4 +238,36 @@ pub struct McpServerSpec {
 
 fn default_true() -> bool {
     true
+}
+
+/// A format-agnostic LSP server entry, mirroring `McpServerSpec`'s shape
+/// and reasons for living here (shared by `single-core`'s registry and any
+/// future agent-sdk writer without a circular dependency).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LspServerSpec {
+    pub name: String,
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default)]
+    pub extensions: Vec<String>,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RiskLevel {
+    Low,
+    Medium,
+    High,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ToolSpec {
+    pub name: String,
+    pub description: String,
+    pub risk_level: RiskLevel,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
 }

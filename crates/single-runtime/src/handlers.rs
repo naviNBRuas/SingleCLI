@@ -28,7 +28,7 @@ fn dispatch(ctx: &Context, request: Request) -> anyhow::Result<ResponseData> {
             Ok(ResponseData::Agent(to_agent_info(def)))
         }
         Request::McpList => {
-            let servers = single_core::mcp::load(&ctx.dirs.root().join("mcp.toml"))?;
+            let servers = single_core::mcp::load(&ctx.dirs.mcp_registry_file())?;
             let enabled_agents: Vec<String> = ctx.registry.iter().map(|a| a.name.clone()).collect();
             let infos = servers
                 .into_iter()
@@ -40,6 +40,111 @@ fn dispatch(ctx: &Context, request: Request) -> anyhow::Result<ResponseData> {
                 })
                 .collect();
             Ok(ResponseData::McpServers(infos))
+        }
+        Request::McpAdd { server } => {
+            single_core::mcp::add(&ctx.dirs.mcp_registry_file(), server)?;
+            Ok(ResponseData::Empty)
+        }
+        Request::McpRemove { name } => {
+            if !single_core::mcp::remove(&ctx.dirs.mcp_registry_file(), &name)? {
+                anyhow::bail!("no such mcp server: {name}");
+            }
+            Ok(ResponseData::Empty)
+        }
+        Request::McpEnable { name } => {
+            if !single_core::mcp::set_enabled(&ctx.dirs.mcp_registry_file(), &name, true)? {
+                anyhow::bail!("no such mcp server: {name}");
+            }
+            Ok(ResponseData::Empty)
+        }
+        Request::McpDisable { name } => {
+            if !single_core::mcp::set_enabled(&ctx.dirs.mcp_registry_file(), &name, false)? {
+                anyhow::bail!("no such mcp server: {name}");
+            }
+            Ok(ResponseData::Empty)
+        }
+        Request::McpInspect { name } => {
+            let server = single_core::mcp::find(&ctx.dirs.mcp_registry_file(), &name)?
+                .ok_or_else(|| anyhow::anyhow!("no such mcp server: {name}"))?;
+            Ok(ResponseData::McpServer(server))
+        }
+        Request::LspList => {
+            Ok(ResponseData::LspServers(single_core::lsp::load(&ctx.dirs.lsp_registry_file())?))
+        }
+        Request::LspAdd { server } => {
+            single_core::lsp::add(&ctx.dirs.lsp_registry_file(), server)?;
+            Ok(ResponseData::Empty)
+        }
+        Request::LspRemove { name } => {
+            if !single_core::lsp::remove(&ctx.dirs.lsp_registry_file(), &name)? {
+                anyhow::bail!("no such lsp server: {name}");
+            }
+            Ok(ResponseData::Empty)
+        }
+        Request::LspInspect { name } => {
+            let server = single_core::lsp::find(&ctx.dirs.lsp_registry_file(), &name)?
+                .ok_or_else(|| anyhow::anyhow!("no such lsp server: {name}"))?;
+            Ok(ResponseData::LspServer(server))
+        }
+        Request::ToolList => {
+            Ok(ResponseData::Tools(single_core::tools::load(&ctx.dirs.tools_registry_file())?))
+        }
+        Request::ToolAdd { tool } => {
+            single_core::tools::add(&ctx.dirs.tools_registry_file(), tool)?;
+            Ok(ResponseData::Empty)
+        }
+        Request::ToolInspect { name } => {
+            let tool = single_core::tools::find(&ctx.dirs.tools_registry_file(), &name)?
+                .ok_or_else(|| anyhow::anyhow!("no such tool: {name}"))?;
+            Ok(ResponseData::Tool(tool))
+        }
+        Request::ToolEnable { name } => {
+            if !single_core::tools::set_enabled(&ctx.dirs.tools_registry_file(), &name, true)? {
+                anyhow::bail!("no such tool: {name}");
+            }
+            Ok(ResponseData::Empty)
+        }
+        Request::ToolDisable { name } => {
+            if !single_core::tools::set_enabled(&ctx.dirs.tools_registry_file(), &name, false)? {
+                anyhow::bail!("no such tool: {name}");
+            }
+            Ok(ResponseData::Empty)
+        }
+        Request::SecretList => {
+            let store = single_core::secrets::SecretTool;
+            Ok(ResponseData::SecretNames(single_core::secrets::SecretStore::list(&store)?))
+        }
+        Request::SecretSet { name, value } => {
+            let store = single_core::secrets::SecretTool;
+            single_core::secrets::SecretStore::set(&store, &name, &value)?;
+            Ok(ResponseData::Empty)
+        }
+        Request::SecretGet { name } => {
+            let store = single_core::secrets::SecretTool;
+            Ok(ResponseData::SecretValue(single_core::secrets::SecretStore::get(&store, &name)?))
+        }
+        Request::SecretDelete { name } => {
+            let store = single_core::secrets::SecretTool;
+            if !single_core::secrets::SecretStore::delete(&store, &name)? {
+                anyhow::bail!("no such secret: {name}");
+            }
+            Ok(ResponseData::Empty)
+        }
+        Request::SkillList => Ok(ResponseData::Skills(single_core::skills::list(&ctx.dirs.skills_dir())?)),
+        Request::SkillInstall { name, source_path } => {
+            single_core::skills::install(&ctx.dirs.skills_dir(), &name, std::path::Path::new(&source_path))?;
+            Ok(ResponseData::Empty)
+        }
+        Request::SkillRemove { name } => {
+            if !single_core::skills::remove(&ctx.dirs.skills_dir(), &name)? {
+                anyhow::bail!("no such skill: {name}");
+            }
+            Ok(ResponseData::Empty)
+        }
+        Request::SkillInspect { name } => {
+            let contents = single_core::skills::inspect(&ctx.dirs.skills_dir(), &name)?
+                .ok_or_else(|| anyhow::anyhow!("no such skill: {name}"))?;
+            Ok(ResponseData::SkillContents(contents))
         }
         Request::Setup { dry_run } => Ok(ResponseData::SetupPlan(bootstrap::run(ctx, dry_run))),
         Request::InstallIntegrations { dry_run } => {

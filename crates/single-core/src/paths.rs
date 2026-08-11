@@ -61,6 +61,26 @@ impl SingleDirs {
         self.root.join("logs")
     }
 
+    pub fn mcp_registry_file(&self) -> PathBuf {
+        self.root.join("mcp.toml")
+    }
+
+    pub fn lsp_registry_file(&self) -> PathBuf {
+        self.root.join("lsp.toml")
+    }
+
+    pub fn tools_registry_file(&self) -> PathBuf {
+        self.root.join("tools.toml")
+    }
+
+    pub fn permissions_file(&self) -> PathBuf {
+        self.root.join("permissions.toml")
+    }
+
+    pub fn skills_dir(&self) -> PathBuf {
+        self.root.join("skills")
+    }
+
     /// Creates the subset of the directory tree Phase 1 needs. Never touches
     /// anything outside `self.root`.
     pub fn ensure_created(&self) -> Result<()> {

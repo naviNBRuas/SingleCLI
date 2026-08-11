@@ -1,11 +1,13 @@
-# SingleCLI architecture — Phase 1
+# SingleCLI architecture — Phase 1 + Phase 2
 
 This describes what's actually built, not the full long-term vision (see
-the project's original request for that). Phase 1 implements the
+the project's original request for that). Phase 1 implemented the
 foundation layer: config, registry, adapters, a runtime daemon, a CLI, and
-a minimal TUI dashboard. Orchestration, memory, LSP management, skills,
-plugins, secrets, and sandboxing are explicitly out of scope here — see
-"Not in Phase 1" below.
+a minimal TUI dashboard. Phase 2 added the shared-capability registries:
+MCP CRUD, an LSP registry, a tool metadata registry, an OS-keychain secrets
+abstraction, and a local skills directory. Orchestration, memory, a context
+engine, plugins, and sandboxing enforcement are still out of scope — see
+"Not in Phase 2" below.
 
 ```text
 single (CLI, no subcommand)          single <command>
@@ -111,14 +113,57 @@ investigation.
   `docs/install-methods.md`). Their `configure_mcp`/`remove_mcp` are
   documented no-ops, not silently-skipped failures.
 
-## Not in Phase 1
+## Phase 2 additions
+
+- **`single-core::mcp`** gained CRUD (`add`/`remove`/`set_enabled`/`find`)
+  on top of Phase 1's `load`/`save`, exposed as `single mcp
+  add/remove/enable/disable/inspect`.
+- **`single-core::lsp`** — a registry mirroring `mcp.rs`'s shape
+  (`~/.config/single/lsp.toml`), exposed as `single lsp
+  list/add/remove/inspect`. There is **no agent sync yet** for LSP (unlike
+  MCP's `configure_mcp`) — Claude Code's LSP support is a marketplace
+  *plugin* mechanism (`enabledPlugins` in `~/.claude/settings.json`), a
+  fundamentally different shape from "register an arbitrary command," and
+  OpenCode's native `lsp` key was left unwired to avoid promising a
+  capability without deciding how to reconcile the two mechanisms. The
+  registry itself is real and tested; syncing it into agents is future work.
+- **`single-core::tools`** — a metadata catalog
+  (`~/.config/single/tools.toml`: name, description, risk level, enabled),
+  exposed as `single tool list/add/inspect/enable/disable`. Deliberately
+  metadata-only: there is no execution engine yet to actually invoke a tool
+  on an agent's behalf (that's the Phase 4 orchestrator), so this doesn't
+  pretend tools are wired into any agent today.
+- **`single-core::secrets`** — an OS-keychain-backed secret store
+  (`SecretStore` trait, `SecretTool` impl using `secret-tool`/libsecret on
+  Linux — the same mechanism this machine's own existing MCP configs
+  already rely on), exposed as `single secret list/set/get/delete`. Values
+  never pass through `single-runtime`'s SQLite event log. macOS Keychain /
+  Windows Credential Manager backends are unimplemented; `SecretStore` is
+  the seam for them.
+- **`single-core::permissions`** — a `deny`/`ask`/`allow` rule model with
+  longest-prefix-match evaluation (`~/.config/single/permissions.toml`).
+  **Not exposed via CLI or IPC** — nothing in SingleCLI executes a tool or
+  agent action on the user's behalf yet, so a `single permission allow ...`
+  command would have no enforcement behind it. This stays a library-only
+  seam (with its own unit tests) until the Phase 4 orchestrator is a real
+  caller; shipping the CLI surface first would be exactly the "fake
+  integration" spec section 52 rules out.
+- **`single-core::skills`** — local directory-based skills under
+  `~/.config/single/skills/<name>/`, exposed as `single skill
+  list/install/remove/inspect`. `install` copies a local source directory
+  in; there's no network/marketplace fetch (that needs the Phase 6 plugin
+  system) and SingleCLI doesn't interpret a skill's contents yet
+  (translating it into each agent's native skill mechanism is future work).
+
+## Not in Phase 1 or 2
 
 Per the original spec's own §50 "Development Strategy" (build vertically,
 don't implement everything at once): agent orchestration/task graphs,
-shared memory subsystem, LSP management, skills, plugins, secrets vault,
-sandboxing/permission engine, workflows, provider abstraction, and process
-lifecycle management (start/stop/stream a running agent session) are all
+shared memory subsystem, a context engine, an LSP-to-agent sync layer, a
+plugin/marketplace system, permission *enforcement* (the model exists,
+nothing calls it), workflows, provider abstraction, and process lifecycle
+management (start/stop/stream a running agent session) are all
 future-phase work. Where the full spec's shape is visible in this
 codebase (e.g. `AgentAdapter`'s doc comment, `Envelope<T>` in
-`single-protocol`), it's a deliberate seam for that later work, not a
-stub pretending to be a finished feature.
+`single-protocol`, `permissions.rs`), it's a deliberate seam for that later
+work, not a stub pretending to be a finished feature.

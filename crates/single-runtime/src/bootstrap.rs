@@ -97,14 +97,25 @@ mod tests {
     }
 
     #[test]
-    fn perplexity_is_never_marked_already_installed_on_a_clean_machine() {
-        // pplx is genuinely unlikely to be on a fresh test machine; this
-        // pins the expectation that an unrecognized agent falls through to
-        // Install (dry run) rather than silently skipping it.
+    fn every_agent_gets_a_real_action_kind_based_on_actual_detection() {
+        // Doesn't assume any particular agent is/isn't installed on the
+        // machine running the test (this repo's own dev machine has since
+        // installed pplx for real via `single setup --yes`) — only that
+        // every agent resolves to a real, non-panicking outcome: detected
+        // agents report AlreadyInstalled, undetected ones with a verified
+        // bootstrap command report Install, and none of that touches the
+        // network since dry_run is true.
         let (_dir, ctx) = test_context();
         let plan = run(&ctx, true);
-        let perplexity = plan.actions.iter().find(|a| a.agent == "perplexity").unwrap();
-        assert_ne!(perplexity.action, SetupActionKind::AlreadyInstalled);
+        for action in &plan.actions {
+            let def = ctx.registry.iter().find(|a| a.name == action.agent).unwrap();
+            match action.action {
+                SetupActionKind::AlreadyInstalled => {}
+                SetupActionKind::Install => assert!(def.bootstrap_install.is_some(), "{}", action.agent),
+                SetupActionKind::Unsupported => assert!(def.bootstrap_install.is_none(), "{}", action.agent),
+                SetupActionKind::ConfigureIntegration => panic!("bootstrap::run never emits this"),
+            }
+        }
     }
 
     #[test]

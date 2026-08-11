@@ -62,6 +62,41 @@ pub fn save(path: &Path, servers: &[McpServerSpec]) -> Result<()> {
     std::fs::write(path, rendered).with_context(|| format!("writing {}", path.display()))
 }
 
+/// Adds or replaces a server by name, then persists the whole registry.
+pub fn add(path: &Path, server: McpServerSpec) -> Result<()> {
+    let mut servers = load(path)?;
+    servers.retain(|s| s.name != server.name);
+    servers.push(server);
+    save(path, &servers)
+}
+
+/// Removes a server by name. Returns `false` if no server had that name.
+pub fn remove(path: &Path, name: &str) -> Result<bool> {
+    let mut servers = load(path)?;
+    let before = servers.len();
+    servers.retain(|s| s.name != name);
+    let removed = servers.len() != before;
+    if removed {
+        save(path, &servers)?;
+    }
+    Ok(removed)
+}
+
+/// Sets `enabled` on a named server. Returns `false` if no server had that name.
+pub fn set_enabled(path: &Path, name: &str, enabled: bool) -> Result<bool> {
+    let mut servers = load(path)?;
+    let Some(server) = servers.iter_mut().find(|s| s.name == name) else {
+        return Ok(false);
+    };
+    server.enabled = enabled;
+    save(path, &servers)?;
+    Ok(true)
+}
+
+pub fn find(path: &Path, name: &str) -> Result<Option<McpServerSpec>> {
+    Ok(load(path)?.into_iter().find(|s| s.name == name))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -89,5 +124,49 @@ mod tests {
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].name, "custom");
         assert!(!loaded[0].enabled);
+    }
+
+    fn sample() -> McpServerSpec {
+        McpServerSpec {
+            name: "custom".into(),
+            command: "npx".into(),
+            args: vec!["-y".into(), "custom-server".into()],
+            env: BTreeMap::new(),
+            enabled: true,
+        }
+    }
+
+    #[test]
+    fn add_appends_and_replaces_by_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mcp.toml");
+        add(&path, sample()).unwrap();
+        assert_eq!(load(&path).unwrap().len(), 3); // git, memory defaults + custom
+        let mut replaced = sample();
+        replaced.command = "uvx".into();
+        add(&path, replaced).unwrap();
+        let loaded = load(&path).unwrap();
+        assert_eq!(loaded.len(), 3);
+        assert_eq!(find(&path, "custom").unwrap().unwrap().command, "uvx");
+    }
+
+    #[test]
+    fn remove_reports_whether_anything_was_removed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mcp.toml");
+        add(&path, sample()).unwrap();
+        assert!(remove(&path, "custom").unwrap());
+        assert!(!remove(&path, "custom").unwrap());
+        assert!(find(&path, "custom").unwrap().is_none());
+    }
+
+    #[test]
+    fn set_enabled_toggles_and_reports_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mcp.toml");
+        add(&path, sample()).unwrap();
+        assert!(set_enabled(&path, "custom", false).unwrap());
+        assert!(!find(&path, "custom").unwrap().unwrap().enabled);
+        assert!(!set_enabled(&path, "ghost", true).unwrap());
     }
 }
