@@ -1,16 +1,21 @@
-# SingleCLI architecture — Phase 1 + Phase 2 + Phase 3 + Phase 4
+# SingleCLI architecture — Phase 1 through 6 (partial) + auth + memory upgrades
 
 This describes what's actually built, not the full long-term vision (see
-the project's original request for that). Phase 1 implemented the
-foundation layer: config, registry, adapters, a runtime daemon, a CLI, and
-a minimal TUI dashboard. Phase 2 added the shared-capability registries:
-MCP CRUD, an LSP registry, a tool metadata registry, an OS-keychain secrets
-abstraction, and a local skills directory. Phase 3 added a SQLite-backed
-memory subsystem and a git/project context resolver. Phase 4 added real
-single-agent task execution: a task record, git worktree isolation, and
-actually invoking each agent CLI's non-interactive mode. A multi-agent
-task-graph orchestrator, a provider abstraction, plugins, and permission
-*enforcement* are still out of scope — see "Not in Phase 1-4" below.
+the project's original request for that).
+
+- **Phase 1** — foundation: config, registry, adapters, a runtime daemon, a CLI, a minimal TUI dashboard.
+- **Phase 2** — shared-capability registries: MCP CRUD, an LSP registry, a tool metadata registry, an OS-keychain secrets abstraction, a local skills directory.
+- **Phase 3** — a SQLite-backed scoped memory subsystem and a git/project context resolver.
+- **Phase 4** — real single-agent task execution: a task record, git worktree isolation, and actually invoking each agent CLI's non-interactive mode.
+- **Phase 5** — declarative custom agent adapters (`~/.config/single/agents/*.toml`): a new CLI agent gets real detection, MCP sync, and task execution without recompiling SingleCLI.
+- **Phase 6 (partial)** — a provider registry (OpenAI, Anthropic, ...) syncing API keys into the two agents with a verified config slot for them.
+- **Auth** — multi-account credential switching (`single account ...`) so one agent CLI (e.g. Claude Code) can have several logged-in accounts, swapped safely.
+- **Memory upgrades** — a SQLite knowledge graph (entities/observations/relations), plus optional Redis (working memory) and Qdrant (vector store) backends.
+
+A multi-agent task-graph orchestrator, full provider abstraction (model
+discovery, streaming, usage accounting), a plugin/marketplace system, and
+permission *enforcement* are still out of scope — see "Not in Phase 1-6"
+below.
 
 ```text
 single (CLI, no subcommand)          single <command>
@@ -224,16 +229,101 @@ SingleCLI itself doesn't perform. What's built is real for the one-task,
 one-agent case: a real subprocess, real git isolation, a real captured
 artifact, a real persisted record.
 
-## Not in Phase 1-4
+## Phase 5 additions: declarative custom agents
+
+- **`single-core::custom_agents`** — a TOML schema
+  (`~/.config/single/agents/<name>.toml`: `command`, `[install]`,
+  `[run]` mode/value, `[mcp]` format/config_path/key_path) describing a
+  new agent CLI without writing Rust.
+- **`single-agent-sdk::GenericAdapter`** — interprets that TOML as a real
+  `AgentAdapter`: detection via `discover()`, MCP sync for the two proven
+  shapes already used by the built-in adapters (`json_flat` = claude's
+  flat `mcpServers` object, `toml_flat` = codex's flat `[mcp_servers.x]`
+  tables, generalized to a configurable path/key), and prompt invocation
+  via a flag or subcommand. A format the two options don't cover is
+  refused (`mcp.format = "unsupported"`), not guessed at.
+- `for_agent_with_custom` is the single lookup every call site (doctor,
+  bootstrap, integrations, task, handlers) now goes through, so a custom
+  agent gets identical treatment to the five built-in ones everywhere.
+  Verified end-to-end with a real fake CLI script: appeared in `agent
+  list`/`inspect` with live detection, received real MCP config sync, and
+  completed a real `task run`.
+
+## Phase 6 additions (partial): provider registry
+
+- **`single-core::providers`** — metadata only (`providers.toml`: name,
+  env var name, base URL); the actual key lives in the OS keychain via
+  `single-core::secrets`, referenced by name.
+- **`single-agent-sdk::provider_sync`** — writes a provider's key into
+  only the two *verified* real config locations: Claude Code's
+  `~/.claude/settings.json` `env` object (a documented mechanism), and
+  Codex's `~/.codex/auth.json` `OPENAI_API_KEY` field (the only
+  provider-key slot that file actually has — any other env var name for
+  codex is refused, not guessed). Every other agent is refused with a
+  reason. This is the metadata/key-distribution layer of spec section 30,
+  not the full provider abstraction (no model discovery, streaming, or
+  usage accounting across providers).
+
+## Auth: multi-account credential switching
+
+- **`single-core::account`** — capture the *current* live login state of
+  an agent into a named profile, then switch between profiles later (the
+  "two Claude Code accounts" use case). Real, verified storage per agent:
+  - **claude**: full `~/.claude/.credentials.json` swap, plus a surgical
+    merge of only `oauthAccount`/`userID` in `~/.claude.json` — the rest
+    of that file (MCP servers, settings, everything else) is provably
+    untouched by the switch (see the test asserting an unrelated field
+    survives).
+  - **codex**: full `~/.codex/auth.json` swap (a pure auth file).
+  - **agy**: best-effort — captures `~/.gemini/antigravity-cli/
+    {jetski_state.pbtxt,settings.json}` (both mode 600, i.e. treated as
+    sensitive by the CLI itself), flagged `unverified_complete` since the
+    full login-state surface wasn't confirmed.
+  - **opencode, perplexity**: explicitly unsupported with a stated reason
+    (opencode's login state lives in a live multi-table SQLite database
+    shared with session history — too risky to snapshot at the file
+    level; perplexity isn't a coding agent) rather than a fabricated or
+    risky implementation.
+  - Every snapshot file is `0600`; every live-state write is backed up
+    first; no token contents are ever printed, logged, or recorded in the
+    event log — only agent/profile names and timestamps.
+
+## Memory upgrades: knowledge graph, Redis, Qdrant
+
+- **`single-runtime::knowledge_graph`** — entities with accumulated
+  observations plus typed relations, in the same SQLite database as
+  everything else. Mirrors the entity/observation/relation shape of
+  `@modelcontextprotocol/server-memory`, a proven convention already
+  configured in this project's own real MCP setup, rather than inventing
+  a new graph schema. Cascading deletes, idempotent entity creation,
+  substring query, full-graph dump. `single memory graph ...`.
+- **`single-runtime::redis_backend`** — optional (`SINGLE_REDIS_URL`)
+  TTL-capable key/value working memory: genuinely useful as fast shared
+  state *while several agent processes are concurrently running*, a role
+  SQLite's request-scoped connections don't fill well. Built and tested
+  against a real local Redis container; unit tests skip (not fail) when
+  no Redis is reachable. `single memory cache ...`.
+- **`single-runtime::qdrant_backend`** — optional (`SINGLE_QDRANT_URL`)
+  vector store: upsert/search/delete over Qdrant's real REST API, whose
+  shape was captured directly from a running local Qdrant instance during
+  development (not assumed from documentation). **Honest scope limit**:
+  this stores and searches *pre-computed* vectors — there is no
+  embeddings-provider call wired up to turn text into a vector yet, since
+  faking that with a pseudo-embedding would be exactly the kind of
+  fabricated capability this project avoids elsewhere. `single memory
+  vector ...`.
+
+## Not in Phase 1-6
 
 Per the original spec's own §50 "Development Strategy" (build vertically,
 don't implement everything at once): a multi-agent task-graph orchestrator,
 an event *stream* (vs. the persisted log that exists), an LSP-to-agent
 sync layer, a plugin/marketplace system, permission *enforcement* (the
-model exists, nothing calls it), semantic/embedding memory search,
-task-scoped context selection, workflows, a provider abstraction, and full
-process lifecycle management (start/stop/pause/resume/stream a running
-agent session, vs. Phase 4's one-shot blocking `run_prompt`) are all
+model exists, nothing calls it), a real embeddings pipeline (text →
+vector), task-scoped context selection, workflows, full model/provider
+abstraction (discovery, streaming, usage accounting), and full process
+lifecycle management (start/stop/pause/resume/stream a running agent
+session, vs. Phase 4's one-shot blocking `run_prompt`) are all
 future-phase work. Where the full spec's shape is visible in this
 codebase (e.g. `AgentAdapter`'s doc comment, `Envelope<T>` in
 `single-protocol`, `permissions.rs`), it's a deliberate seam for that
