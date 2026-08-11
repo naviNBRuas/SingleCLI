@@ -1,5 +1,5 @@
 use crate::context::Context;
-use crate::{bootstrap, doctor, integrations};
+use crate::{bootstrap, doctor, integrations, memory};
 use single_agent_sdk::adapters::for_agent;
 use single_core::registry::AgentDefinition;
 use single_protocol::{
@@ -146,6 +146,37 @@ fn dispatch(ctx: &Context, request: Request) -> anyhow::Result<ResponseData> {
                 .ok_or_else(|| anyhow::anyhow!("no such skill: {name}"))?;
             Ok(ResponseData::SkillContents(contents))
         }
+        Request::MemoryStore { scope, source, project, agent, task, title, content, confidence, expires_in_seconds } => {
+            let conn = memory_db(ctx)?;
+            let id = memory::store(&conn, memory::NewMemory {
+                scope, source, project, agent, task, title, content, confidence, expires_in_seconds,
+            })?;
+            Ok(ResponseData::MemoryId(id))
+        }
+        Request::MemorySearch { query, scope, project } => {
+            let conn = memory_db(ctx)?;
+            let entries = memory::search(&conn, &query, scope, project.as_deref())?;
+            Ok(ResponseData::MemoryEntries(entries))
+        }
+        Request::MemoryGet { id } => {
+            let conn = memory_db(ctx)?;
+            let entry = memory::get(&conn, id)?.ok_or_else(|| anyhow::anyhow!("no memory with id {id}"))?;
+            Ok(ResponseData::MemoryEntry(entry))
+        }
+        Request::MemoryDelete { id } => {
+            let conn = memory_db(ctx)?;
+            if !memory::delete(&conn, id)? {
+                anyhow::bail!("no memory with id {id}");
+            }
+            Ok(ResponseData::Empty)
+        }
+        Request::MemoryList { scope } => {
+            let conn = memory_db(ctx)?;
+            Ok(ResponseData::MemoryEntries(memory::list(&conn, scope)?))
+        }
+        Request::ContextShow { cwd } => {
+            Ok(ResponseData::Context(single_core::project_context::resolve(std::path::Path::new(&cwd))))
+        }
         Request::Setup { dry_run } => Ok(ResponseData::SetupPlan(bootstrap::run(ctx, dry_run))),
         Request::InstallIntegrations { dry_run } => {
             Ok(ResponseData::IntegrationResult(integrations::install_all(ctx, dry_run)?))
@@ -161,6 +192,12 @@ fn dispatch(ctx: &Context, request: Request) -> anyhow::Result<ResponseData> {
             Ok(ResponseData::Empty)
         }
     }
+}
+
+fn memory_db(ctx: &Context) -> anyhow::Result<rusqlite::Connection> {
+    let conn = crate::state::open(&ctx.dirs.db_path())?;
+    memory::ensure_schema(&conn)?;
+    Ok(conn)
 }
 
 fn status(ctx: &Context) -> RuntimeStatus {

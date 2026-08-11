@@ -1,13 +1,14 @@
-# SingleCLI architecture — Phase 1 + Phase 2
+# SingleCLI architecture — Phase 1 + Phase 2 + Phase 3
 
 This describes what's actually built, not the full long-term vision (see
 the project's original request for that). Phase 1 implemented the
 foundation layer: config, registry, adapters, a runtime daemon, a CLI, and
 a minimal TUI dashboard. Phase 2 added the shared-capability registries:
 MCP CRUD, an LSP registry, a tool metadata registry, an OS-keychain secrets
-abstraction, and a local skills directory. Orchestration, memory, a context
-engine, plugins, and sandboxing enforcement are still out of scope — see
-"Not in Phase 2" below.
+abstraction, and a local skills directory. Phase 3 added a SQLite-backed
+memory subsystem and a git/project context resolver. Orchestration, a
+provider abstraction, plugins, and permission *enforcement* are still out
+of scope — see "Not in Phase 1, 2, or 3" below.
 
 ```text
 single (CLI, no subcommand)          single <command>
@@ -155,15 +156,39 @@ investigation.
   system) and SingleCLI doesn't interpret a skill's contents yet
   (translating it into each agent's native skill mechanism is future work).
 
-## Not in Phase 1 or 2
+## Phase 3 additions
+
+- **`single-runtime::memory`** — SQLite-backed structured memory
+  (`~/.config/single/state/single.db`, `memories` table), scoped
+  (working/project/user/agent/task/long_term/knowledge) and provenance-
+  tagged (`MemorySource`: user_instruction/agent_output/tool_output/
+  project_content/external_content — spec sections 46-47's trust
+  classification). Exposed as `single memory store/search/get/delete/list`.
+  `search` is SQLite `LIKE` substring matching, **not semantic/embedding
+  search** — that needs a configurable embedding provider, which doesn't
+  exist until Phase 6's provider abstraction. Nothing auto-promotes agent
+  output into this store; every write is an explicit, caller-tagged call,
+  since there's no orchestrator yet that could do such promotion
+  responsibly (or irresponsibly).
+- **`single-core::project_context`** — resolves git state (repo root,
+  branch, changed files via real `git` subprocess calls) and finds project
+  documentation files (README/CLAUDE.md/AGENTS.md/CONTRIBUTING.md) for a
+  given directory. Exposed as `single context [cwd]`. This is an *ambient
+  snapshot*, not the full spec section 10 picture: "relevant source
+  files," "relevant memory," and "previous agent actions" require
+  relevance-ranking against an actual task, which needs the Phase 4
+  orchestrator to have a task to resolve context for — that selection
+  logic doesn't exist yet.
+
+## Not in Phase 1, 2, or 3
 
 Per the original spec's own §50 "Development Strategy" (build vertically,
-don't implement everything at once): agent orchestration/task graphs,
-shared memory subsystem, a context engine, an LSP-to-agent sync layer, a
-plugin/marketplace system, permission *enforcement* (the model exists,
-nothing calls it), workflows, provider abstraction, and process lifecycle
-management (start/stop/stream a running agent session) are all
-future-phase work. Where the full spec's shape is visible in this
-codebase (e.g. `AgentAdapter`'s doc comment, `Envelope<T>` in
-`single-protocol`, `permissions.rs`), it's a deliberate seam for that later
-work, not a stub pretending to be a finished feature.
+don't implement everything at once): agent orchestration/task graphs, an
+LSP-to-agent sync layer, a plugin/marketplace system, permission
+*enforcement* (the model exists, nothing calls it), semantic/embedding
+memory search, task-scoped context selection, workflows, a provider
+abstraction, and process lifecycle management (start/stop/stream a running
+agent session) are all future-phase work. Where the full spec's shape is
+visible in this codebase (e.g. `AgentAdapter`'s doc comment, `Envelope<T>`
+in `single-protocol`, `permissions.rs`), it's a deliberate seam for that
+later work, not a stub pretending to be a finished feature.

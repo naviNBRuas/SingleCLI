@@ -4,6 +4,7 @@ pub mod mcp;
 pub mod paths;
 pub mod permissions;
 pub mod profile;
+pub mod project_context;
 pub mod registry;
 pub mod secrets;
 pub mod skills;

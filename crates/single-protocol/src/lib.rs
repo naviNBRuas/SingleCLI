@@ -42,6 +42,22 @@ pub enum Request {
     SkillInstall { name: String, source_path: String },
     SkillRemove { name: String },
     SkillInspect { name: String },
+    MemoryStore {
+        scope: Option<MemoryScope>,
+        source: Option<MemorySource>,
+        project: Option<String>,
+        agent: Option<String>,
+        task: Option<String>,
+        title: String,
+        content: String,
+        confidence: Option<f64>,
+        expires_in_seconds: Option<i64>,
+    },
+    MemorySearch { query: String, scope: Option<MemoryScope>, project: Option<String> },
+    MemoryGet { id: i64 },
+    MemoryDelete { id: i64 },
+    MemoryList { scope: Option<MemoryScope> },
+    ContextShow { cwd: String },
     Setup { dry_run: bool },
     InstallIntegrations { dry_run: bool },
     UninstallIntegrations,
@@ -76,6 +92,10 @@ pub enum ResponseData {
     SecretValue(Option<String>),
     Skills(Vec<String>),
     SkillContents(Vec<String>),
+    MemoryId(i64),
+    MemoryEntry(MemoryEntry),
+    MemoryEntries(Vec<MemoryEntry>),
+    Context(ProjectContext),
     SetupPlan(SetupPlan),
     IntegrationResult(IntegrationResult),
     Profiles(Vec<String>),
@@ -270,4 +290,58 @@ pub struct ToolSpec {
     pub risk_level: RiskLevel,
     #[serde(default = "default_true")]
     pub enabled: bool,
+}
+
+/// Memory scope (spec section 9). Lives here so both `single-runtime`'s
+/// SQLite-backed store and `single-cli`'s request-building code share one
+/// definition without a circular dependency.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryScope {
+    Working,
+    Project,
+    User,
+    Agent,
+    Task,
+    LongTerm,
+    Knowledge,
+}
+
+/// Provenance classification (spec sections 46-47): the *claimed* source of
+/// a memory entry, as given by the caller — SingleCLI does not itself
+/// verify or upgrade this classification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemorySource {
+    UserInstruction,
+    AgentOutput,
+    ToolOutput,
+    ProjectContent,
+    ExternalContent,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemoryEntry {
+    pub id: i64,
+    pub scope: MemoryScope,
+    pub source: MemorySource,
+    pub project: Option<String>,
+    pub agent: Option<String>,
+    pub task: Option<String>,
+    pub title: String,
+    pub content: String,
+    pub confidence: f64,
+    pub created_at: String,
+    pub expires_at: Option<String>,
+}
+
+/// Repository/git state + project doc discovery for a working directory
+/// (spec section 10).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ProjectContext {
+    pub cwd: String,
+    pub repo_root: Option<String>,
+    pub branch: Option<String>,
+    pub changed_files: Vec<String>,
+    pub project_docs: Vec<String>,
 }

@@ -3,6 +3,7 @@ pub mod context;
 pub mod doctor;
 pub mod handlers;
 pub mod integrations;
+pub mod memory;
 pub mod server;
 pub mod state;
 

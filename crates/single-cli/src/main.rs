@@ -58,6 +58,18 @@ enum Command {
         #[command(subcommand)]
         action: SkillCommand,
     },
+    /// Manage the shared memory store.
+    Memory {
+        #[command(subcommand)]
+        action: MemoryCommand,
+    },
+    /// Show resolved project context (git state, project docs) for a directory.
+    Context {
+        /// Defaults to the current directory.
+        cwd: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
     /// Manage profiles.
     Profile {
         #[command(subcommand)]
@@ -190,6 +202,102 @@ enum SkillCommand {
     Install { name: String, source_path: String },
     Remove { name: String },
     Inspect { name: String },
+}
+
+#[derive(Subcommand)]
+enum MemoryCommand {
+    /// Store a memory entry.
+    Store {
+        title: String,
+        content: String,
+        #[arg(long, value_enum)]
+        scope: Option<MemoryScopeArg>,
+        #[arg(long, value_enum)]
+        source: Option<MemorySourceArg>,
+        #[arg(long)]
+        project: Option<String>,
+        #[arg(long)]
+        agent: Option<String>,
+        #[arg(long)]
+        task: Option<String>,
+        #[arg(long)]
+        confidence: Option<f64>,
+        /// Auto-delete after this many seconds.
+        #[arg(long)]
+        expires_in: Option<i64>,
+    },
+    /// Substring search over title + content (not semantic search — see docs/architecture.md).
+    Search {
+        query: String,
+        #[arg(long, value_enum)]
+        scope: Option<MemoryScopeArg>,
+        #[arg(long)]
+        project: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    Get {
+        id: i64,
+        #[arg(long)]
+        json: bool,
+    },
+    Delete {
+        id: i64,
+    },
+    List {
+        #[arg(long, value_enum)]
+        scope: Option<MemoryScopeArg>,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Clone, clap::ValueEnum)]
+enum MemoryScopeArg {
+    Working,
+    Project,
+    User,
+    Agent,
+    Task,
+    LongTerm,
+    Knowledge,
+}
+
+impl From<MemoryScopeArg> for single_protocol::MemoryScope {
+    fn from(v: MemoryScopeArg) -> Self {
+        use single_protocol::MemoryScope::*;
+        match v {
+            MemoryScopeArg::Working => Working,
+            MemoryScopeArg::Project => Project,
+            MemoryScopeArg::User => User,
+            MemoryScopeArg::Agent => Agent,
+            MemoryScopeArg::Task => Task,
+            MemoryScopeArg::LongTerm => LongTerm,
+            MemoryScopeArg::Knowledge => Knowledge,
+        }
+    }
+}
+
+#[derive(Clone, clap::ValueEnum)]
+enum MemorySourceArg {
+    UserInstruction,
+    AgentOutput,
+    ToolOutput,
+    ProjectContent,
+    ExternalContent,
+}
+
+impl From<MemorySourceArg> for single_protocol::MemorySource {
+    fn from(v: MemorySourceArg) -> Self {
+        use single_protocol::MemorySource::*;
+        match v {
+            MemorySourceArg::UserInstruction => UserInstruction,
+            MemorySourceArg::AgentOutput => AgentOutput,
+            MemorySourceArg::ToolOutput => ToolOutput,
+            MemorySourceArg::ProjectContent => ProjectContent,
+            MemorySourceArg::ExternalContent => ExternalContent,
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -345,6 +453,48 @@ fn main() -> anyhow::Result<()> {
                 render::print(response, false);
             }
         },
+        Command::Memory { action } => match action {
+            MemoryCommand::Store { title, content, scope, source, project, agent, task, confidence, expires_in } => {
+                let response = client::send(&socket_path, Request::MemoryStore {
+                    scope: scope.map(Into::into),
+                    source: source.map(Into::into),
+                    project,
+                    agent,
+                    task,
+                    title,
+                    content,
+                    confidence,
+                    expires_in_seconds: expires_in,
+                })?;
+                render::print(response, false);
+            }
+            MemoryCommand::Search { query, scope, project, json } => {
+                let response = client::send(&socket_path, Request::MemorySearch {
+                    query,
+                    scope: scope.map(Into::into),
+                    project,
+                })?;
+                render::print(response, json);
+            }
+            MemoryCommand::Get { id, json } => {
+                let response = client::send(&socket_path, Request::MemoryGet { id })?;
+                render::print(response, json);
+            }
+            MemoryCommand::Delete { id } => {
+                let response = client::send(&socket_path, Request::MemoryDelete { id })?;
+                render::print(response, false);
+            }
+            MemoryCommand::List { scope, json } => {
+                let response = client::send(&socket_path, Request::MemoryList { scope: scope.map(Into::into) })?;
+                render::print(response, json);
+            }
+        },
+        Command::Context { cwd, json } => {
+            let cwd = cwd.unwrap_or_else(|| ".".to_string());
+            let cwd = std::fs::canonicalize(&cwd).map(|p| p.display().to_string()).unwrap_or(cwd);
+            let response = client::send(&socket_path, Request::ContextShow { cwd })?;
+            render::print(response, json);
+        }
         Command::Profile { action } => match action {
             ProfileCommand::List => {
                 let response = client::send(&socket_path, Request::ProfileList)?;

@@ -149,6 +149,29 @@ fn print_data(data: ResponseData) {
                 println!("{entry}");
             }
         }
+        ResponseData::MemoryId(id) => println!("stored as #{id}"),
+        ResponseData::MemoryEntry(entry) => print_memory_entry(&entry),
+        ResponseData::MemoryEntries(entries) => {
+            if entries.is_empty() {
+                println!("(no matching memories)");
+            }
+            for entry in entries {
+                println!(
+                    "#{:<5} {:<10} {:<18} {}",
+                    entry.id,
+                    format!("{:?}", entry.scope).to_lowercase(),
+                    entry.created_at,
+                    entry.title
+                );
+            }
+        }
+        ResponseData::Context(ctx) => {
+            println!("cwd:       {}", ctx.cwd);
+            println!("repo root: {}", ctx.repo_root.as_deref().unwrap_or("(not a git repo)"));
+            println!("branch:    {}", ctx.branch.as_deref().unwrap_or("-"));
+            println!("changed:   {}", if ctx.changed_files.is_empty() { "(clean)".to_string() } else { ctx.changed_files.join(", ") });
+            println!("docs:      {}", if ctx.project_docs.is_empty() { "(none found)".to_string() } else { ctx.project_docs.join(", ") });
+        }
         ResponseData::SetupPlan(plan) => {
             let mode = if plan.dry_run { "dry run" } else { "applied" };
             println!("Setup plan ({mode}):");
@@ -177,6 +200,28 @@ fn print_data(data: ResponseData) {
             }
         }
         ResponseData::Empty => {}
+    }
+}
+
+fn print_memory_entry(entry: &single_protocol::MemoryEntry) {
+    println!("#{}", entry.id);
+    println!("  scope:      {:?}", entry.scope);
+    println!("  source:     {:?}", entry.source);
+    println!("  title:      {}", entry.title);
+    println!("  content:    {}", entry.content);
+    println!("  confidence: {}", entry.confidence);
+    println!("  created:    {}", entry.created_at);
+    if let Some(project) = &entry.project {
+        println!("  project:    {project}");
+    }
+    if let Some(agent) = &entry.agent {
+        println!("  agent:      {agent}");
+    }
+    if let Some(task) = &entry.task {
+        println!("  task:       {task}");
+    }
+    if let Some(expires) = &entry.expires_at {
+        println!("  expires:    {expires}");
     }
 }
 
