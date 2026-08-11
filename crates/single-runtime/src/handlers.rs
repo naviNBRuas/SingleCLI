@@ -222,6 +222,50 @@ fn dispatch(ctx: &Context, request: Request) -> anyhow::Result<ResponseData> {
             }
             Ok(ResponseData::Empty)
         }
+        Request::ProviderAdd { name, env_var_name, base_url } => {
+            let secret_name = format!("provider:{name}");
+            single_core::providers::add(&ctx.dirs.providers_registry_file(), single_protocol::ProviderSpec {
+                name, env_var_name, secret_name, base_url,
+            })?;
+            Ok(ResponseData::Empty)
+        }
+        Request::ProviderRemove { name } => {
+            if !single_core::providers::remove(&ctx.dirs.providers_registry_file(), &name)? {
+                anyhow::bail!("no such provider: {name}");
+            }
+            Ok(ResponseData::Empty)
+        }
+        Request::ProviderList => {
+            Ok(ResponseData::Providers(single_core::providers::load(&ctx.dirs.providers_registry_file())?))
+        }
+        Request::ProviderInspect { name } => {
+            let provider = single_core::providers::find(&ctx.dirs.providers_registry_file(), &name)?
+                .ok_or_else(|| anyhow::anyhow!("no such provider: {name}"))?;
+            Ok(ResponseData::Provider(provider))
+        }
+        Request::ProviderSetKey { name, value } => {
+            let provider = single_core::providers::find(&ctx.dirs.providers_registry_file(), &name)?
+                .ok_or_else(|| anyhow::anyhow!("no such provider: {name} (add it first with `single provider add`)"))?;
+            let store = single_core::secrets::SecretTool;
+            single_core::secrets::SecretStore::set(&store, &provider.secret_name, &value)?;
+            Ok(ResponseData::Empty)
+        }
+        Request::ProviderSync { name, agents, dry_run } => {
+            let provider = single_core::providers::find(&ctx.dirs.providers_registry_file(), &name)?
+                .ok_or_else(|| anyhow::anyhow!("no such provider: {name}"))?;
+            let store = single_core::secrets::SecretTool;
+            let value = single_core::secrets::SecretStore::get(&store, &provider.secret_name)?
+                .ok_or_else(|| anyhow::anyhow!("no key stored for provider '{name}'; run `single provider set-key {name} <value>` first"))?;
+            let home = integrations::home_dir()?;
+            let target_agents: Vec<String> = if agents.is_empty() { ctx.registry.iter().map(|a| a.name.clone()).collect() } else { agents };
+            let mut results = Vec::new();
+            for agent in target_agents {
+                let mut result = single_agent_sdk::provider_sync::sync(&agent, &home, &provider.env_var_name, &value, dry_run)?;
+                result.provider = name.clone();
+                results.push(result);
+            }
+            Ok(ResponseData::ProviderSyncResults(results))
+        }
         Request::Setup { dry_run } => Ok(ResponseData::SetupPlan(bootstrap::run(ctx, dry_run))),
         Request::InstallIntegrations { dry_run } => {
             Ok(ResponseData::IntegrationResult(integrations::install_all(ctx, dry_run)?))

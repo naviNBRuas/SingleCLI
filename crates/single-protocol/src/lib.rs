@@ -65,6 +65,12 @@ pub enum Request {
     AccountUse { agent: String, name: String },
     AccountList { agent: Option<String> },
     AccountRemove { agent: String, name: String },
+    ProviderAdd { name: String, env_var_name: String, base_url: Option<String> },
+    ProviderRemove { name: String },
+    ProviderList,
+    ProviderInspect { name: String },
+    ProviderSetKey { name: String, value: String },
+    ProviderSync { name: String, agents: Vec<String>, dry_run: bool },
     Setup { dry_run: bool },
     InstallIntegrations { dry_run: bool },
     UninstallIntegrations,
@@ -107,6 +113,9 @@ pub enum ResponseData {
     AccountProfile(AccountProfileInfo),
     AccountProfiles(Vec<AccountProfileInfo>),
     AccountSwitched(AccountSwitchResult),
+    Provider(ProviderSpec),
+    Providers(Vec<ProviderSpec>),
+    ProviderSyncResults(Vec<ProviderSyncResult>),
     Tasks(Vec<TaskRecord>),
     SetupPlan(SetupPlan),
     IntegrationResult(IntegrationResult),
@@ -405,6 +414,31 @@ pub struct AccountSwitchResult {
     pub agent: String,
     pub name: String,
     pub backed_up: Vec<String>,
+}
+
+/// A registered LLM provider (spec section 30): OpenAI, Anthropic,
+/// OpenCode Zen, a local model server, etc. The actual API key is never
+/// stored here — only a reference (`secret_name`) into the OS keychain
+/// (`single-core::secrets`), and `env_var_name` says which environment
+/// variable name that key needs to become for an agent to pick it up.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProviderSpec {
+    pub name: String,
+    pub env_var_name: String,
+    pub secret_name: String,
+    pub base_url: Option<String>,
+}
+
+/// The result of trying to sync one provider's key into one agent's real
+/// config. Mirrors `IntegrationWrite`'s shape/spirit.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProviderSyncResult {
+    pub provider: String,
+    pub agent: String,
+    pub config_path: String,
+    pub backup_path: Option<String>,
+    pub applied: bool,
+    pub detail: String,
 }
 
 /// Repository/git state + project doc discovery for a working directory

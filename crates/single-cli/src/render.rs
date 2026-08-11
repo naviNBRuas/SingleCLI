@@ -204,6 +204,24 @@ fn print_data(data: ResponseData) {
                 println!("  backup: {backup}");
             }
         }
+        ResponseData::Provider(p) => print_provider(&p),
+        ResponseData::Providers(providers) => {
+            if providers.is_empty() {
+                println!("(no providers registered)");
+            }
+            for p in providers {
+                println!("{:<16} {:<20} {}", p.name, p.env_var_name, p.base_url.as_deref().unwrap_or("-"));
+            }
+        }
+        ResponseData::ProviderSyncResults(results) => {
+            for r in results {
+                let mark = if r.applied { "✓" } else { "·" };
+                println!("  {mark} {:<12} {} — {}", r.agent, r.config_path, r.detail);
+                if let Some(backup) = r.backup_path {
+                    println!("      backup: {backup}");
+                }
+            }
+        }
         ResponseData::SetupPlan(plan) => {
             let mode = if plan.dry_run { "dry run" } else { "applied" };
             println!("Setup plan ({mode}):");
@@ -286,6 +304,15 @@ fn print_account_profile(info: &single_protocol::AccountProfileInfo) {
     println!("  captured: {}", info.captured_at);
     if info.unverified_complete {
         println!("  note:     best-effort capture — not confirmed to cover 100% of this agent's login state");
+    }
+}
+
+fn print_provider(p: &single_protocol::ProviderSpec) {
+    println!("{}", p.name);
+    println!("  env var:    {}", p.env_var_name);
+    println!("  secret:     {} (use `single secret get {}` to check, `single provider set-key` to change)", p.secret_name, p.secret_name);
+    if let Some(url) = &p.base_url {
+        println!("  base url:   {url}");
     }
 }
 

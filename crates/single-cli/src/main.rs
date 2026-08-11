@@ -85,6 +85,12 @@ enum Command {
         #[command(subcommand)]
         action: AccountCommand,
     },
+    /// Manage LLM provider API keys (OpenAI, Anthropic, OpenCode Zen, ...)
+    /// and sync them into agents that support custom providers.
+    Provider {
+        #[command(subcommand)]
+        action: ProviderCommand,
+    },
     /// Manage profiles.
     Profile {
         #[command(subcommand)]
@@ -313,6 +319,39 @@ impl From<MemorySourceArg> for single_protocol::MemorySource {
             MemorySourceArg::ExternalContent => ExternalContent,
         }
     }
+}
+
+#[derive(Subcommand)]
+enum ProviderCommand {
+    /// Register a provider. The key itself is set separately with `set-key`.
+    Add {
+        name: String,
+        /// The environment variable name an agent needs to see this key as, e.g. ANTHROPIC_API_KEY.
+        #[arg(long)]
+        env_var: String,
+        #[arg(long)]
+        base_url: Option<String>,
+    },
+    Remove { name: String },
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    Inspect {
+        name: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Store the actual API key in the OS keychain.
+    SetKey { name: String, value: String },
+    /// Write the key into the named agents' real config (all registered agents if none given).
+    Sync {
+        name: String,
+        #[arg(long, value_delimiter = ',')]
+        agents: Vec<String>,
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -576,6 +615,35 @@ fn main() -> anyhow::Result<()> {
             TaskCommand::Inspect { id, json } => {
                 let response = client::send(&socket_path, Request::TaskInspect { id })?;
                 render::print(response, json);
+            }
+        },
+        Command::Provider { action } => match action {
+            ProviderCommand::Add { name, env_var, base_url } => {
+                let response = client::send(&socket_path, Request::ProviderAdd { name, env_var_name: env_var, base_url })?;
+                render::print(response, false);
+            }
+            ProviderCommand::Remove { name } => {
+                let response = client::send(&socket_path, Request::ProviderRemove { name })?;
+                render::print(response, false);
+            }
+            ProviderCommand::List { json } => {
+                let response = client::send(&socket_path, Request::ProviderList)?;
+                render::print(response, json);
+            }
+            ProviderCommand::Inspect { name, json } => {
+                let response = client::send(&socket_path, Request::ProviderInspect { name })?;
+                render::print(response, json);
+            }
+            ProviderCommand::SetKey { name, value } => {
+                let response = client::send(&socket_path, Request::ProviderSetKey { name, value })?;
+                render::print(response, false);
+            }
+            ProviderCommand::Sync { name, agents, yes } => {
+                if !yes {
+                    eprintln!("Dry run (pass --yes to actually write the key into agent config files; backups are made either way).");
+                }
+                let response = client::send(&socket_path, Request::ProviderSync { name, agents, dry_run: !yes })?;
+                render::print(response, false);
             }
         },
         Command::Account { action } => match action {
