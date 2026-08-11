@@ -1061,6 +1061,7 @@ name = "single-core"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "directories",
  "serde",
  "serde_json",

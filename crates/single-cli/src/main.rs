@@ -78,6 +78,13 @@ enum Command {
         #[command(subcommand)]
         action: TaskCommand,
     },
+    /// Switch between multiple logged-in accounts for an agent (e.g. two
+    /// Claude Code accounts). Log in normally with the agent's own CLI
+    /// first, then capture that login state as a named profile.
+    Account {
+        #[command(subcommand)]
+        action: AccountCommand,
+    },
     /// Manage profiles.
     Profile {
         #[command(subcommand)]
@@ -306,6 +313,23 @@ impl From<MemorySourceArg> for single_protocol::MemorySource {
             MemorySourceArg::ExternalContent => ExternalContent,
         }
     }
+}
+
+#[derive(Subcommand)]
+enum AccountCommand {
+    /// Capture the agent's currently-live login state as a named profile.
+    /// Log in normally with the agent's own CLI first.
+    Capture { agent: String, name: String },
+    /// Swap a captured profile into place as the agent's live login state
+    /// (backs up whatever was live first).
+    Use { agent: String, name: String },
+    List {
+        #[arg(long)]
+        agent: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    Remove { agent: String, name: String },
 }
 
 #[derive(Subcommand)]
@@ -552,6 +576,24 @@ fn main() -> anyhow::Result<()> {
             TaskCommand::Inspect { id, json } => {
                 let response = client::send(&socket_path, Request::TaskInspect { id })?;
                 render::print(response, json);
+            }
+        },
+        Command::Account { action } => match action {
+            AccountCommand::Capture { agent, name } => {
+                let response = client::send(&socket_path, Request::AccountCapture { agent, name })?;
+                render::print(response, false);
+            }
+            AccountCommand::Use { agent, name } => {
+                let response = client::send(&socket_path, Request::AccountUse { agent, name })?;
+                render::print(response, false);
+            }
+            AccountCommand::List { agent, json } => {
+                let response = client::send(&socket_path, Request::AccountList { agent })?;
+                render::print(response, json);
+            }
+            AccountCommand::Remove { agent, name } => {
+                let response = client::send(&socket_path, Request::AccountRemove { agent, name })?;
+                render::print(response, false);
             }
         },
         Command::Profile { action } => match action {

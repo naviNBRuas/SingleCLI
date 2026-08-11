@@ -61,6 +61,10 @@ pub enum Request {
     TaskRun { description: String, agent: String, cwd: String, use_worktree: bool, timeout_secs: u64 },
     TaskList,
     TaskInspect { id: i64 },
+    AccountCapture { agent: String, name: String },
+    AccountUse { agent: String, name: String },
+    AccountList { agent: Option<String> },
+    AccountRemove { agent: String, name: String },
     Setup { dry_run: bool },
     InstallIntegrations { dry_run: bool },
     UninstallIntegrations,
@@ -100,6 +104,9 @@ pub enum ResponseData {
     MemoryEntries(Vec<MemoryEntry>),
     Context(ProjectContext),
     Task(TaskRecord),
+    AccountProfile(AccountProfileInfo),
+    AccountProfiles(Vec<AccountProfileInfo>),
+    AccountSwitched(AccountSwitchResult),
     Tasks(Vec<TaskRecord>),
     SetupPlan(SetupPlan),
     IntegrationResult(IntegrationResult),
@@ -379,6 +386,25 @@ pub struct RunOutcome {
     pub exit_code: Option<i32>,
     pub timed_out: bool,
     pub duration_ms: u128,
+}
+
+/// Metadata about a captured account-switch profile (spec section 41's
+/// "reusable agent definitions" adjacent concept, but scoped to login
+/// state rather than full persona config). Never carries token contents —
+/// see `single-core::account`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AccountProfileInfo {
+    pub agent: String,
+    pub name: String,
+    pub captured_at: String,
+    pub unverified_complete: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AccountSwitchResult {
+    pub agent: String,
+    pub name: String,
+    pub backed_up: Vec<String>,
 }
 
 /// Repository/git state + project doc discovery for a working directory

@@ -32,7 +32,7 @@ pub fn uninstall_all(ctx: &Context, dry_run: bool) -> Result<IntegrationResult> 
     Ok(IntegrationResult { dry_run, writes })
 }
 
-fn home_dir() -> Result<std::path::PathBuf> {
+pub fn home_dir() -> Result<std::path::PathBuf> {
     if let Ok(dir) = std::env::var("SINGLE_HOME_DIR") {
         return Ok(std::path::PathBuf::from(dir));
     }

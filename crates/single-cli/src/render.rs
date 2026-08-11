@@ -188,6 +188,22 @@ fn print_data(data: ResponseData) {
                 );
             }
         }
+        ResponseData::AccountProfile(info) => print_account_profile(&info),
+        ResponseData::AccountProfiles(profiles) => {
+            if profiles.is_empty() {
+                println!("(no captured account profiles)");
+            }
+            for p in profiles {
+                let flag = if p.unverified_complete { " (best-effort — not confirmed complete)" } else { "" };
+                println!("{:<10} {:<16} {}{flag}", p.agent, p.name, p.captured_at);
+            }
+        }
+        ResponseData::AccountSwitched(result) => {
+            println!("switched {} to profile '{}'", result.agent, result.name);
+            for backup in result.backed_up {
+                println!("  backup: {backup}");
+            }
+        }
         ResponseData::SetupPlan(plan) => {
             let mode = if plan.dry_run { "dry run" } else { "applied" };
             println!("Setup plan ({mode}):");
@@ -263,6 +279,14 @@ fn print_task(task: &single_protocol::TaskRecord) {
     }
     println!("  created:     {}", task.created_at);
     println!("  updated:     {}", task.updated_at);
+}
+
+fn print_account_profile(info: &single_protocol::AccountProfileInfo) {
+    println!("{}/{}", info.agent, info.name);
+    println!("  captured: {}", info.captured_at);
+    if info.unverified_complete {
+        println!("  note:     best-effort capture — not confirmed to cover 100% of this agent's login state");
+    }
 }
 
 fn install_summary(method: &InstallMethod) -> String {

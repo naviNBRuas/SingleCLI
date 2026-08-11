@@ -81,6 +81,18 @@ impl SingleDirs {
         self.root.join("skills")
     }
 
+    /// Where account-switch profile snapshots live. Deliberately outside
+    /// `state/` (which Phase 1 documented as cache/derived data) since
+    /// these can contain live credentials and are user-authored, not
+    /// regenerable.
+    pub fn accounts_dir(&self) -> PathBuf {
+        self.root.join("accounts")
+    }
+
+    pub fn providers_registry_file(&self) -> PathBuf {
+        self.root.join("providers.toml")
+    }
+
     /// Creates the subset of the directory tree Phase 1 needs. Never touches
     /// anything outside `self.root`.
     pub fn ensure_created(&self) -> Result<()> {

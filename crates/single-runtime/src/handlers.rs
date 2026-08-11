@@ -197,6 +197,31 @@ fn dispatch(ctx: &Context, request: Request) -> anyhow::Result<ResponseData> {
             let record = crate::task::get(&conn, id)?.ok_or_else(|| anyhow::anyhow!("no task with id {id}"))?;
             Ok(ResponseData::Task(record))
         }
+        Request::AccountCapture { agent, name } => {
+            let home = integrations::home_dir()?;
+            let info = single_core::account::capture(&ctx.dirs.accounts_dir(), &home, &agent, &name)?;
+            crate::state::open(&ctx.dirs.db_path())
+                .and_then(|conn| crate::state::record_event(&conn, "account.captured", &format!("{agent}/{name}")))
+                .ok();
+            Ok(ResponseData::AccountProfile(info))
+        }
+        Request::AccountUse { agent, name } => {
+            let home = integrations::home_dir()?;
+            let result = single_core::account::switch(&ctx.dirs.accounts_dir(), &home, &agent, &name)?;
+            crate::state::open(&ctx.dirs.db_path())
+                .and_then(|conn| crate::state::record_event(&conn, "account.switched", &format!("{agent}/{name}")))
+                .ok();
+            Ok(ResponseData::AccountSwitched(result))
+        }
+        Request::AccountList { agent } => {
+            Ok(ResponseData::AccountProfiles(single_core::account::list(&ctx.dirs.accounts_dir(), agent.as_deref())?))
+        }
+        Request::AccountRemove { agent, name } => {
+            if !single_core::account::remove(&ctx.dirs.accounts_dir(), &agent, &name)? {
+                anyhow::bail!("no profile named '{name}' for agent '{agent}'");
+            }
+            Ok(ResponseData::Empty)
+        }
         Request::Setup { dry_run } => Ok(ResponseData::SetupPlan(bootstrap::run(ctx, dry_run))),
         Request::InstallIntegrations { dry_run } => {
             Ok(ResponseData::IntegrationResult(integrations::install_all(ctx, dry_run)?))
