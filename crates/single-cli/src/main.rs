@@ -271,6 +271,36 @@ enum MemoryCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Knowledge-graph memory: entities, observations, and typed relations
+    /// between them — a "powerful shared brain" agents can build up over
+    /// time, distinct from the scoped store/search memory above.
+    Graph {
+        #[command(subcommand)]
+        action: KgCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum KgCommand {
+    CreateEntity { name: String, entity_type: String },
+    AddObservation { entity: String, content: String },
+    CreateRelation { from: String, to: String, relation_type: String },
+    DeleteEntity { name: String },
+    Get {
+        name: String,
+        #[arg(long)]
+        json: bool,
+    },
+    Query {
+        term: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Dump the full graph.
+    Show {
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Clone, clap::ValueEnum)]
@@ -588,6 +618,36 @@ fn main() -> anyhow::Result<()> {
                 let response = client::send(&socket_path, Request::MemoryList { scope: scope.map(Into::into) })?;
                 render::print(response, json);
             }
+            MemoryCommand::Graph { action } => match action {
+                KgCommand::CreateEntity { name, entity_type } => {
+                    let response = client::send(&socket_path, Request::KgCreateEntity { name, entity_type })?;
+                    render::print(response, false);
+                }
+                KgCommand::AddObservation { entity, content } => {
+                    let response = client::send(&socket_path, Request::KgAddObservation { entity, content })?;
+                    render::print(response, false);
+                }
+                KgCommand::CreateRelation { from, to, relation_type } => {
+                    let response = client::send(&socket_path, Request::KgCreateRelation { from, to, relation_type })?;
+                    render::print(response, false);
+                }
+                KgCommand::DeleteEntity { name } => {
+                    let response = client::send(&socket_path, Request::KgDeleteEntity { name })?;
+                    render::print(response, false);
+                }
+                KgCommand::Get { name, json } => {
+                    let response = client::send(&socket_path, Request::KgGetEntity { name })?;
+                    render::print(response, json);
+                }
+                KgCommand::Query { term, json } => {
+                    let response = client::send(&socket_path, Request::KgQuery { term })?;
+                    render::print(response, json);
+                }
+                KgCommand::Show { json } => {
+                    let response = client::send(&socket_path, Request::KgReadGraph)?;
+                    render::print(response, json);
+                }
+            },
         },
         Command::Context { cwd, json } => {
             let cwd = cwd.unwrap_or_else(|| ".".to_string());

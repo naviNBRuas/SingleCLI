@@ -222,6 +222,29 @@ fn print_data(data: ResponseData) {
                 }
             }
         }
+        ResponseData::KgEntityId(id) => println!("#{id}"),
+        ResponseData::KgEntity(e) => print_kg_entity(&e),
+        ResponseData::KgEntities(entities) => {
+            if entities.is_empty() {
+                println!("(no matching entities)");
+            }
+            for e in entities {
+                println!("{:<20} {:<14} {} observation(s)", e.name, e.entity_type, e.observations.len());
+            }
+        }
+        ResponseData::KgGraph(graph) => {
+            println!("Entities:");
+            for e in &graph.entities {
+                println!("  {:<20} {}", e.name, e.entity_type);
+                for o in &e.observations {
+                    println!("    - {o}");
+                }
+            }
+            println!("Relations:");
+            for r in &graph.relations {
+                println!("  {} --[{}]--> {}", r.from_entity, r.relation_type, r.to_entity);
+            }
+        }
         ResponseData::SetupPlan(plan) => {
             let mode = if plan.dry_run { "dry run" } else { "applied" };
             println!("Setup plan ({mode}):");
@@ -313,6 +336,15 @@ fn print_provider(p: &single_protocol::ProviderSpec) {
     println!("  secret:     {} (use `single secret get {}` to check, `single provider set-key` to change)", p.secret_name, p.secret_name);
     if let Some(url) = &p.base_url {
         println!("  base url:   {url}");
+    }
+}
+
+fn print_kg_entity(e: &single_protocol::KgEntity) {
+    println!("{}", e.name);
+    println!("  type:    {}", e.entity_type);
+    println!("  created: {}", e.created_at);
+    for o in &e.observations {
+        println!("  - {o}");
     }
 }
 

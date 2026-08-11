@@ -266,6 +266,41 @@ fn dispatch(ctx: &Context, request: Request) -> anyhow::Result<ResponseData> {
             }
             Ok(ResponseData::ProviderSyncResults(results))
         }
+        Request::KgCreateEntity { name, entity_type } => {
+            let conn = kg_db(ctx)?;
+            crate::knowledge_graph::create_entity(&conn, &name, &entity_type)?;
+            Ok(ResponseData::Empty)
+        }
+        Request::KgAddObservation { entity, content } => {
+            let conn = kg_db(ctx)?;
+            let id = crate::knowledge_graph::add_observation(&conn, &entity, &content)?;
+            Ok(ResponseData::KgEntityId(id))
+        }
+        Request::KgCreateRelation { from, to, relation_type } => {
+            let conn = kg_db(ctx)?;
+            let id = crate::knowledge_graph::create_relation(&conn, &from, &to, &relation_type)?;
+            Ok(ResponseData::KgEntityId(id))
+        }
+        Request::KgDeleteEntity { name } => {
+            let conn = kg_db(ctx)?;
+            if !crate::knowledge_graph::delete_entity(&conn, &name)? {
+                anyhow::bail!("no such entity: {name}");
+            }
+            Ok(ResponseData::Empty)
+        }
+        Request::KgGetEntity { name } => {
+            let conn = kg_db(ctx)?;
+            let entity = crate::knowledge_graph::get_entity(&conn, &name)?.ok_or_else(|| anyhow::anyhow!("no such entity: {name}"))?;
+            Ok(ResponseData::KgEntity(entity))
+        }
+        Request::KgQuery { term } => {
+            let conn = kg_db(ctx)?;
+            Ok(ResponseData::KgEntities(crate::knowledge_graph::query(&conn, &term)?))
+        }
+        Request::KgReadGraph => {
+            let conn = kg_db(ctx)?;
+            Ok(ResponseData::KgGraph(crate::knowledge_graph::read_graph(&conn)?))
+        }
         Request::Setup { dry_run } => Ok(ResponseData::SetupPlan(bootstrap::run(ctx, dry_run))),
         Request::InstallIntegrations { dry_run } => {
             Ok(ResponseData::IntegrationResult(integrations::install_all(ctx, dry_run)?))
@@ -292,6 +327,13 @@ fn memory_db(ctx: &Context) -> anyhow::Result<rusqlite::Connection> {
 fn task_db(ctx: &Context) -> anyhow::Result<rusqlite::Connection> {
     let conn = crate::state::open(&ctx.dirs.db_path())?;
     crate::task::ensure_schema(&conn)?;
+    Ok(conn)
+}
+
+fn kg_db(ctx: &Context) -> anyhow::Result<rusqlite::Connection> {
+    let conn = crate::state::open(&ctx.dirs.db_path())?;
+    conn.execute("PRAGMA foreign_keys = ON", [])?;
+    crate::knowledge_graph::ensure_schema(&conn)?;
     Ok(conn)
 }
 

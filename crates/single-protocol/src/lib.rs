@@ -71,6 +71,13 @@ pub enum Request {
     ProviderInspect { name: String },
     ProviderSetKey { name: String, value: String },
     ProviderSync { name: String, agents: Vec<String>, dry_run: bool },
+    KgCreateEntity { name: String, entity_type: String },
+    KgAddObservation { entity: String, content: String },
+    KgCreateRelation { from: String, to: String, relation_type: String },
+    KgDeleteEntity { name: String },
+    KgGetEntity { name: String },
+    KgQuery { term: String },
+    KgReadGraph,
     Setup { dry_run: bool },
     InstallIntegrations { dry_run: bool },
     UninstallIntegrations,
@@ -116,6 +123,10 @@ pub enum ResponseData {
     Provider(ProviderSpec),
     Providers(Vec<ProviderSpec>),
     ProviderSyncResults(Vec<ProviderSyncResult>),
+    KgEntityId(i64),
+    KgEntity(KgEntity),
+    KgEntities(Vec<KgEntity>),
+    KgGraph(KnowledgeGraphSnapshot),
     Tasks(Vec<TaskRecord>),
     SetupPlan(SetupPlan),
     IntegrationResult(IntegrationResult),
@@ -414,6 +425,32 @@ pub struct AccountSwitchResult {
     pub agent: String,
     pub name: String,
     pub backed_up: Vec<String>,
+}
+
+/// A knowledge-graph entity with its accumulated observations (the same
+/// entity/observation/relation shape as the widely-used MCP memory-server
+/// convention already configured on this project's own reference machine
+/// — a real, proven pattern, not invented for this project).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KgEntity {
+    pub name: String,
+    pub entity_type: String,
+    pub observations: Vec<String>,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KgRelation {
+    pub from_entity: String,
+    pub to_entity: String,
+    pub relation_type: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct KnowledgeGraphSnapshot {
+    pub entities: Vec<KgEntity>,
+    pub relations: Vec<KgRelation>,
 }
 
 /// A registered LLM provider (spec section 30): OpenAI, Anthropic,
