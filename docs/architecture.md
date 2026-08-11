@@ -1,4 +1,4 @@
-# SingleCLI architecture — Phase 1 + Phase 2 + Phase 3
+# SingleCLI architecture — Phase 1 + Phase 2 + Phase 3 + Phase 4
 
 This describes what's actually built, not the full long-term vision (see
 the project's original request for that). Phase 1 implemented the
@@ -6,9 +6,11 @@ foundation layer: config, registry, adapters, a runtime daemon, a CLI, and
 a minimal TUI dashboard. Phase 2 added the shared-capability registries:
 MCP CRUD, an LSP registry, a tool metadata registry, an OS-keychain secrets
 abstraction, and a local skills directory. Phase 3 added a SQLite-backed
-memory subsystem and a git/project context resolver. Orchestration, a
-provider abstraction, plugins, and permission *enforcement* are still out
-of scope — see "Not in Phase 1, 2, or 3" below.
+memory subsystem and a git/project context resolver. Phase 4 added real
+single-agent task execution: a task record, git worktree isolation, and
+actually invoking each agent CLI's non-interactive mode. A multi-agent
+task-graph orchestrator, a provider abstraction, plugins, and permission
+*enforcement* are still out of scope — see "Not in Phase 1-4" below.
 
 ```text
 single (CLI, no subcommand)          single <command>
@@ -180,15 +182,59 @@ investigation.
   orchestrator to have a task to resolve context for — that selection
   logic doesn't exist yet.
 
-## Not in Phase 1, 2, or 3
+## Phase 4 additions
+
+- **`single-agent-sdk::adapter::run_prompt`** — a real, blocking,
+  non-interactive invocation of each agent's own CLI: `claude -p`, `codex
+  exec`, `opencode run --dir`, `agy -p` (each flag confirmed against that
+  CLI's own `--help` on the reference machine — see the doc comments on
+  each `impl AgentAdapter`). No built-in `std::process` timeout exists, so
+  `single-agent-sdk::run::run_command` polls `try_wait` and kills the
+  child past a deadline. `perplexity` keeps the trait's default
+  "unsupported" response — `pplx` isn't a coding agent (see
+  `docs/install-methods.md`).
+- **`single-core::worktree`** — real `git worktree add`/`remove`/`list`
+  subprocess calls, tested against real temporary git repos (not mocked).
+  One worktree per task, branch named `single/task-<id>`.
+- **`single-runtime::task`** — a `tasks` SQLite table and a synchronous
+  `run()` that ties the above together: creates the task record,
+  optionally isolates it in a fresh worktree, invokes the agent, captures
+  stdout+stderr as an artifact file under
+  `~/.config/single/state/artifacts/`, and records the final status.
+  Exposed as `single task run/list/inspect`. Every stage also writes to
+  the existing generic `events` table (`task.created`/`task.started`/
+  `task.completed`/`task.failed`) so a run is auditable per spec section 32,
+  even without a live event *stream*.
+- **Client-side fix**: `single-cli`'s socket client used to apply a flat
+  5-second read timeout to every request, including `task run`, which can
+  legitimately take minutes. On a timeout it fell back to the in-process
+  path — which, for a request *already sent to a live daemon*, would have
+  silently re-run the same task a second time. Fixed by only allowing
+  fallback before a request is written to the socket; once sent, the
+  client waits it out rather than risking a duplicate side-effecting run.
+  (`crates/single-cli/src/client.rs`)
+
+**What Phase 4 is honestly not**: there is no task *graph* (DAG), no
+automatic agent selection, no parallel multi-agent coordination, and no
+background/cancellable execution — `single task run` blocks the calling
+request until the agent finishes or its timeout fires. Those need the
+runtime to hold live process state across multiple requests (deferred
+since ADR 0001) or a reasoning step to pick agents (spec section 20) that
+SingleCLI itself doesn't perform. What's built is real for the one-task,
+one-agent case: a real subprocess, real git isolation, a real captured
+artifact, a real persisted record.
+
+## Not in Phase 1-4
 
 Per the original spec's own §50 "Development Strategy" (build vertically,
-don't implement everything at once): agent orchestration/task graphs, an
-LSP-to-agent sync layer, a plugin/marketplace system, permission
-*enforcement* (the model exists, nothing calls it), semantic/embedding
-memory search, task-scoped context selection, workflows, a provider
-abstraction, and process lifecycle management (start/stop/stream a running
-agent session) are all future-phase work. Where the full spec's shape is
-visible in this codebase (e.g. `AgentAdapter`'s doc comment, `Envelope<T>`
-in `single-protocol`, `permissions.rs`), it's a deliberate seam for that
+don't implement everything at once): a multi-agent task-graph orchestrator,
+an event *stream* (vs. the persisted log that exists), an LSP-to-agent
+sync layer, a plugin/marketplace system, permission *enforcement* (the
+model exists, nothing calls it), semantic/embedding memory search,
+task-scoped context selection, workflows, a provider abstraction, and full
+process lifecycle management (start/stop/pause/resume/stream a running
+agent session, vs. Phase 4's one-shot blocking `run_prompt`) are all
+future-phase work. Where the full spec's shape is visible in this
+codebase (e.g. `AgentAdapter`'s doc comment, `Envelope<T>` in
+`single-protocol`, `permissions.rs`), it's a deliberate seam for that
 later work, not a stub pretending to be a finished feature.

@@ -177,6 +177,26 @@ fn dispatch(ctx: &Context, request: Request) -> anyhow::Result<ResponseData> {
         Request::ContextShow { cwd } => {
             Ok(ResponseData::Context(single_core::project_context::resolve(std::path::Path::new(&cwd))))
         }
+        Request::TaskRun { description, agent, cwd, use_worktree, timeout_secs } => {
+            let conn = task_db(ctx)?;
+            let record = crate::task::run(&conn, ctx, crate::task::RunTaskOptions {
+                description: &description,
+                agent: &agent,
+                cwd: std::path::Path::new(&cwd),
+                use_worktree,
+                timeout: std::time::Duration::from_secs(timeout_secs),
+            })?;
+            Ok(ResponseData::Task(record))
+        }
+        Request::TaskList => {
+            let conn = task_db(ctx)?;
+            Ok(ResponseData::Tasks(crate::task::list(&conn)?))
+        }
+        Request::TaskInspect { id } => {
+            let conn = task_db(ctx)?;
+            let record = crate::task::get(&conn, id)?.ok_or_else(|| anyhow::anyhow!("no task with id {id}"))?;
+            Ok(ResponseData::Task(record))
+        }
         Request::Setup { dry_run } => Ok(ResponseData::SetupPlan(bootstrap::run(ctx, dry_run))),
         Request::InstallIntegrations { dry_run } => {
             Ok(ResponseData::IntegrationResult(integrations::install_all(ctx, dry_run)?))
@@ -197,6 +217,12 @@ fn dispatch(ctx: &Context, request: Request) -> anyhow::Result<ResponseData> {
 fn memory_db(ctx: &Context) -> anyhow::Result<rusqlite::Connection> {
     let conn = crate::state::open(&ctx.dirs.db_path())?;
     memory::ensure_schema(&conn)?;
+    Ok(conn)
+}
+
+fn task_db(ctx: &Context) -> anyhow::Result<rusqlite::Connection> {
+    let conn = crate::state::open(&ctx.dirs.db_path())?;
+    crate::task::ensure_schema(&conn)?;
     Ok(conn)
 }
 

@@ -1,10 +1,11 @@
-use crate::adapter::AgentAdapter;
+use crate::adapter::{run_with_prompt_flag, AgentAdapter};
 use crate::backup::backup_before_write;
 use crate::formats;
-use single_protocol::McpServerSpec;
+use crate::run::run_command;
 use anyhow::Result;
-use single_protocol::IntegrationWrite;
+use single_protocol::{IntegrationWrite, McpServerSpec, RunOutcome};
 use std::path::Path;
+use std::time::Duration;
 
 pub struct ClaudeAdapter;
 pub struct CodexAdapter;
@@ -34,6 +35,12 @@ impl AgentAdapter for ClaudeAdapter {
             None => Ok(unsupported_write("claude", home, "no config file present; nothing to remove")),
         }
     }
+
+    /// `claude -p "<prompt>"` — confirmed non-interactive print mode via
+    /// `claude --help` on the reference machine.
+    fn run_prompt(&self, cwd: &Path, prompt: &str, timeout: Duration) -> Result<RunOutcome> {
+        run_with_prompt_flag("claude", cwd, prompt, timeout)
+    }
 }
 
 impl AgentAdapter for CodexAdapter {
@@ -57,6 +64,12 @@ impl AgentAdapter for CodexAdapter {
             }
             None => Ok(unsupported_write("codex", home, "no config file present; nothing to remove")),
         }
+    }
+
+    /// `codex exec "<prompt>"` — confirmed non-interactive mode via
+    /// `codex exec --help` on the reference machine.
+    fn run_prompt(&self, cwd: &Path, prompt: &str, timeout: Duration) -> Result<RunOutcome> {
+        run_command("codex", &["exec".to_string(), prompt.to_string()], cwd, timeout)
     }
 }
 
@@ -82,6 +95,18 @@ impl AgentAdapter for OpenCodeAdapter {
             None => Ok(unsupported_write("opencode", home, "no config file present; nothing to remove")),
         }
     }
+
+    /// `opencode run "<prompt>" --dir <cwd>` — confirmed non-interactive
+    /// mode and `--dir` flag via `opencode run --help` on the reference
+    /// machine.
+    fn run_prompt(&self, cwd: &Path, prompt: &str, timeout: Duration) -> Result<RunOutcome> {
+        run_command(
+            "opencode",
+            &["run".to_string(), prompt.to_string(), "--dir".to_string(), cwd.display().to_string()],
+            cwd,
+            timeout,
+        )
+    }
 }
 
 impl AgentAdapter for AgyAdapter {
@@ -95,6 +120,12 @@ impl AgentAdapter for AgyAdapter {
 
     fn remove_mcp(&self, home: &Path, _names: &[String], _dry_run: bool) -> Result<IntegrationWrite> {
         Ok(unsupported_write("agy", home, "no on-disk MCP config location has been identified for agy"))
+    }
+
+    /// `agy -p "<prompt>"` — confirmed non-interactive print mode via
+    /// `agy --help` on the reference machine.
+    fn run_prompt(&self, cwd: &Path, prompt: &str, timeout: Duration) -> Result<RunOutcome> {
+        run_with_prompt_flag("agy", cwd, prompt, timeout)
     }
 }
 
@@ -231,5 +262,15 @@ mod tests {
     fn for_agent_returns_none_for_unknown_name() {
         assert!(for_agent("nonexistent").is_none());
         assert!(for_agent("claude").is_some());
+    }
+
+    #[test]
+    fn perplexity_run_prompt_is_unsupported_by_default() {
+        // pplx is a Search API client, not a coding agent — it should fall
+        // through to AgentAdapter's default "unsupported" implementation
+        // rather than silently claiming to run a prompt against it.
+        let dir = tempfile::tempdir().unwrap();
+        let adapter = PerplexityAdapter;
+        assert!(adapter.run_prompt(dir.path(), "hello", Duration::from_secs(1)).is_err());
     }
 }

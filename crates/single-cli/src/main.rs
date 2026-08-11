@@ -70,6 +70,14 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Run a task: delegate a prompt to one real agent CLI, synchronously.
+    ///
+    /// Not a multi-agent orchestrator yet (see docs/architecture.md) — one
+    /// task, one agent, blocking until it finishes or times out.
+    Task {
+        #[command(subcommand)]
+        action: TaskCommand,
+    },
     /// Manage profiles.
     Profile {
         #[command(subcommand)]
@@ -301,6 +309,35 @@ impl From<MemorySourceArg> for single_protocol::MemorySource {
 }
 
 #[derive(Subcommand)]
+enum TaskCommand {
+    /// Run a prompt against a real agent CLI and block until it finishes.
+    Run {
+        description: String,
+        #[arg(long)]
+        agent: String,
+        /// Directory to run in; defaults to the current directory.
+        #[arg(long)]
+        cwd: Option<String>,
+        /// Isolate the run in a new git worktree + branch (requires `cwd` to be inside a git repo).
+        #[arg(long)]
+        worktree: bool,
+        #[arg(long, default_value = "300")]
+        timeout_secs: u64,
+        #[arg(long)]
+        json: bool,
+    },
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    Inspect {
+        id: i64,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
 enum ProfileCommand {
     List,
     Use { name: String },
@@ -495,6 +532,28 @@ fn main() -> anyhow::Result<()> {
             let response = client::send(&socket_path, Request::ContextShow { cwd })?;
             render::print(response, json);
         }
+        Command::Task { action } => match action {
+            TaskCommand::Run { description, agent, cwd, worktree, timeout_secs, json } => {
+                let cwd = cwd.unwrap_or_else(|| ".".to_string());
+                let cwd = std::fs::canonicalize(&cwd).map(|p| p.display().to_string()).unwrap_or(cwd);
+                let response = client::send(&socket_path, Request::TaskRun {
+                    description,
+                    agent,
+                    cwd,
+                    use_worktree: worktree,
+                    timeout_secs,
+                })?;
+                render::print(response, json);
+            }
+            TaskCommand::List { json } => {
+                let response = client::send(&socket_path, Request::TaskList)?;
+                render::print(response, json);
+            }
+            TaskCommand::Inspect { id, json } => {
+                let response = client::send(&socket_path, Request::TaskInspect { id })?;
+                render::print(response, json);
+            }
+        },
         Command::Profile { action } => match action {
             ProfileCommand::List => {
                 let response = client::send(&socket_path, Request::ProfileList)?;

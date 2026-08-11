@@ -172,6 +172,22 @@ fn print_data(data: ResponseData) {
             println!("changed:   {}", if ctx.changed_files.is_empty() { "(clean)".to_string() } else { ctx.changed_files.join(", ") });
             println!("docs:      {}", if ctx.project_docs.is_empty() { "(none found)".to_string() } else { ctx.project_docs.join(", ") });
         }
+        ResponseData::Task(task) => print_task(&task),
+        ResponseData::Tasks(tasks) => {
+            if tasks.is_empty() {
+                println!("(no tasks)");
+            }
+            for task in tasks {
+                println!(
+                    "#{:<5} {:<10} {:<10} {:<18} {}",
+                    task.id,
+                    format!("{:?}", task.status).to_lowercase(),
+                    task.agent,
+                    task.created_at,
+                    task.description
+                );
+            }
+        }
         ResponseData::SetupPlan(plan) => {
             let mode = if plan.dry_run { "dry run" } else { "applied" };
             println!("Setup plan ({mode}):");
@@ -223,6 +239,30 @@ fn print_memory_entry(entry: &single_protocol::MemoryEntry) {
     if let Some(expires) = &entry.expires_at {
         println!("  expires:    {expires}");
     }
+}
+
+fn print_task(task: &single_protocol::TaskRecord) {
+    println!("#{}", task.id);
+    println!("  status:      {:?}", task.status);
+    println!("  agent:       {}", task.agent);
+    println!("  description: {}", task.description);
+    if let Some(worktree) = &task.worktree_path {
+        println!("  worktree:    {worktree}");
+    }
+    if let Some(artifact) = &task.artifact_path {
+        println!("  artifact:    {artifact}");
+    }
+    if let Some(code) = task.exit_code {
+        println!("  exit code:   {code}");
+    }
+    if task.timed_out {
+        println!("  timed out:   true");
+    }
+    if let Some(summary) = &task.summary {
+        println!("  summary:     {summary}");
+    }
+    println!("  created:     {}", task.created_at);
+    println!("  updated:     {}", task.updated_at);
 }
 
 fn install_summary(method: &InstallMethod) -> String {

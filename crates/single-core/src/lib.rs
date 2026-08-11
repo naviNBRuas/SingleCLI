@@ -9,6 +9,7 @@ pub mod registry;
 pub mod secrets;
 pub mod skills;
 pub mod tools;
+pub mod worktree;
 
 pub use config::{merge_layers, resolve, ConfigLayer, ResolvedConfig};
 pub use paths::SingleDirs;

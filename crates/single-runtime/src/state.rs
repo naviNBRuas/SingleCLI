@@ -13,6 +13,11 @@ pub fn open(db_path: &Path) -> Result<Connection> {
         std::fs::create_dir_all(parent)?;
     }
     let conn = Connection::open(db_path).with_context(|| format!("opening {}", db_path.display()))?;
+    ensure_events_schema(&conn)?;
+    Ok(conn)
+}
+
+pub fn ensure_events_schema(conn: &Connection) -> Result<()> {
     conn.execute(
         "CREATE TABLE IF NOT EXISTS events (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -22,7 +27,7 @@ pub fn open(db_path: &Path) -> Result<Connection> {
         )",
         (),
     )?;
-    Ok(conn)
+    Ok(())
 }
 
 pub fn record_event(conn: &Connection, kind: &str, detail: &str) -> Result<()> {

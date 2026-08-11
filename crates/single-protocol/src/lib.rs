@@ -58,6 +58,9 @@ pub enum Request {
     MemoryDelete { id: i64 },
     MemoryList { scope: Option<MemoryScope> },
     ContextShow { cwd: String },
+    TaskRun { description: String, agent: String, cwd: String, use_worktree: bool, timeout_secs: u64 },
+    TaskList,
+    TaskInspect { id: i64 },
     Setup { dry_run: bool },
     InstallIntegrations { dry_run: bool },
     UninstallIntegrations,
@@ -96,6 +99,8 @@ pub enum ResponseData {
     MemoryEntry(MemoryEntry),
     MemoryEntries(Vec<MemoryEntry>),
     Context(ProjectContext),
+    Task(TaskRecord),
+    Tasks(Vec<TaskRecord>),
     SetupPlan(SetupPlan),
     IntegrationResult(IntegrationResult),
     Profiles(Vec<String>),
@@ -333,6 +338,47 @@ pub struct MemoryEntry {
     pub confidence: f64,
     pub created_at: String,
     pub expires_at: Option<String>,
+}
+
+/// Task lifecycle status (spec section 17's TaskCreated/TaskStarted/
+/// TaskCompleted/TaskFailed events, collapsed into a single current-state
+/// field — Phase 4 doesn't yet persist the full event sequence as
+/// separately queryable rows beyond the generic runtime event log).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskStatus {
+    Created,
+    Running,
+    Completed,
+    Failed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskRecord {
+    pub id: i64,
+    pub description: String,
+    pub agent: String,
+    pub status: TaskStatus,
+    pub worktree_path: Option<String>,
+    pub artifact_path: Option<String>,
+    pub exit_code: Option<i32>,
+    pub timed_out: bool,
+    pub summary: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// The result of running an agent CLI non-interactively against a single
+/// prompt (spec section 39's `send`/lifecycle, scoped down to Phase 4's
+/// synchronous one-shot invocation — see `single-agent-sdk::adapter` docs).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RunOutcome {
+    pub success: bool,
+    pub stdout: String,
+    pub stderr: String,
+    pub exit_code: Option<i32>,
+    pub timed_out: bool,
+    pub duration_ms: u128,
 }
 
 /// Repository/git state + project doc discovery for a working directory

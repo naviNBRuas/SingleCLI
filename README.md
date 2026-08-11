@@ -39,31 +39,40 @@ single mcp list         # the unified MCP registry
 single setup            # plan: install missing agent CLIs (dry run by default)
 single setup --yes       # actually run vendor install scripts + sync config
 single install-integrations --yes   # sync MCP config into every agent, with backups
+single task run "add a .gitignore" --agent claude   # delegate a prompt to a real agent, synchronously
+single task list
 single                  # launch the TUI dashboard
 ```
 
 Every list/inspect command supports `--json` for scripting.
 
-## What's implemented (Phase 1)
+## What's implemented
 
-- A real agent registry for `claude`, `codex`, `opencode`, `agy`, and
-  `perplexity` (`pplx`) — detection, versions, and capabilities are
-  observed from real config files and `--version` output, not invented.
-- A unified MCP registry (`~/.config/single/mcp.toml`) synced into each
-  agent's native config format, with a backup taken before every write.
-- Vendor-verified bootstrap installers (`single setup`) for all five —
-  sources cited in `docs/install-methods.md`.
-- A headless runtime daemon (`single-runtimed`) over a Unix socket, a CLI
-  client, and a TUI dashboard that talks to the daemon over that same
-  socket.
-- Profile switching and config precedence (global → profile → project).
+- **Phase 1** — a real agent registry for `claude`, `codex`, `opencode`,
+  `agy`, and `perplexity` (`pplx`) with detection/versions/capabilities
+  observed from real config files and `--version` output; a unified MCP
+  registry synced into each agent's native config format with backups;
+  vendor-verified bootstrap installers (`single setup`); a headless
+  runtime daemon over a Unix socket with a CLI and TUI client; profiles
+  and config precedence.
+- **Phase 2** — CRUD for the MCP/LSP/tool registries, an OS-keychain
+  secrets abstraction, a deny/ask/allow permission model (data only, not
+  yet enforced), and a local skills directory.
+- **Phase 3** — a SQLite-backed, scoped, provenance-tagged memory store,
+  and a git/project context resolver.
+- **Phase 4** — real single-agent task execution: `single task run`
+  invokes an agent CLI's actual non-interactive mode (`claude -p`, `codex
+  exec`, `opencode run`, `agy -p`), optionally isolated in a real git
+  worktree, captures the output as an artifact, and records the result.
 
 ## What's not (yet)
 
-Agent orchestration/task graphs, shared memory, LSP management, skills,
-plugins, a secrets vault, sandboxing, and process lifecycle management
-(actually running/streaming an agent session through SingleCLI) are later
-phases. See `docs/architecture.md`'s "Not in Phase 1" section.
+A multi-agent task-graph orchestrator (parallel execution, agent-to-agent
+communication, automatic agent selection), permission *enforcement* (the
+model exists, nothing calls it), LSP syncing into agents, a plugin
+marketplace, semantic memory search, workflows, and a provider abstraction
+are later work. See `docs/architecture.md`'s "Not in Phase 1-4" section
+for the full, honest list.
 
 ## Development
 
