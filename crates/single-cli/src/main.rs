@@ -121,6 +121,14 @@ enum AgentCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Install a single agent (dry run by default).
+    Install {
+        name: String,
+        #[arg(long)]
+        yes: bool,
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -521,6 +529,13 @@ fn main() -> anyhow::Result<()> {
             }
             AgentCommand::Inspect { name, json } => {
                 let response = client::send(&socket_path, Request::AgentInspect { name })?;
+                render::print(response, json);
+            }
+            AgentCommand::Install { name, yes, json } => {
+                if !yes {
+                    eprintln!("Dry run (pass --yes to actually run the install command).");
+                }
+                let response = client::send(&socket_path, Request::AgentInstall { name, dry_run: !yes })?;
                 render::print(response, json);
             }
         },

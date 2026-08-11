@@ -1,4 +1,86 @@
+pub mod app;
 pub mod client;
-pub mod dashboard;
+pub mod ui;
 
-pub use dashboard::run;
+use anyhow::Result;
+use app::{App, InstallFlow, Tab};
+use crossterm::event::{self, Event, KeyCode, KeyModifiers};
+use crossterm::execute;
+use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
+use std::path::Path;
+use std::time::Duration;
+
+/// Runs the SingleCLI dashboard: a tabbed control center over the runtime
+/// socket (Agents/Tasks/MCP/Providers/Accounts/Memory/Help), including an
+/// interactive in-TUI agent-install flow.
+pub fn run(socket_path: &Path) -> Result<()> {
+    enable_raw_mode()?;
+    let mut stdout = std::io::stdout();
+    execute!(stdout, EnterAlternateScreen)?;
+    let backend = ratatui::backend::CrosstermBackend::new(stdout);
+    let mut terminal = ratatui::Terminal::new(backend)?;
+
+    let mut app = App::new(socket_path);
+    let result = event_loop(&mut terminal, &mut app);
+
+    disable_raw_mode()?;
+    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    result
+}
+
+fn event_loop(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> Result<()> {
+    loop {
+        terminal.draw(|frame| ui::draw(frame, app))?;
+
+        if app.poll_install() {
+            continue; // redraw immediately on state change
+        }
+
+        if event::poll(Duration::from_millis(150))? {
+            if let Event::Key(key) = event::read()? {
+                if handle_key(app, key.code, key.modifiers) {
+                    break;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Returns true if the app should quit.
+fn handle_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> bool {
+    // The install modal captures input while open, so it doesn't leak
+    // into tab navigation (e.g. typing 'y' to confirm shouldn't also move
+    // the agent-list selection).
+    if !matches!(app.install, InstallFlow::Idle) {
+        match &app.install {
+            InstallFlow::Confirming { .. } => match code {
+                KeyCode::Char('y') | KeyCode::Char('Y') => app.confirm_install(),
+                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => app.cancel_install(),
+                _ => {}
+            },
+            InstallFlow::Done { .. } | InstallFlow::Failed { .. } => {
+                if matches!(code, KeyCode::Enter | KeyCode::Esc) {
+                    app.cancel_install();
+                }
+            }
+            InstallFlow::Running { .. } | InstallFlow::Idle => {}
+        }
+        return false;
+    }
+
+    match code {
+        KeyCode::Char('q') => return true,
+        KeyCode::Esc => return true,
+        KeyCode::Tab => app.next_tab(),
+        KeyCode::BackTab => app.prev_tab(),
+        KeyCode::Char('h') if modifiers.contains(KeyModifiers::CONTROL) => app.prev_tab(),
+        KeyCode::Char('l') if modifiers.contains(KeyModifiers::CONTROL) => app.next_tab(),
+        KeyCode::Down | KeyCode::Char('j') => app.move_selection(1),
+        KeyCode::Up | KeyCode::Char('k') => app.move_selection(-1),
+        KeyCode::Char('r') => app.refresh(),
+        KeyCode::Char('i') if app.tab == Tab::Agents => app.begin_install(),
+        _ => {}
+    }
+    false
+}

@@ -345,6 +345,9 @@ fn dispatch(ctx: &Context, request: Request) -> anyhow::Result<ResponseData> {
             let reachable = url.as_deref().map(|u| crate::qdrant_backend::ping(u).is_ok()).unwrap_or(false);
             Ok(ResponseData::VectorStatus { configured: url.is_some(), url, reachable })
         }
+        Request::AgentInstall { name, dry_run } => {
+            Ok(ResponseData::AgentInstallResult(bootstrap::run_one(ctx, &name, dry_run)?))
+        }
         Request::Setup { dry_run } => Ok(ResponseData::SetupPlan(bootstrap::run(ctx, dry_run))),
         Request::InstallIntegrations { dry_run } => {
             Ok(ResponseData::IntegrationResult(integrations::install_all(ctx, dry_run)?))

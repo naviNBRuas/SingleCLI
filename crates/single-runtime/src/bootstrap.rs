@@ -14,58 +14,61 @@ use single_protocol::{SetupAction, SetupActionKind, SetupPlan};
 use std::process::Command;
 
 pub fn run(ctx: &Context, dry_run: bool) -> SetupPlan {
-    let mut actions = Vec::new();
+    let actions = ctx.registry.iter().map(|agent| plan_one(ctx, agent, dry_run)).collect();
+    SetupPlan { actions, dry_run }
+}
 
-    for agent in &ctx.registry {
-        let Some(adapter) = for_agent_with_custom(&agent.name, &ctx.dirs.agents_dir()) else { continue };
-        let discovery = adapter.discover();
+/// Same per-agent logic as `run`, scoped to a single named agent — the
+/// seam the TUI's interactive install flow and `single agent install` use
+/// so installing one agent doesn't require planning/touching all five.
+pub fn run_one(ctx: &Context, agent_name: &str, dry_run: bool) -> anyhow::Result<SetupAction> {
+    let agent = ctx.find_agent(agent_name).ok_or_else(|| anyhow::anyhow!("unknown agent: {agent_name}"))?;
+    Ok(plan_one(ctx, agent, dry_run))
+}
 
-        if discovery.detected {
-            actions.push(SetupAction {
-                agent: agent.name.clone(),
-                action: SetupActionKind::AlreadyInstalled,
-                detail: discovery
-                    .version
-                    .clone()
-                    .unwrap_or_else(|| "installed (version unknown)".into()),
-                executed: false,
-            });
-            continue;
-        }
+fn plan_one(ctx: &Context, agent: &single_core::registry::AgentDefinition, dry_run: bool) -> SetupAction {
+    let Some(adapter) = for_agent_with_custom(&agent.name, &ctx.dirs.agents_dir()) else {
+        return SetupAction { agent: agent.name.clone(), action: SetupActionKind::Unsupported, detail: "no adapter registered".into(), executed: false };
+    };
+    let discovery = adapter.discover();
 
-        let Some(install) = &agent.bootstrap_install else {
-            actions.push(SetupAction {
-                agent: agent.name.clone(),
-                action: SetupActionKind::Unsupported,
-                detail: match &agent.install_method {
-                    single_protocol::InstallMethod::Unsupported { reason } => reason.clone(),
-                    _ => "no verified bootstrap install command".into(),
-                },
-                executed: false,
-            });
-            continue;
+    if discovery.detected {
+        return SetupAction {
+            agent: agent.name.clone(),
+            action: SetupActionKind::AlreadyInstalled,
+            detail: discovery.version.clone().unwrap_or_else(|| "installed (version unknown)".into()),
+            executed: false,
         };
-
-        if dry_run {
-            actions.push(SetupAction {
-                agent: agent.name.clone(),
-                action: SetupActionKind::Install,
-                detail: format!("{} (source: {})", install.command, install.source),
-                executed: false,
-            });
-            continue;
-        }
-
-        let result = Command::new("sh").arg("-c").arg(&install.command).status();
-        let (executed, detail) = match result {
-            Ok(status) if status.success() => (true, format!("ran: {}", install.command)),
-            Ok(status) => (false, format!("install command exited with {status}: {}", install.command)),
-            Err(e) => (false, format!("failed to run install command: {e}")),
-        };
-        actions.push(SetupAction { agent: agent.name.clone(), action: SetupActionKind::Install, detail, executed });
     }
 
-    SetupPlan { actions, dry_run }
+    let Some(install) = &agent.bootstrap_install else {
+        return SetupAction {
+            agent: agent.name.clone(),
+            action: SetupActionKind::Unsupported,
+            detail: match &agent.install_method {
+                single_protocol::InstallMethod::Unsupported { reason } => reason.clone(),
+                _ => "no verified bootstrap install command".into(),
+            },
+            executed: false,
+        };
+    };
+
+    if dry_run {
+        return SetupAction {
+            agent: agent.name.clone(),
+            action: SetupActionKind::Install,
+            detail: format!("{} (source: {})", install.command, install.source),
+            executed: false,
+        };
+    }
+
+    let result = Command::new("sh").arg("-c").arg(&install.command).status();
+    let (executed, detail) = match result {
+        Ok(status) if status.success() => (true, format!("ran: {}", install.command)),
+        Ok(status) => (false, format!("install command exited with {status}: {}", install.command)),
+        Err(e) => (false, format!("failed to run install command: {e}")),
+    };
+    SetupAction { agent: agent.name.clone(), action: SetupActionKind::Install, detail, executed }
 }
 
 #[cfg(test)]
@@ -124,5 +127,21 @@ mod tests {
         let plan = run(&ctx, true);
         let names: Vec<_> = plan.actions.iter().map(|a| a.agent.as_str()).collect();
         assert_eq!(names, ["claude", "codex", "opencode", "agy", "perplexity"]);
+    }
+
+    #[test]
+    fn run_one_matches_the_corresponding_entry_in_a_full_run() {
+        let (_dir, ctx) = test_context();
+        let full_plan = run(&ctx, true);
+        let single_action = run_one(&ctx, "perplexity", true).unwrap();
+        let full_action = full_plan.actions.iter().find(|a| a.agent == "perplexity").unwrap();
+        assert_eq!(single_action.action, full_action.action);
+        assert_eq!(single_action.detail, full_action.detail);
+    }
+
+    #[test]
+    fn run_one_errors_for_unknown_agent() {
+        let (_dir, ctx) = test_context();
+        assert!(run_one(&ctx, "ghost-agent", true).is_err());
     }
 }

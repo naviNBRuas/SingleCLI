@@ -63,7 +63,8 @@ single provider sync anthropic --agents claude --yes
 single memory graph create-entity SingleCLI project
 single memory graph show                # dump the shared knowledge graph
 
-single                  # launch the TUI dashboard
+single                  # launch the TUI: Agents/Tasks/MCP/Providers/Accounts/Memory tabs,
+                        # press [i] on an agent to install it interactively (like Claude Code's own setup)
 ```
 
 Every list/inspect command supports `--json` for scripting.

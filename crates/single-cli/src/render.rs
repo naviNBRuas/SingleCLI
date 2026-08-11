@@ -282,6 +282,10 @@ fn print_data(data: ResponseData) {
                 println!("Qdrant: {} ({})", url.unwrap_or_default(), if reachable { "reachable" } else { "unreachable" });
             }
         }
+        ResponseData::AgentInstallResult(action) => {
+            let mark = if action.executed { "✓" } else { "·" };
+            println!("{mark} {:<12} {:?}: {}", action.agent, action.action, action.detail);
+        }
         ResponseData::SetupPlan(plan) => {
             let mode = if plan.dry_run { "dry run" } else { "applied" };
             println!("Setup plan ({mode}):");

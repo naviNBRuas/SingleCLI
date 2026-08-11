@@ -11,6 +11,7 @@ the project's original request for that).
 - **Phase 6 (partial)** — a provider registry (OpenAI, Anthropic, ...) syncing API keys into the two agents with a verified config slot for them.
 - **Auth** — multi-account credential switching (`single account ...`) so one agent CLI (e.g. Claude Code) can have several logged-in accounts, swapped safely.
 - **Memory upgrades** — a SQLite knowledge graph (entities/observations/relations), plus optional Redis (working memory) and Qdrant (vector store) backends.
+- **Distribution** — a cross-platform release workflow (Linux/macOS × x86_64/arm64) and a `curl | sh` installer (`install.sh`), plus a tabbed TUI with an in-app interactive agent-install flow.
 
 A multi-agent task-graph orchestrator, full provider abstraction (model
 discovery, streaming, usage accounting), a plugin/marketplace system, and
@@ -312,6 +313,41 @@ artifact, a real persisted record.
   faking that with a pseudo-embedding would be exactly the kind of
   fabricated capability this project avoids elsewhere. `single memory
   vector ...`.
+
+## Distribution: release workflow, installer, and the TUI rewrite
+
+- **`.github/workflows/release.yml`** — on a `v*` tag push, builds
+  `single`+`single-runtimed` for linux-x86_64, linux-arm64 (native
+  `ubuntu-24.04-arm` runner, no cross-compilation toolchain needed),
+  macos-arm64, and macos-x86_64, packages each as a tar.gz, and publishes
+  them to a GitHub Release. Verified for real: tagged `v0.1.0`, pushed,
+  and watched the run — all four matrix jobs succeeded.
+- **`install.sh`** — a POSIX shell script (`curl -fsSL .../install.sh |
+  sh`) that detects OS/arch, downloads the matching release tarball,
+  installs both binaries to `~/.local/bin` (override with
+  `SINGLE_INSTALL_DIR`), and prints PATH guidance for bash/zsh/fish.
+  Unsupported platforms are told to build from source rather than
+  silently failing.
+- **`single-tui`** was rewritten from a single read-only table into a
+  tabbed control center: **Agents / Tasks / MCP / Providers / Accounts /
+  Memory / Help**, each rendering live data fetched over the same runtime
+  socket the CLI uses (`app.rs` owns all fetched state; `ui.rs` is pure
+  rendering). Keyboard nav: `Tab`/`Shift+Tab` between tabs, `↑↓`/`j`/`k`
+  within a tab, `r` to refresh, `q`/`Esc` to quit.
+- **In-TUI agent install** (the flagship ask: "for agent install let's
+  make them inside the tui, like claude code"): pressing `i` on a
+  not-yet-installed agent in the Agents tab opens a confirmation modal
+  showing the *exact* real bootstrap command and its source — never
+  installs silently. Confirming (`y`) runs the real install
+  (`single-runtime::bootstrap::run_one`, extracted from the existing
+  `single setup` logic so both paths share one implementation) on a
+  background OS thread via an `mpsc` channel, so the UI keeps redrawing
+  a live elapsed-time spinner instead of freezing for however long the
+  network install script takes, then shows a real success/failure result
+  pulled from the actual command's exit status. Verified end-to-end in a
+  real terminal session (tmux + a fake agent CLI with no real binary):
+  confirm → running spinner → real completion, then the newly "installed"
+  agent's live status updated on the next refresh.
 
 ## Not in Phase 1-6
 
