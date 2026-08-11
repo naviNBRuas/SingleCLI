@@ -1,0 +1,26 @@
+[package]
+name = "single-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "single"
+path = "src/main.rs"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+tokio.workspace = true
+directories.workspace = true
+single-core = { path = "../single-core" }
+single-protocol = { path = "../single-protocol" }
+single-runtime = { path = "../single-runtime" }
+single-tui = { path = "../single-tui" }
+
+[dev-dependencies]
+tempfile = "3"
+assert_cmd = "2"
