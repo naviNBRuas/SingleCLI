@@ -181,20 +181,29 @@ pub fn run(conn: &Connection, ctx: &Context, opts: RunTaskOptions) -> Result<Tas
     set_status(conn, id, TaskStatus::Running)?;
     crate::state::record_event(conn, "task.started", &format!("#{id} cwd={}", run_cwd.display()))?;
 
+    // Every run goes against a SingleCLI-managed home, never the real
+    // ambient $HOME (single_core::agent_home docs) — either the default
+    // per-agent isolated home, or, when --account is given, that named
+    // account's own isolated home (single_core::account docs).
     let isolated_home = match opts.account {
-        Some(name) => match integrations::home_dir().and_then(|home| single_core::account::ensure_isolated_home(&ctx.dirs.accounts_dir(), &home, opts.agent, name)) {
-            Ok(dir) => Some(dir),
-            Err(e) => {
-                finish(conn, id, TaskStatus::Failed, None, None, None, false, Some(&format!("failed to materialize isolated home for account '{name}': {e:#}")))?;
-                crate::state::record_event(conn, "task.failed", &format!("#{id} account isolation failed: {e:#}"))?;
-                remember_failure(conn, id, opts.agent, opts.description, &format!("account isolation failed: {e:#}"));
-                return get(conn, id)?.context("task disappeared after being created");
-            }
-        },
-        None => None,
+        Some(name) => integrations::home_dir()
+            .and_then(|home| single_core::account::ensure_isolated_home(&ctx.dirs.accounts_dir(), &home, opts.agent, name))
+            .map_err(|e| format!("failed to materialize isolated home for account '{name}': {e:#}")),
+        None => integrations::home_dir()
+            .and_then(|home| single_core::agent_home::ensure_bootstrapped(&ctx.dirs.homes_dir(), &home, opts.agent))
+            .map_err(|e| format!("failed to materialize isolated home for agent '{}': {e:#}", opts.agent)),
+    };
+    let isolated_home = match isolated_home {
+        Ok(dir) => dir,
+        Err(detail) => {
+            finish(conn, id, TaskStatus::Failed, None, None, None, false, Some(&detail))?;
+            crate::state::record_event(conn, "task.failed", &format!("#{id} {detail}"))?;
+            remember_failure(conn, id, opts.agent, opts.description, &detail);
+            return get(conn, id)?.context("task disappeared after being created");
+        }
     };
 
-    let outcome = adapter.run_prompt(&run_cwd, opts.description, isolated_home.as_deref(), opts.timeout);
+    let outcome = adapter.run_prompt(&run_cwd, opts.description, Some(&isolated_home), opts.timeout);
 
     let worktree_path_str = opts.use_worktree.then(|| run_cwd.display().to_string());
 

@@ -178,7 +178,8 @@ fn dispatch(ctx: &Context, request: Request) -> anyhow::Result<ResponseData> {
             Ok(ResponseData::SkillContents(contents))
         }
         Request::SkillSyncClaude { name } => {
-            let home = integrations::home_dir()?;
+            let real_home = integrations::home_dir()?;
+            let home = single_core::agent_home::ensure_bootstrapped(&ctx.dirs.homes_dir(), &real_home, "claude")?;
             let claude_skills_dir = home.join(".claude").join("skills");
             let dest = single_core::skills::sync_to_claude(&ctx.dirs.skills_dir(), &claude_skills_dir, &name)?;
             Ok(ResponseData::SkillSynced { path: dest.display().to_string() })
@@ -247,7 +248,12 @@ fn dispatch(ctx: &Context, request: Request) -> anyhow::Result<ResponseData> {
             Ok(ResponseData::OrchestrateResult(records))
         }
         Request::AccountCapture { agent, name, label } => {
-            let home = integrations::home_dir()?;
+            // Captures from this agent's SingleCLI-managed home, not the
+            // real ~/.claude etc. — that's the home single actually runs
+            // the agent against (single_core::agent_home docs), bootstrapped
+            // here if this is the first account operation for this agent.
+            let real_home = integrations::home_dir()?;
+            let home = single_core::agent_home::ensure_bootstrapped(&ctx.dirs.homes_dir(), &real_home, &agent)?;
             let info = single_core::account::capture(&ctx.dirs.accounts_dir(), &home, &agent, &name, label)?;
             crate::state::open(&ctx.dirs.db_path())
                 .and_then(|conn| crate::state::record_event(&conn, "account.captured", &format!("{agent}/{name}")))
@@ -255,7 +261,8 @@ fn dispatch(ctx: &Context, request: Request) -> anyhow::Result<ResponseData> {
             Ok(ResponseData::AccountProfile(info))
         }
         Request::AccountUse { agent, name } => {
-            let home = integrations::home_dir()?;
+            let real_home = integrations::home_dir()?;
+            let home = single_core::agent_home::ensure_bootstrapped(&ctx.dirs.homes_dir(), &real_home, &agent)?;
             let result = single_core::account::switch(&ctx.dirs.accounts_dir(), &home, &agent, &name)?;
             crate::state::open(&ctx.dirs.db_path())
                 .and_then(|conn| crate::state::record_event(&conn, "account.switched", &format!("{agent}/{name}")))
@@ -322,10 +329,11 @@ fn dispatch(ctx: &Context, request: Request) -> anyhow::Result<ResponseData> {
             let store = single_core::secrets::SecretTool;
             let value = single_core::secrets::SecretStore::get(&store, &provider.secret_name)?
                 .ok_or_else(|| anyhow::anyhow!("no key stored for provider '{name}'; run `single provider set-key {name} <value>` first"))?;
-            let home = integrations::home_dir()?;
+            let real_home = integrations::home_dir()?;
             let target_agents: Vec<String> = if agents.is_empty() { ctx.registry.iter().map(|a| a.name.clone()).collect() } else { agents };
             let mut results = Vec::new();
             for agent in target_agents {
+                let home = single_core::agent_home::ensure_bootstrapped(&ctx.dirs.homes_dir(), &real_home, &agent)?;
                 let mut result = single_agent_sdk::provider_sync::sync(&agent, &home, &provider.env_var_name, &value, dry_run)?;
                 result.provider = name.clone();
                 results.push(result);
@@ -353,7 +361,7 @@ fn dispatch(ctx: &Context, request: Request) -> anyhow::Result<ResponseData> {
         Request::PluginSync { name, agents, dry_run } => {
             let plugin = single_core::plugins::find(&ctx.dirs.plugins_registry_file(), &name)?
                 .ok_or_else(|| anyhow::anyhow!("no such plugin: {name}"))?;
-            let home = integrations::home_dir()?;
+            let real_home = integrations::home_dir()?;
             let target_agents: Vec<String> = if agents.is_empty() { ctx.registry.iter().map(|a| a.name.clone()).collect() } else { agents };
             let mut results = Vec::new();
             for agent in target_agents {
@@ -366,11 +374,14 @@ fn dispatch(ctx: &Context, request: Request) -> anyhow::Result<ResponseData> {
                     Some(adapter) if dry_run => {
                         (false, format!("dry run: would run `{} plugin install {selector}`", adapter.command()))
                     }
-                    Some(adapter) => match adapter.install_plugin(&selector, &home, std::time::Duration::from_secs(60)) {
-                        Ok(outcome) if outcome.success => (true, "installed".to_string()),
-                        Ok(outcome) => (false, format!("exited with {:?}: {}", outcome.exit_code, outcome.stderr)),
-                        Err(err) => (false, err.to_string()),
-                    },
+                    Some(adapter) => {
+                        let home = single_core::agent_home::ensure_bootstrapped(&ctx.dirs.homes_dir(), &real_home, &agent)?;
+                        match adapter.install_plugin(&selector, &home, std::time::Duration::from_secs(60)) {
+                            Ok(outcome) if outcome.success => (true, "installed".to_string()),
+                            Ok(outcome) => (false, format!("exited with {:?}: {}", outcome.exit_code, outcome.stderr)),
+                            Err(err) => (false, err.to_string()),
+                        }
+                    }
                     None => (false, format!("no adapter for agent '{agent}'")),
                 };
                 results.push(single_protocol::PluginInstallResult { plugin: name.clone(), agent, applied, detail });

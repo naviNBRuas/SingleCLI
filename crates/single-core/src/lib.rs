@@ -1,4 +1,5 @@
 pub mod account;
+pub mod agent_home;
 pub mod config;
 pub mod custom_agents;
 pub mod lsp;

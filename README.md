@@ -22,6 +22,13 @@ installed, installs the CLIs themselves on a machine that has none of
 them yet, and lets you add a brand-new agent CLI to the whole system by
 writing one TOML file, no recompilation required.
 
+SingleCLI also doesn't touch your real, ambient `~/.claude`, `~/.codex`,
+etc. on every run. Each agent gets its own SingleCLI-managed home under
+`~/.config/single/homes/<agent>/`, bootstrapped from the real one exactly
+once; every `task run`, `install-integrations`, `plugin sync`, `provider
+sync`, and `account capture`/`use` after that operates only inside that
+isolated copy — see `docs/architecture.md`'s "Isolation" section.
+
 ## Install
 
 **Linux and macOS (x86_64 and arm64):**

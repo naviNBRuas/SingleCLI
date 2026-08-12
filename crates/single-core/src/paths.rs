@@ -97,6 +97,16 @@ impl SingleDirs {
         self.root.join("plugins.toml")
     }
 
+    /// Root of every agent's SingleCLI-managed `$HOME` (see
+    /// `single-core::agent_home`). SingleCLI runs agent CLIs, syncs their
+    /// config, and captures/switches their credentials against
+    /// `homes_dir()/<agent>/`, not the real, ambient `$HOME` — the real
+    /// home is only ever read once, to bootstrap an agent's isolated home
+    /// the first time it's used.
+    pub fn homes_dir(&self) -> PathBuf {
+        self.root.join("homes")
+    }
+
     /// Creates the subset of the directory tree Phase 1 needs. Never touches
     /// anything outside `self.root`.
     pub fn ensure_created(&self) -> Result<()> {

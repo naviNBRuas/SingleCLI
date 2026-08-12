@@ -15,6 +15,7 @@ the project's original request for that).
 - **Growth** — richer default MCP/LSP/tool registries seeded from this project's own verified real configuration, provider presets (OpenAI, Anthropic, OpenCode Zen, NVIDIA), automatic "learn from errors" memory on task failure, and a sequential multi-agent orchestration relay (`single orchestrate`).
 - **Self-update** — `single update` checks GitHub Releases and replaces its own binaries in place; a `stable` channel (tagged `vX.Y.Z` releases) and a rolling `nightly` channel that tracks every push to `main`.
 - **Growth Phase 2** — a plugin registry synced into every agent with a real plugin-install command (`claude`/`codex`/`opencode`/`agy`); LSP sync into OpenCode's real `opencode.jsonc` `lsp` key; skills synced into Claude Code's real skill directory; account profiles gained a human label and a manually-tracked usability status, plus isolated-`$HOME` materialization so multiple accounts of the same agent can run **concurrently**; MCP/LSP preset catalogs for growing the registries without a code change per entry; an expanded tool registry; and a TUI that covers the full config surface (MCP/LSP/Plugins/Tools tabs, in-app task creation).
+- **Isolation** — SingleCLI stopped reading/writing agents' real, ambient config (`~/.claude.json`, `~/.codex/`, `~/.config/opencode/`) on every run. Every agent now gets a SingleCLI-managed home under `~/.config/single/homes/<agent>/`, bootstrapped from the real one **once**; every subsequent `task run`, `install-integrations`, `plugin sync`, `provider sync`, and `account capture`/`use` operates only inside that isolated copy.
 
 A parallel/live multi-agent task-graph (as opposed to the sequential relay
 that exists), full provider abstraction (model discovery, streaming, usage
@@ -509,6 +510,44 @@ stable|nightly] [--check] [--yes]`, mirroring the real `claude update`/
   `Orchestrate` for more than one, mirroring the same background-thread-
   plus-`mpsc`-channel shape as the existing install/provider-add flows so
   the UI keeps redrawing while the request is in flight.
+
+## Isolation: SingleCLI-managed homes
+
+- **`single-core::agent_home`** — every agent gets an isolated `$HOME`
+  under `~/.config/single/homes/<agent>/`. The first time it's needed,
+  `ensure_bootstrapped` copies that agent's known real config/state paths
+  (`~/.claude.json` + `~/.claude/` for claude, `~/.codex/` for codex,
+  `~/.config/opencode/` for opencode — the same locations
+  `single-agent-sdk::formats` already reads/writes) into the isolated
+  tree. That's the **only** time the real home is touched. Every call
+  after that — even on a different day, a different process — finds the
+  isolated home already there and leaves it alone; changes never flow
+  back from the real home once bootstrapped.
+- **What changed.** `single task run`, `single install-integrations`/
+  `uninstall-integrations`, `single plugin sync`, `single provider sync`,
+  and `single account capture`/`use` used to operate directly against the
+  real, ambient `$HOME`. They now all resolve an isolated home first
+  (`integrations::home_dir()` — the real one — is only ever passed as the
+  *bootstrap source*, never written to). Verified for real: ran `single
+  install-integrations --yes` against a fake real home containing a
+  `.claude.json` with `numStartups: 42`; afterward that file was
+  byte-for-byte unchanged, while `~/.config/single/homes/claude/.claude.json`
+  held the newly-synced MCP config and a copy of the bootstrapped
+  credentials.
+- **Relationship to account isolation.** `single-core::account`'s
+  per-account isolated homes (`accounts_dir()/<agent>/<name>/home/`, for
+  running several accounts of one agent concurrently — see the Auth
+  section above) and `agent_home`'s per-agent default isolated home
+  (`homes_dir()/<agent>/`, for "don't touch anything outside SingleCLI")
+  are two instances of the same idea at different granularity: `single
+  task run --agent codex` with no `--account` uses the default per-agent
+  home; adding `--account work` swaps in that named account's own
+  isolated home instead. Neither ever reads from or writes to the real
+  `$HOME` after its own first bootstrap.
+- **Custom agents and `agy`/`perplexity`** have no confirmed real config
+  path (`agent_home::real_paths_for` returns an empty list for them), so
+  their isolated home simply starts empty — SingleCLI has nothing to seed
+  it with, and says so rather than guessing a location.
 
 ## Not in Phase 1-6
 

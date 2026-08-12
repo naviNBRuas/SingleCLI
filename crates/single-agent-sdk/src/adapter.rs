@@ -65,9 +65,13 @@ pub trait AgentAdapter {
 
     /// Installs a plugin via this agent's own real plugin-install command
     /// (`claude plugin install`, `codex plugin add`, `opencode plugin`,
-    /// `agy plugin install` — verified per-agent, see each impl). Default:
-    /// unsupported (agents with no verified plugin CLI, e.g. `pplx`).
-    fn install_plugin(&self, _target: &str, _cwd: &Path, _timeout: Duration) -> Result<RunOutcome> {
+    /// `agy plugin install` — verified per-agent, see each impl). `home`
+    /// is used as both the subprocess's working directory and its `$HOME`
+    /// override, so the install lands in the agent's SingleCLI-managed
+    /// home (`single_core::agent_home`), not the real ambient one.
+    /// Default: unsupported (agents with no verified plugin CLI, e.g.
+    /// `pplx`).
+    fn install_plugin(&self, _target: &str, _home: &Path, _timeout: Duration) -> Result<RunOutcome> {
         anyhow::bail!("{} has no verified plugin-install command wired up", self.command())
     }
 }

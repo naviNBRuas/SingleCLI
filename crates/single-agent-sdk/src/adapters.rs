@@ -1,7 +1,7 @@
 use crate::adapter::{run_with_prompt_flag, AgentAdapter};
 use crate::backup::backup_before_write;
 use crate::formats;
-use crate::run::{run_command, run_command_with_home};
+use crate::run::run_command_with_home;
 use anyhow::Result;
 use single_protocol::{IntegrationWrite, McpServerSpec, RunOutcome};
 use std::path::Path;
@@ -45,8 +45,8 @@ impl AgentAdapter for ClaudeAdapter {
     /// `claude plugin install <plugin[@marketplace]>` — confirmed real via
     /// `claude plugin --help` on the reference machine (aliased `claude
     /// plugin i`).
-    fn install_plugin(&self, target: &str, cwd: &Path, timeout: Duration) -> Result<RunOutcome> {
-        run_command("claude", &["plugin".to_string(), "install".to_string(), target.to_string()], cwd, timeout)
+    fn install_plugin(&self, target: &str, home: &Path, timeout: Duration) -> Result<RunOutcome> {
+        run_command_with_home("claude", &["plugin".to_string(), "install".to_string(), target.to_string()], home, Some(home), timeout)
     }
 }
 
@@ -94,8 +94,8 @@ impl AgentAdapter for CodexAdapter {
     /// marketplaces on the user's behalf, since that's a real trust
     /// decision (what code source to pull plugins from), not a config
     /// sync operation.
-    fn install_plugin(&self, target: &str, cwd: &Path, timeout: Duration) -> Result<RunOutcome> {
-        run_command("codex", &["plugin".to_string(), "add".to_string(), target.to_string()], cwd, timeout)
+    fn install_plugin(&self, target: &str, home: &Path, timeout: Duration) -> Result<RunOutcome> {
+        run_command_with_home("codex", &["plugin".to_string(), "add".to_string(), target.to_string()], home, Some(home), timeout)
     }
 }
 
@@ -162,8 +162,8 @@ impl AgentAdapter for OpenCodeAdapter {
     /// `name@marketplace` — `target` here is expected to already be that
     /// npm module name (the caller picks `PluginSpec::opencode_module`
     /// rather than `PluginSpec::target` before calling this for opencode).
-    fn install_plugin(&self, target: &str, cwd: &Path, timeout: Duration) -> Result<RunOutcome> {
-        run_command("opencode", &["plugin".to_string(), target.to_string()], cwd, timeout)
+    fn install_plugin(&self, target: &str, home: &Path, timeout: Duration) -> Result<RunOutcome> {
+        run_command_with_home("opencode", &["plugin".to_string(), target.to_string()], home, Some(home), timeout)
     }
 }
 
@@ -188,8 +188,8 @@ impl AgentAdapter for AgyAdapter {
 
     /// `agy plugin install <plugin[@marketplace]>` — confirmed real via
     /// `agy plugin --help` on the reference machine.
-    fn install_plugin(&self, target: &str, cwd: &Path, timeout: Duration) -> Result<RunOutcome> {
-        run_command("agy", &["plugin".to_string(), "install".to_string(), target.to_string()], cwd, timeout)
+    fn install_plugin(&self, target: &str, home: &Path, timeout: Duration) -> Result<RunOutcome> {
+        run_command_with_home("agy", &["plugin".to_string(), "install".to_string(), target.to_string()], home, Some(home), timeout)
     }
 }
 
