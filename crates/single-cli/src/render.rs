@@ -213,6 +213,11 @@ fn print_data(data: ResponseData) {
                 println!("{:<16} {:<20} {}", p.name, p.env_var_name, p.base_url.as_deref().unwrap_or("-"));
             }
         }
+        ResponseData::ProviderPresets(presets) => {
+            for p in presets {
+                println!("{:<14} {:<20} {}", p.name, p.env_var_name, p.base_url);
+            }
+        }
         ResponseData::ProviderSyncResults(results) => {
             for r in results {
                 let mark = if r.applied { "✓" } else { "·" };

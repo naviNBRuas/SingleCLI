@@ -67,6 +67,8 @@ pub enum Request {
     AccountList { agent: Option<String> },
     AccountRemove { agent: String, name: String },
     ProviderAdd { name: String, env_var_name: String, base_url: Option<String> },
+    ProviderAddPreset { name: String },
+    ProviderPresetList,
     ProviderRemove { name: String },
     ProviderList,
     ProviderInspect { name: String },
@@ -133,6 +135,7 @@ pub enum ResponseData {
     AccountSwitched(AccountSwitchResult),
     Provider(ProviderSpec),
     Providers(Vec<ProviderSpec>),
+    ProviderPresets(Vec<ProviderPresetInfo>),
     ProviderSyncResults(Vec<ProviderSyncResult>),
     KgEntityId(i64),
     KgEntity(KgEntity),
@@ -475,6 +478,13 @@ pub struct VectorHit {
     pub id: u64,
     pub score: f32,
     pub payload: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProviderPresetInfo {
+    pub name: String,
+    pub env_var_name: String,
+    pub base_url: String,
 }
 
 /// A registered LLM provider (spec section 30): OpenAI, Anthropic,

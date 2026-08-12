@@ -1,4 +1,4 @@
-use crate::app::{App, InstallFlow, Tab};
+use crate::app::{App, InstallFlow, ProviderAddFlow, Tab};
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -28,6 +28,9 @@ pub fn draw(frame: &mut Frame, app: &App) {
 
     if !matches!(app.install, InstallFlow::Idle) {
         draw_install_modal(frame, area, app);
+    }
+    if !matches!(app.provider_add, ProviderAddFlow::Idle) {
+        draw_provider_add_modal(frame, area, app);
     }
 }
 
@@ -182,7 +185,7 @@ fn draw_providers(frame: &mut Frame, area: Rect, app: &App) {
             ]))
         })
         .collect();
-    let list = List::new(items).block(Block::default().borders(Borders::ALL).title(" Providers "));
+    let list = List::new(items).block(Block::default().borders(Borders::ALL).title(" Providers — [a] add "));
     frame.render_widget(list, area);
 }
 
@@ -240,6 +243,9 @@ fn draw_help(frame: &mut Frame, area: Rect) {
         Line::from(Span::styled("Agents tab", Style::default().add_modifier(Modifier::BOLD))),
         Line::from("  i                    install the selected agent (confirms before running anything)"),
         Line::from(""),
+        Line::from(Span::styled("Providers tab", Style::default().add_modifier(Modifier::BOLD))),
+        Line::from("  a                    add a provider (OpenAI/Anthropic/OpenCode Zen/NVIDIA presets), key goes straight to your OS keychain"),
+        Line::from(""),
         Line::from(Span::styled("Everything else", Style::default().add_modifier(Modifier::BOLD))),
         Line::from("  Use the `single` CLI for actions not yet in the TUI: mcp add, provider add/sync,"),
         Line::from("  account capture/use, task run, memory graph/cache/vector — see `single --help`."),
@@ -252,7 +258,7 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
     let text = if let Some(err) = &app.error {
         Line::from(Span::styled(format!("error: {err}"), Style::default().fg(BAD)))
     } else {
-        Line::from(Span::styled("[tab] switch  [↑↓] move  [i] install  [r] refresh  [q] quit", Style::default().fg(MUTED)))
+        Line::from(Span::styled("[tab] switch  [↑↓] move  [i] install agent  [a] add provider  [r] refresh  [q] quit", Style::default().fg(MUTED)))
     };
     frame.render_widget(Paragraph::new(text), area);
 }
@@ -271,6 +277,69 @@ fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
     ])
     .split(vertical[1]);
     horizontal[1]
+}
+
+fn draw_provider_add_modal(frame: &mut Frame, area: Rect, app: &App) {
+    let modal_area = centered_rect(60, 50, area);
+    frame.render_widget(Clear, modal_area);
+
+    let (title, lines): (&str, Vec<Line>) = match &app.provider_add {
+        ProviderAddFlow::PickingPreset { presets, selected } => {
+            let mut lines = vec![
+                Line::from(Span::styled("Add a provider", Style::default().add_modifier(Modifier::BOLD))),
+                Line::from(""),
+            ];
+            for (i, p) in presets.iter().enumerate() {
+                let style = if i == *selected { selected_style() } else { Style::default() };
+                lines.push(Line::from(Span::styled(format!("  {:<14} {:<20} {}", p.name, p.env_var_name, p.base_url), style)));
+            }
+            lines.push(Line::from(""));
+            lines.push(Line::from("[↑↓] choose  [enter] select  [esc] cancel"));
+            (" Add provider ", lines)
+        }
+        ProviderAddFlow::EnteringKey { preset, input } => (
+            " Enter API key ",
+            vec![
+                Line::from(Span::styled(format!("{} ({})", preset.name, preset.env_var_name), Style::default().add_modifier(Modifier::BOLD))),
+                Line::from(Span::styled(preset.base_url.clone(), Style::default().fg(MUTED))),
+                Line::from(""),
+                Line::from(format!("API key: {}", "*".repeat(input.chars().count()))),
+                Line::from(""),
+                Line::from(Span::styled("stored in your OS keychain, never written to a config file", Style::default().fg(MUTED))),
+                Line::from(""),
+                Line::from("[enter] save  [esc] cancel"),
+            ],
+        ),
+        ProviderAddFlow::Submitting { preset_name, .. } => (
+            " Saving… ",
+            vec![Line::from(format!("Registering {preset_name} and storing the key in your OS keychain..."))],
+        ),
+        ProviderAddFlow::Done { preset_name } => (
+            " Provider added ",
+            vec![
+                Line::from(Span::styled(format!("{preset_name} added"), Style::default().fg(OK))),
+                Line::from(""),
+                Line::from("Run `single provider sync <name> --agents <agent> --yes` to write it into an agent's config,"),
+                Line::from("or do it from the CLI — sync isn't wired into the TUI yet."),
+                Line::from(""),
+                Line::from("[enter/esc] close"),
+            ],
+        ),
+        ProviderAddFlow::Failed { preset_name, error } => (
+            " Failed ",
+            vec![
+                Line::from(Span::styled(format!("Could not add {preset_name}"), Style::default().fg(BAD))),
+                Line::from(""),
+                Line::from(error.clone()),
+                Line::from(""),
+                Line::from("[enter/esc] close"),
+            ],
+        ),
+        ProviderAddFlow::Idle => (" ", vec![]),
+    };
+
+    let block = Block::default().borders(Borders::ALL).title(title).border_style(Style::default().fg(ACCENT));
+    frame.render_widget(Paragraph::new(lines).block(block), modal_area);
 }
 
 fn draw_install_modal(frame: &mut Frame, area: Rect, app: &App) {

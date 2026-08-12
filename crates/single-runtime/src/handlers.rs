@@ -229,6 +229,19 @@ fn dispatch(ctx: &Context, request: Request) -> anyhow::Result<ResponseData> {
             })?;
             Ok(ResponseData::Empty)
         }
+        Request::ProviderAddPreset { name } => {
+            let preset = single_core::providers::preset(&name)
+                .ok_or_else(|| anyhow::anyhow!("no such preset: {name} (see `single provider presets`)"))?;
+            single_core::providers::add(&ctx.dirs.providers_registry_file(), preset.to_spec())?;
+            Ok(ResponseData::Empty)
+        }
+        Request::ProviderPresetList => {
+            let presets = single_core::providers::presets()
+                .into_iter()
+                .map(|p| single_protocol::ProviderPresetInfo { name: p.name.to_string(), env_var_name: p.env_var_name.to_string(), base_url: p.base_url.to_string() })
+                .collect();
+            Ok(ResponseData::ProviderPresets(presets))
+        }
         Request::ProviderRemove { name } => {
             if !single_core::providers::remove(&ctx.dirs.providers_registry_file(), &name)? {
                 anyhow::bail!("no such provider: {name}");

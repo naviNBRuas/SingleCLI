@@ -54,6 +54,47 @@ pub fn find(path: &Path, name: &str) -> Result<Option<ProviderSpec>> {
     Ok(load(path)?.into_iter().find(|p| p.name == name))
 }
 
+/// A well-known preset a user can pick from instead of typing an env var
+/// name/base URL by hand (e.g. in the TUI's "add provider" flow).
+/// `secret_name` is deliberately not part of the preset — it's always
+/// derived as `provider:<name>` when the preset is turned into a real
+/// `ProviderSpec`, keeping that convention in one place.
+#[derive(Debug, Clone)]
+pub struct ProviderPreset {
+    pub name: &'static str,
+    pub env_var_name: &'static str,
+    pub base_url: &'static str,
+}
+
+/// Every base URL/env var pair here was verified against the vendor's own
+/// current documentation, not guessed:
+/// - OpenAI, Anthropic: their well-documented standard API endpoints.
+/// - OpenCode Zen: `https://opencode.ai/zen/v1`, `OPENCODE_API_KEY` (opencode.ai/docs/providers).
+/// - NVIDIA: `https://integrate.api.nvidia.com/v1`, `NVIDIA_API_KEY` (build.nvidia.com's own OpenAI-compatible endpoint docs).
+pub fn presets() -> Vec<ProviderPreset> {
+    vec![
+        ProviderPreset { name: "openai", env_var_name: "OPENAI_API_KEY", base_url: "https://api.openai.com/v1" },
+        ProviderPreset { name: "anthropic", env_var_name: "ANTHROPIC_API_KEY", base_url: "https://api.anthropic.com" },
+        ProviderPreset { name: "opencode-zen", env_var_name: "OPENCODE_API_KEY", base_url: "https://opencode.ai/zen/v1" },
+        ProviderPreset { name: "nvidia", env_var_name: "NVIDIA_API_KEY", base_url: "https://integrate.api.nvidia.com/v1" },
+    ]
+}
+
+pub fn preset(name: &str) -> Option<ProviderPreset> {
+    presets().into_iter().find(|p| p.name == name)
+}
+
+impl ProviderPreset {
+    pub fn to_spec(&self) -> ProviderSpec {
+        ProviderSpec {
+            name: self.name.to_string(),
+            env_var_name: self.env_var_name.to_string(),
+            secret_name: format!("provider:{}", self.name),
+            base_url: Some(self.base_url.to_string()),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 struct ProviderRegistryFile {
     #[serde(default)]
@@ -97,5 +138,24 @@ mod tests {
         add(&path, sample()).unwrap();
         assert!(remove(&path, "anthropic").unwrap());
         assert!(!remove(&path, "anthropic").unwrap());
+    }
+
+    #[test]
+    fn presets_include_the_four_requested_providers() {
+        let names: Vec<_> = presets().iter().map(|p| p.name).collect();
+        assert_eq!(names, ["openai", "anthropic", "opencode-zen", "nvidia"]);
+    }
+
+    #[test]
+    fn preset_to_spec_derives_secret_name_convention() {
+        let spec = preset("nvidia").unwrap().to_spec();
+        assert_eq!(spec.secret_name, "provider:nvidia");
+        assert_eq!(spec.env_var_name, "NVIDIA_API_KEY");
+        assert_eq!(spec.base_url.as_deref(), Some("https://integrate.api.nvidia.com/v1"));
+    }
+
+    #[test]
+    fn preset_returns_none_for_unknown_name() {
+        assert!(preset("does-not-exist").is_none());
     }
 }

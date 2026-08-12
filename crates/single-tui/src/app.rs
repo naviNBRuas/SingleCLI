@@ -1,7 +1,7 @@
 use crate::client::call;
 use single_protocol::{
-    AccountProfileInfo, AgentInfo, McpServerInfo, ProviderSpec, Request, Response, ResponseData,
-    RuntimeStatus, SetupAction, TaskRecord,
+    AccountProfileInfo, AgentInfo, McpServerInfo, ProviderPresetInfo, ProviderSpec, Request,
+    Response, ResponseData, RuntimeStatus, SetupAction, TaskRecord,
 };
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
@@ -57,6 +57,21 @@ pub enum InstallFlow {
     Failed { agent: String, error: String },
 }
 
+/// State of the in-TUI "add a provider" flow: pick a preset (OpenAI,
+/// Anthropic, OpenCode Zen, NVIDIA — spec: "id like to add providers,
+/// configuring them using the TUI"), type the API key (masked), submit.
+/// Registration and key storage happen on a background thread — the key
+/// itself never lands in `App` once submitted, only the masked input
+/// buffer while typing.
+pub enum ProviderAddFlow {
+    Idle,
+    PickingPreset { presets: Vec<ProviderPresetInfo>, selected: usize },
+    EnteringKey { preset: ProviderPresetInfo, input: String },
+    Submitting { preset_name: String, rx: mpsc::Receiver<anyhow::Result<()>> },
+    Done { preset_name: String },
+    Failed { preset_name: String, error: String },
+}
+
 pub struct App {
     pub socket_path: PathBuf,
     pub tab: Tab,
@@ -74,6 +89,7 @@ pub struct App {
     pub vector_reachable: bool,
     pub error: Option<String>,
     pub install: InstallFlow,
+    pub provider_add: ProviderAddFlow,
     pub last_refresh: Instant,
 }
 
@@ -96,6 +112,7 @@ impl App {
             vector_reachable: false,
             error: None,
             install: InstallFlow::Idle,
+            provider_add: ProviderAddFlow::Idle,
             last_refresh: Instant::now(),
         };
         app.refresh();
@@ -255,5 +272,99 @@ impl App {
             InstallFlow::Running { started_at, .. } => Some(started_at.elapsed()),
             _ => None,
         }
+    }
+
+    /// Opens the preset picker (spec: "add providers, configuring them
+    /// using the TUI, for providers like OpenAI, Anthropic, OpenCode Zen,
+    /// NVIDIA AI API").
+    pub fn begin_add_provider(&mut self) {
+        if self.tab != Tab::Providers {
+            return;
+        }
+        let presets = match call(&self.socket_path, &Request::ProviderPresetList) {
+            Ok(Response::Ok { data: ResponseData::ProviderPresets(p) }) => p,
+            Ok(Response::Error { message }) => {
+                self.error = Some(message);
+                return;
+            }
+            _ => {
+                self.error = Some("failed to load provider presets".into());
+                return;
+            }
+        };
+        self.provider_add = ProviderAddFlow::PickingPreset { presets, selected: 0 };
+    }
+
+    pub fn provider_picker_move(&mut self, delta: i32) {
+        if let ProviderAddFlow::PickingPreset { presets, selected } = &mut self.provider_add {
+            if !presets.is_empty() {
+                let len = presets.len() as i32;
+                *selected = ((*selected as i32 + delta).rem_euclid(len)) as usize;
+            }
+        }
+    }
+
+    pub fn provider_picker_confirm(&mut self) {
+        if let ProviderAddFlow::PickingPreset { presets, selected } = &self.provider_add {
+            if let Some(preset) = presets.get(*selected).cloned() {
+                self.provider_add = ProviderAddFlow::EnteringKey { preset, input: String::new() };
+            }
+        }
+    }
+
+    pub fn provider_key_input(&mut self, c: char) {
+        if let ProviderAddFlow::EnteringKey { input, .. } = &mut self.provider_add {
+            input.push(c);
+        }
+    }
+
+    pub fn provider_key_backspace(&mut self) {
+        if let ProviderAddFlow::EnteringKey { input, .. } = &mut self.provider_add {
+            input.pop();
+        }
+    }
+
+    pub fn provider_key_submit(&mut self) {
+        let ProviderAddFlow::EnteringKey { preset, input } = &self.provider_add else { return };
+        if input.is_empty() {
+            self.error = Some("API key cannot be empty".into());
+            return;
+        }
+        let preset_name = preset.name.clone();
+        let value = input.clone();
+        let socket_path = self.socket_path.clone();
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let result = (|| -> anyhow::Result<()> {
+                match call(&socket_path, &Request::ProviderAddPreset { name: preset_name.clone() })? {
+                    Response::Ok { .. } => {}
+                    Response::Error { message } => anyhow::bail!(message),
+                }
+                match call(&socket_path, &Request::ProviderSetKey { name: preset_name.clone(), value })? {
+                    Response::Ok { .. } => Ok(()),
+                    Response::Error { message } => anyhow::bail!(message),
+                }
+            })();
+            let _ = tx.send(result);
+        });
+        self.provider_add = ProviderAddFlow::Submitting { preset_name: preset.name.clone(), rx };
+    }
+
+    pub fn cancel_provider_add(&mut self) {
+        self.provider_add = ProviderAddFlow::Idle;
+    }
+
+    pub fn poll_provider_add(&mut self) -> bool {
+        if let ProviderAddFlow::Submitting { preset_name, rx } = &self.provider_add {
+            if let Ok(result) = rx.try_recv() {
+                self.provider_add = match result {
+                    Ok(()) => ProviderAddFlow::Done { preset_name: preset_name.clone() },
+                    Err(e) => ProviderAddFlow::Failed { preset_name: preset_name.clone(), error: e.to_string() },
+                };
+                self.refresh();
+                return true;
+            }
+        }
+        false
     }
 }

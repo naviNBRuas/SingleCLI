@@ -441,6 +441,10 @@ enum ProviderCommand {
         #[arg(long)]
         yes: bool,
     },
+    /// List built-in provider presets (OpenAI, Anthropic, OpenCode Zen, NVIDIA).
+    Presets,
+    /// Register a provider from a built-in preset (name, env var, base URL already filled in).
+    AddPreset { name: String },
 }
 
 #[derive(Subcommand)]
@@ -810,6 +814,14 @@ fn main() -> anyhow::Result<()> {
                     eprintln!("Dry run (pass --yes to actually write the key into agent config files; backups are made either way).");
                 }
                 let response = client::send(&socket_path, Request::ProviderSync { name, agents, dry_run: !yes })?;
+                render::print(response, false);
+            }
+            ProviderCommand::Presets => {
+                let response = client::send(&socket_path, Request::ProviderPresetList)?;
+                render::print(response, false);
+            }
+            ProviderCommand::AddPreset { name } => {
+                let response = client::send(&socket_path, Request::ProviderAddPreset { name })?;
                 render::print(response, false);
             }
         },
