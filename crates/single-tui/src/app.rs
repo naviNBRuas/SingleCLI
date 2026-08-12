@@ -236,7 +236,7 @@ impl App {
         let socket_path = self.socket_path.clone();
         let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || {
-            let result = call(&socket_path, &Request::AgentInstall { name: agent.clone(), dry_run: false }).map_err(anyhow::Error::from).and_then(|resp| match resp {
+            let result = call(&socket_path, &Request::AgentInstall { name: agent.clone(), dry_run: false }).and_then(|resp| match resp {
                 Response::Ok { data: ResponseData::AgentInstallResult(action) } => Ok(action),
                 Response::Ok { .. } => Err(anyhow::anyhow!("unexpected response")),
                 Response::Error { message } => Err(anyhow::anyhow!(message)),
