@@ -1,0 +1,84 @@
+name: nightly
+
+# Keeps a single rolling pre-release ("nightly") in sync with main, so
+# `single update --channel nightly` always gets whatever's on HEAD instead
+# of waiting for the next tagged version — the "grow as I commit stuff to
+# main" channel.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+concurrency:
+  group: nightly
+  cancel-in-progress: true
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: linux-x86_64
+            os: ubuntu-latest
+            rust_target: x86_64-unknown-linux-gnu
+          - target: linux-arm64
+            os: ubuntu-24.04-arm
+            rust_target: aarch64-unknown-linux-gnu
+          - target: macos-arm64
+            os: macos-latest
+            rust_target: aarch64-apple-darwin
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust_target }}
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --release --workspace --target ${{ matrix.rust_target }}
+      - name: Package
+        shell: bash
+        run: |
+          set -euo pipefail
+          out="singlecli-${{ matrix.target }}"
+          mkdir -p "$out"
+          cp target/${{ matrix.rust_target }}/release/single "$out/"
+          cp target/${{ matrix.rust_target }}/release/single-runtimed "$out/"
+          tar -czf "$out.tar.gz" "$out"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: singlecli-${{ matrix.target }}
+          path: singlecli-${{ matrix.target }}.tar.gz
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      # Rolling tag: drop the previous nightly release+tag first so this
+      # push's build cleanly replaces it rather than colliding on asset names.
+      - name: Delete previous nightly release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release delete nightly --repo ${{ github.repository }} --yes --cleanup-tag || true
+
+      - name: Publish nightly release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: nightly
+          name: "nightly (${{ github.sha }})"
+          prerelease: true
+          target_commitish: ${{ github.sha }}
+          files: artifacts/*.tar.gz
+          body: |
+            Automatically rebuilt from `main` @ ${{ github.sha }}.
+            Not a stable release — install with `single update --channel nightly --yes` if you want to track development, or use the latest `v*` release for anything else.

@@ -16,11 +16,12 @@ anyhow.workspace = true
 clap.workspace = true
 tokio.workspace = true
 directories.workspace = true
+reqwest.workspace = true
+tempfile = "3"
 single-core = { path = "../single-core" }
 single-protocol = { path = "../single-protocol" }
 single-runtime = { path = "../single-runtime" }
 single-tui = { path = "../single-tui" }
 
 [dev-dependencies]
-tempfile = "3"
 assert_cmd = "2"

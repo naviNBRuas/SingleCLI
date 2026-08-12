@@ -67,6 +67,10 @@ single memory graph show                # dump the shared knowledge graph
 
 single                  # launch the TUI: Agents/Tasks/MCP/Providers/Accounts/Memory tabs,
                         # press [i] on an agent to install it interactively (like Claude Code's own setup)
+
+single update --check                       # is a newer stable build available?
+single update --yes                         # replace the running binaries in place
+single update --channel nightly --yes       # track main instead of tagged releases
 ```
 
 Every list/inspect command supports `--json` for scripting.
@@ -120,6 +124,9 @@ Every list/inspect command supports `--json` for scripting.
   with real, commonly-used entries (fetch, sequential-thinking,
   rust-analyzer, pyright, docker, gh, ...) instead of a near-empty list,
   seeded from this project's own verified working configuration.
+- **Self-update** — `single update` checks GitHub Releases and replaces
+  its own binaries in place, on a `stable` (tagged releases) or `nightly`
+  (rebuilt on every push to `main`) channel.
 
 ## What's not (yet)
 

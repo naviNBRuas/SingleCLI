@@ -13,6 +13,7 @@ the project's original request for that).
 - **Memory upgrades** — a SQLite knowledge graph (entities/observations/relations), plus optional Redis (working memory) and Qdrant (vector store) backends.
 - **Distribution** — a cross-platform release workflow (Linux/macOS × x86_64/arm64) and a `curl | sh` installer (`install.sh`), plus a tabbed TUI with in-app interactive agent-install and provider-add flows.
 - **Growth** — richer default MCP/LSP/tool registries seeded from this project's own verified real configuration, provider presets (OpenAI, Anthropic, OpenCode Zen, NVIDIA), automatic "learn from errors" memory on task failure, and a sequential multi-agent orchestration relay (`single orchestrate`).
+- **Self-update** — `single update` checks GitHub Releases and replaces its own binaries in place; a `stable` channel (tagged `vX.Y.Z` releases) and a rolling `nightly` channel that tracks every push to `main`.
 
 A parallel/live multi-agent task-graph (as opposed to the sequential relay
 that exists), full provider abstraction (model discovery, streaming, usage
@@ -406,6 +407,35 @@ artifact, a real persisted record.
   the module doc comment on `orchestrate.rs` for why (no long-lived
   cross-request process state yet, and none of the five CLIs speak a
   shared live inter-agent protocol to begin with).
+
+## Self-update
+
+`crates/single-cli/src/update.rs` — `single update [--channel
+stable|nightly] [--check] [--yes]`, mirroring the real `claude update`/
+`codex update` commands this project already investigated:
+
+- **stable**: GitHub's `/releases/latest` endpoint (`vX.Y.Z` tags, e.g.
+  this project's own `v0.1.1`), with real `major.minor.patch` comparison
+  against the running binary's compiled-in version
+  (`env!("CARGO_PKG_VERSION")`).
+- **nightly**: a single rolling pre-release tagged `nightly`, rebuilt and
+  republished by `.github/workflows/nightly.yml` on every push to `main`
+  (delete-then-recreate the tag so each push cleanly replaces the last
+  rather than colliding on asset names). There's no meaningful semver to
+  diff for a rolling tag, so this channel is always reported as "an
+  update is available" rather than silently claiming it's current.
+- Applying an update downloads the same `singlecli-<target>.tar.gz` asset
+  shape `install.sh`/`release.yml` already use, extracts it, and
+  atomically replaces `single`/`single-runtimed` next to whichever binary
+  is currently running (`std::env::current_exe()`'s directory) — not a
+  fixed path, so it works whether the CLI was installed via `install.sh`,
+  built from source, or copied somewhere custom.
+- Verified for real, twice: `single update --check` against the actual
+  published `v0.1.1` release correctly reported "already up to date";
+  and, with a deliberately older test build, `single update --yes`
+  downloaded the real release asset and replaced the binary in place —
+  confirmed by the file's hash changing and the updated binary still
+  running correctly afterward.
 
 ## Not in Phase 1-6
 

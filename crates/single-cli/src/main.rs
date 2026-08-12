@@ -1,6 +1,7 @@
 mod client;
 mod daemon;
 mod render;
+mod update;
 
 use clap::{Parser, Subcommand};
 use single_core::SingleDirs;
@@ -8,7 +9,7 @@ use single_protocol::{LspServerSpec, McpServerSpec, Request, RiskLevel, ToolSpec
 use std::collections::BTreeMap;
 
 #[derive(Parser)]
-#[command(name = "single", about = "SingleCLI — unified control plane for AI coding agents")]
+#[command(name = "single", version, about = "SingleCLI — unified control plane for AI coding agents")]
 struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
@@ -107,6 +108,16 @@ enum Command {
     Profile {
         #[command(subcommand)]
         action: ProfileCommand,
+    },
+    /// Check for or apply a newer SingleCLI build from GitHub Releases.
+    Update {
+        #[arg(long, default_value = "stable")]
+        channel: String,
+        /// Only report whether a newer build is available; don't download or replace anything.
+        #[arg(long)]
+        check: bool,
+        #[arg(long)]
+        yes: bool,
     },
     /// Sync SingleCLI's MCP registry into every agent's native config.
     InstallIntegrations {
@@ -522,6 +533,12 @@ fn main() -> anyhow::Result<()> {
         return single_tui::run(&socket_path);
     };
 
+    // Self-update needs no runtime/socket at all — it just talks to
+    // GitHub and replaces files next to the current executable.
+    if let Command::Update { channel, check, yes } = command {
+        return run_update(&channel, check, yes);
+    }
+
     match command {
         Command::Status => {
             let response = client::send(&socket_path, Request::Status)?;
@@ -885,7 +902,37 @@ fn main() -> anyhow::Result<()> {
             let response = client::send(&socket_path, Request::UninstallIntegrations)?;
             render::print(response, false);
         }
+        Command::Update { .. } => unreachable!("handled before the socket-based dispatch above"),
     }
 
+    Ok(())
+}
+
+fn run_update(channel: &str, check_only: bool, yes: bool) -> anyhow::Result<()> {
+    println!("current version: {}", update::current_version());
+    let release = update::check_latest(channel)?;
+    println!("latest {channel}: {}", release.tag);
+
+    let newer = update::is_newer(update::current_version(), &release.tag);
+    match newer {
+        Some(false) => {
+            println!("already up to date.");
+            return Ok(());
+        }
+        Some(true) => println!("update available: {} -> {}", update::current_version(), release.tag),
+        None => println!("(can't compare versions for this tag; the {channel} channel always has the latest build available)"),
+    }
+
+    if check_only {
+        return Ok(());
+    }
+    if !yes {
+        eprintln!("pass --yes to download and install this update.");
+        return Ok(());
+    }
+
+    println!("downloading and installing...");
+    let install_dir = update::apply(&release)?;
+    println!("updated in {}", install_dir.display());
     Ok(())
 }
