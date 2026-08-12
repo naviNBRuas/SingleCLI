@@ -1,4 +1,4 @@
-use crate::app::{App, InstallFlow, ProviderAddFlow, Tab, TaskAddFlow};
+use crate::app::{App, InstallFlow, ProviderAddFlow, QuickAddFlow, Tab, TaskAddFlow};
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -34,6 +34,9 @@ pub fn draw(frame: &mut Frame, app: &App) {
     }
     if !matches!(app.task_add, TaskAddFlow::Idle) {
         draw_task_add_modal(frame, area, app);
+    }
+    if !matches!(app.quick_add, QuickAddFlow::Idle) {
+        draw_quick_add_modal(frame, area, app);
     }
 }
 
@@ -80,6 +83,9 @@ fn draw_content(frame: &mut Frame, area: Rect, app: &App) {
         Tab::Agents => draw_agents(frame, area, app),
         Tab::Tasks => draw_tasks(frame, area, app),
         Tab::Mcp => draw_mcp(frame, area, app),
+        Tab::Lsp => draw_lsp(frame, area, app),
+        Tab::Plugins => draw_plugins(frame, area, app),
+        Tab::Tools => draw_tools(frame, area, app),
         Tab::Providers => draw_providers(frame, area, app),
         Tab::Accounts => draw_accounts(frame, area, app),
         Tab::Memory => draw_memory(frame, area, app),
@@ -163,16 +169,85 @@ fn draw_mcp(frame: &mut Frame, area: Rect, app: &App) {
     let items: Vec<ListItem> = app
         .mcp_servers
         .iter()
-        .map(|s| {
+        .enumerate()
+        .map(|(i, s)| {
             let (flag, color) = if s.enabled { ("enabled", OK) } else { ("disabled", MUTED) };
+            let style = if i == app.selected && app.tab == Tab::Mcp { selected_style() } else { Style::default() };
             ListItem::new(Line::from(vec![
                 Span::styled(format!("{:<14}", s.name), Style::default().add_modifier(Modifier::BOLD)),
                 Span::raw(format!("{:<40} ", s.command)),
                 Span::styled(format!("[{flag}]"), Style::default().fg(color)),
             ]))
+            .style(style)
         })
         .collect();
-    let list = List::new(items).block(Block::default().borders(Borders::ALL).title(" MCP servers "));
+    let list = List::new(items).block(Block::default().borders(Borders::ALL).title(" MCP servers — [a] add  [e] enable/disable  [d] remove "));
+    frame.render_widget(list, area);
+}
+
+fn draw_lsp(frame: &mut Frame, area: Rect, app: &App) {
+    let items: Vec<ListItem> = app
+        .lsp_servers
+        .iter()
+        .enumerate()
+        .map(|(i, s)| {
+            let (flag, color) = if s.enabled { ("enabled", OK) } else { ("disabled", MUTED) };
+            let style = if i == app.selected && app.tab == Tab::Lsp { selected_style() } else { Style::default() };
+            ListItem::new(Line::from(vec![
+                Span::styled(format!("{:<14}", s.name), Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(format!("{:<26} ", s.command)),
+                Span::raw(format!("{:<20} ", s.extensions.join(","))),
+                Span::styled(format!("[{flag}]"), Style::default().fg(color)),
+            ]))
+            .style(style)
+        })
+        .collect();
+    let list = List::new(items).block(Block::default().borders(Borders::ALL).title(" LSP servers — [a] add  [d] remove "));
+    frame.render_widget(list, area);
+}
+
+fn draw_plugins(frame: &mut Frame, area: Rect, app: &App) {
+    let items: Vec<ListItem> = app
+        .plugins
+        .iter()
+        .enumerate()
+        .map(|(i, p)| {
+            let style = if i == app.selected && app.tab == Tab::Plugins { selected_style() } else { Style::default() };
+            ListItem::new(Line::from(vec![
+                Span::styled(format!("{:<16}", p.name), Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(format!("{:<28} ", p.target)),
+                Span::styled(p.opencode_module.clone().unwrap_or_else(|| "-".into()), Style::default().fg(MUTED)),
+            ]))
+            .style(style)
+        })
+        .collect();
+    let list = List::new(items).block(Block::default().borders(Borders::ALL).title(" Plugins — [a] add  [s] sync to all agents  [d] remove "));
+    frame.render_widget(list, area);
+}
+
+fn draw_tools(frame: &mut Frame, area: Rect, app: &App) {
+    let items: Vec<ListItem> = app
+        .tools
+        .iter()
+        .enumerate()
+        .map(|(i, t)| {
+            let (flag, color) = if t.enabled { ("enabled", OK) } else { ("disabled", MUTED) };
+            let (risk_label, risk_color) = match t.risk_level {
+                single_protocol::RiskLevel::Low => ("low", OK),
+                single_protocol::RiskLevel::Medium => ("medium", WARN),
+                single_protocol::RiskLevel::High => ("high", BAD),
+            };
+            let style = if i == app.selected && app.tab == Tab::Tools { selected_style() } else { Style::default() };
+            ListItem::new(Line::from(vec![
+                Span::styled(format!("{:<14}", t.name), Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(format!("{:<34} ", t.description)),
+                Span::styled(format!("{risk_label:<8}"), Style::default().fg(risk_color)),
+                Span::styled(format!("[{flag}]"), Style::default().fg(color)),
+            ]))
+            .style(style)
+        })
+        .collect();
+    let list = List::new(items).block(Block::default().borders(Borders::ALL).title(" Tools — [a] add  [e] enable/disable "));
     frame.render_widget(list, area);
 }
 
@@ -260,6 +335,12 @@ fn draw_help(frame: &mut Frame, area: Rect) {
         Line::from(Span::styled("Tasks tab", Style::default().add_modifier(Modifier::BOLD))),
         Line::from("  n                    new task: description, workspace path, then pick one or more agents (space to toggle)"),
         Line::from(""),
+        Line::from(Span::styled("MCP / LSP / Plugins / Tools tabs", Style::default().add_modifier(Modifier::BOLD))),
+        Line::from("  a                    quick add (one line, pipe-separated fields — shown in the modal)"),
+        Line::from("  d                    remove the selected entry (MCP/LSP/Plugins)"),
+        Line::from("  e                    toggle enabled/disabled (MCP/Tools)"),
+        Line::from("  s                    sync the selected plugin into every registered agent (Plugins tab)"),
+        Line::from(""),
         Line::from(Span::styled("Everything else", Style::default().add_modifier(Modifier::BOLD))),
         Line::from("  Use the `single` CLI for actions not yet in the TUI: mcp add, provider add/sync,"),
         Line::from("  account capture/use, task run, memory graph/cache/vector — see `single --help`."),
@@ -272,7 +353,7 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
     let text = if let Some(err) = &app.error {
         Line::from(Span::styled(format!("error: {err}"), Style::default().fg(BAD)))
     } else {
-        Line::from(Span::styled("[tab] switch  [↑↓] move  [i] install agent  [a] add provider  [n] new task  [r] refresh  [q] quit", Style::default().fg(MUTED)))
+        Line::from(Span::styled("[tab] switch  [↑↓] move  [a] add  [d] remove  [e] toggle  [s] sync  [i] install agent  [n] new task  [r] refresh  [q] quit", Style::default().fg(MUTED)))
     };
     frame.render_widget(Paragraph::new(text), area);
 }
@@ -421,6 +502,43 @@ fn draw_task_add_modal(frame: &mut Frame, area: Rect, app: &App) {
             ],
         ),
         TaskAddFlow::Idle => (" ", vec![]),
+    };
+
+    let block = Block::default().borders(Borders::ALL).title(title).border_style(Style::default().fg(ACCENT));
+    frame.render_widget(Paragraph::new(lines).block(block), modal_area);
+}
+
+fn draw_quick_add_modal(frame: &mut Frame, area: Rect, app: &App) {
+    let modal_area = centered_rect(65, 40, area);
+    frame.render_widget(Clear, modal_area);
+
+    let (title, lines): (String, Vec<Line>) = match &app.quick_add {
+        QuickAddFlow::EnteringLine { kind, input } => (
+            format!(" Add {} ", kind.label()),
+            vec![
+                Line::from(Span::styled(kind.format_hint(), Style::default().fg(MUTED))),
+                Line::from(""),
+                Line::from(format!("> {input}")),
+                Line::from(""),
+                Line::from("[enter] add  [esc] cancel"),
+            ],
+        ),
+        QuickAddFlow::Submitting { kind, .. } => (format!(" Adding {}… ", kind.label()), vec![Line::from("Submitting...")]),
+        QuickAddFlow::Done { kind } => (
+            " Added ".to_string(),
+            vec![Line::from(Span::styled(format!("{} added", kind.label()), Style::default().fg(OK))), Line::from(""), Line::from("[enter/esc] close")],
+        ),
+        QuickAddFlow::Failed { kind, error } => (
+            " Failed ".to_string(),
+            vec![
+                Line::from(Span::styled(format!("Could not add {}", kind.label()), Style::default().fg(BAD))),
+                Line::from(""),
+                Line::from(error.clone()),
+                Line::from(""),
+                Line::from("[enter/esc] close"),
+            ],
+        ),
+        QuickAddFlow::Idle => (" ".to_string(), vec![]),
     };
 
     let block = Block::default().borders(Borders::ALL).title(title).border_style(Style::default().fg(ACCENT));

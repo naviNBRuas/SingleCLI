@@ -1,7 +1,7 @@
 use crate::client::call;
 use single_protocol::{
-    AccountProfileInfo, AgentInfo, McpServerInfo, ProviderPresetInfo, ProviderSpec, Request,
-    Response, ResponseData, RuntimeStatus, SetupAction, TaskRecord,
+    AccountProfileInfo, AgentInfo, LspServerSpec, McpServerInfo, PluginSpec, ProviderPresetInfo,
+    ProviderSpec, Request, Response, ResponseData, RuntimeStatus, SetupAction, TaskRecord, ToolSpec,
 };
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
@@ -12,6 +12,9 @@ pub enum Tab {
     Agents,
     Tasks,
     Mcp,
+    Lsp,
+    Plugins,
+    Tools,
     Providers,
     Accounts,
     Memory,
@@ -19,13 +22,18 @@ pub enum Tab {
 }
 
 impl Tab {
-    pub const ALL: [Tab; 7] = [Tab::Agents, Tab::Tasks, Tab::Mcp, Tab::Providers, Tab::Accounts, Tab::Memory, Tab::Help];
+    pub const ALL: [Tab; 10] = [
+        Tab::Agents, Tab::Tasks, Tab::Mcp, Tab::Lsp, Tab::Plugins, Tab::Tools, Tab::Providers, Tab::Accounts, Tab::Memory, Tab::Help,
+    ];
 
     pub fn title(&self) -> &'static str {
         match self {
             Tab::Agents => "Agents",
             Tab::Tasks => "Tasks",
             Tab::Mcp => "MCP",
+            Tab::Lsp => "LSP",
+            Tab::Plugins => "Plugins",
+            Tab::Tools => "Tools",
             Tab::Providers => "Providers",
             Tab::Accounts => "Accounts",
             Tab::Memory => "Memory",
@@ -86,6 +94,50 @@ pub enum TaskAddFlow {
     Failed { error: String },
 }
 
+/// Which registry a `QuickAddFlow` is adding into, and how its single-line
+/// input is parsed. Deliberately one compact form (`field|field|...`)
+/// instead of a per-type multi-step wizard — this is a power-user quick
+/// add for the TUI; anything needing finer control (env vars on an MCP
+/// server, etc.) still has the full `single ... add` CLI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QuickAddKind {
+    Mcp,
+    Lsp,
+    Plugin,
+    Tool,
+}
+
+impl QuickAddKind {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Mcp => "MCP server",
+            Self::Lsp => "LSP server",
+            Self::Plugin => "plugin",
+            Self::Tool => "tool",
+        }
+    }
+
+    pub fn format_hint(&self) -> &'static str {
+        match self {
+            Self::Mcp => "name|command|arg1,arg2 (args optional)",
+            Self::Lsp => "name|command|arg1,arg2|.ext1,.ext2 (args/extensions optional)",
+            Self::Plugin => "name|target|opencode_module (opencode_module optional)",
+            Self::Tool => "name|description|risk_level (low/medium/high)",
+        }
+    }
+}
+
+/// State of the in-TUI "quick add" flow shared by the MCP/LSP/Plugins/Tools
+/// tabs: one line of `field|field|...` input, parsed per `QuickAddKind`,
+/// submitted on a background thread (same shape as `ProviderAddFlow`).
+pub enum QuickAddFlow {
+    Idle,
+    EnteringLine { kind: QuickAddKind, input: String },
+    Submitting { kind: QuickAddKind, rx: mpsc::Receiver<anyhow::Result<()>> },
+    Done { kind: QuickAddKind },
+    Failed { kind: QuickAddKind, error: String },
+}
+
 pub struct App {
     pub socket_path: PathBuf,
     pub tab: Tab,
@@ -94,6 +146,9 @@ pub struct App {
     pub agents: Vec<AgentInfo>,
     pub tasks: Vec<TaskRecord>,
     pub mcp_servers: Vec<McpServerInfo>,
+    pub lsp_servers: Vec<LspServerSpec>,
+    pub plugins: Vec<PluginSpec>,
+    pub tools: Vec<ToolSpec>,
     pub providers: Vec<ProviderSpec>,
     pub accounts: Vec<AccountProfileInfo>,
     pub kg_entity_count: Option<usize>,
@@ -105,6 +160,7 @@ pub struct App {
     pub install: InstallFlow,
     pub provider_add: ProviderAddFlow,
     pub task_add: TaskAddFlow,
+    pub quick_add: QuickAddFlow,
     pub last_refresh: Instant,
 }
 
@@ -118,6 +174,9 @@ impl App {
             agents: Vec::new(),
             tasks: Vec::new(),
             mcp_servers: Vec::new(),
+            lsp_servers: Vec::new(),
+            plugins: Vec::new(),
+            tools: Vec::new(),
             providers: Vec::new(),
             accounts: Vec::new(),
             kg_entity_count: None,
@@ -129,6 +188,7 @@ impl App {
             install: InstallFlow::Idle,
             provider_add: ProviderAddFlow::Idle,
             task_add: TaskAddFlow::Idle,
+            quick_add: QuickAddFlow::Idle,
             last_refresh: Instant::now(),
         };
         app.refresh();
@@ -141,6 +201,9 @@ impl App {
         self.agents = self.fetch_agents();
         self.tasks = self.fetch(Request::TaskList, |d| match d { ResponseData::Tasks(t) => Some(t), _ => None }).unwrap_or_default();
         self.mcp_servers = self.fetch(Request::McpList, |d| match d { ResponseData::McpServers(s) => Some(s), _ => None }).unwrap_or_default();
+        self.lsp_servers = self.fetch(Request::LspList, |d| match d { ResponseData::LspServers(s) => Some(s), _ => None }).unwrap_or_default();
+        self.plugins = self.fetch(Request::PluginList, |d| match d { ResponseData::Plugins(p) => Some(p), _ => None }).unwrap_or_default();
+        self.tools = self.fetch(Request::ToolList, |d| match d { ResponseData::Tools(t) => Some(t), _ => None }).unwrap_or_default();
         self.providers = self.fetch(Request::ProviderList, |d| match d { ResponseData::Providers(p) => Some(p), _ => None }).unwrap_or_default();
         self.accounts = self.fetch(Request::AccountList { agent: None }, |d| match d { ResponseData::AccountProfiles(p) => Some(p), _ => None }).unwrap_or_default();
         self.kg_entity_count = self
@@ -192,6 +255,9 @@ impl App {
             Tab::Agents => self.agents.len(),
             Tab::Tasks => self.tasks.len(),
             Tab::Mcp => self.mcp_servers.len(),
+            Tab::Lsp => self.lsp_servers.len(),
+            Tab::Plugins => self.plugins.len(),
+            Tab::Tools => self.tools.len(),
             Tab::Providers => self.providers.len(),
             Tab::Accounts => self.accounts.len(),
             Tab::Memory | Tab::Help => 0,
@@ -498,5 +564,153 @@ impl App {
             }
         }
         false
+    }
+
+    /// Opens the quick-add flow for whichever of MCP/LSP/Plugins/Tools tab
+    /// is active.
+    pub fn begin_quick_add(&mut self) {
+        let kind = match self.tab {
+            Tab::Mcp => QuickAddKind::Mcp,
+            Tab::Lsp => QuickAddKind::Lsp,
+            Tab::Plugins => QuickAddKind::Plugin,
+            Tab::Tools => QuickAddKind::Tool,
+            _ => return,
+        };
+        self.quick_add = QuickAddFlow::EnteringLine { kind, input: String::new() };
+    }
+
+    pub fn quick_add_input(&mut self, c: char) {
+        if let QuickAddFlow::EnteringLine { input, .. } = &mut self.quick_add {
+            input.push(c);
+        }
+    }
+
+    pub fn quick_add_backspace(&mut self) {
+        if let QuickAddFlow::EnteringLine { input, .. } = &mut self.quick_add {
+            input.pop();
+        }
+    }
+
+    pub fn quick_add_submit(&mut self) {
+        let QuickAddFlow::EnteringLine { kind, input } = &self.quick_add else { return };
+        let kind = *kind;
+        let parts: Vec<&str> = input.split('|').map(|s| s.trim()).collect();
+        let request = match build_quick_add_request(kind, &parts) {
+            Ok(req) => req,
+            Err(e) => {
+                self.error = Some(e);
+                return;
+            }
+        };
+        let socket_path = self.socket_path.clone();
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let result = match call(&socket_path, &request) {
+                Ok(Response::Ok { .. }) => Ok(()),
+                Ok(Response::Error { message }) => Err(anyhow::anyhow!(message)),
+                Err(e) => Err(e),
+            };
+            let _ = tx.send(result);
+        });
+        self.quick_add = QuickAddFlow::Submitting { kind, rx };
+    }
+
+    pub fn cancel_quick_add(&mut self) {
+        self.quick_add = QuickAddFlow::Idle;
+    }
+
+    pub fn poll_quick_add(&mut self) -> bool {
+        if let QuickAddFlow::Submitting { kind, rx } = &self.quick_add {
+            if let Ok(result) = rx.try_recv() {
+                let kind = *kind;
+                self.quick_add = match result {
+                    Ok(()) => QuickAddFlow::Done { kind },
+                    Err(e) => QuickAddFlow::Failed { kind, error: e.to_string() },
+                };
+                self.refresh();
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Removes the currently selected entry (MCP/LSP/Plugins/Tools/
+    /// Accounts/Providers tab — whichever has a real Remove request).
+    pub fn delete_selected(&mut self) {
+        let request = match self.tab {
+            Tab::Mcp => self.mcp_servers.get(self.selected).map(|s| Request::McpRemove { name: s.name.clone() }),
+            Tab::Lsp => self.lsp_servers.get(self.selected).map(|s| Request::LspRemove { name: s.name.clone() }),
+            Tab::Plugins => self.plugins.get(self.selected).map(|p| Request::PluginRemove { name: p.name.clone() }),
+            Tab::Tools => None, // tools are built-in metadata; disable instead of remove (see toggle_selected)
+            Tab::Providers => self.providers.get(self.selected).map(|p| Request::ProviderRemove { name: p.name.clone() }),
+            Tab::Accounts => self.accounts.get(self.selected).map(|a| Request::AccountRemove { agent: a.agent.clone(), name: a.name.clone() }),
+            _ => None,
+        };
+        let Some(request) = request else { return };
+        self.raw(request);
+        self.refresh();
+    }
+
+    /// Toggles enabled/disabled for the selected MCP server or tool (the
+    /// two registries with a real Enable/Disable request).
+    pub fn toggle_selected(&mut self) {
+        let request = match self.tab {
+            Tab::Mcp => self.mcp_servers.get(self.selected).map(|s| {
+                if s.enabled { Request::McpDisable { name: s.name.clone() } } else { Request::McpEnable { name: s.name.clone() } }
+            }),
+            Tab::Tools => self.tools.get(self.selected).map(|t| {
+                if t.enabled { Request::ToolDisable { name: t.name.clone() } } else { Request::ToolEnable { name: t.name.clone() } }
+            }),
+            _ => None,
+        };
+        let Some(request) = request else { return };
+        self.raw(request);
+        self.refresh();
+    }
+
+    /// Syncs the selected plugin into every registered agent (Plugins tab).
+    pub fn sync_selected_plugin(&mut self) {
+        if self.tab != Tab::Plugins {
+            return;
+        }
+        let Some(plugin) = self.plugins.get(self.selected) else { return };
+        self.raw(Request::PluginSync { name: plugin.name.clone(), agents: Vec::new(), dry_run: false });
+        self.refresh();
+    }
+}
+
+fn build_quick_add_request(kind: QuickAddKind, parts: &[&str]) -> Result<Request, String> {
+    let bad_format = || format!("expected: {}", kind.format_hint());
+    match kind {
+        QuickAddKind::Mcp => {
+            let name = parts.first().filter(|s| !s.is_empty()).ok_or_else(bad_format)?;
+            let command = parts.get(1).filter(|s| !s.is_empty()).ok_or_else(bad_format)?;
+            let args = parts.get(2).map(|s| s.split(',').filter(|a| !a.is_empty()).map(|a| a.to_string()).collect()).unwrap_or_default();
+            Ok(Request::McpAdd { server: single_protocol::McpServerSpec { name: name.to_string(), command: command.to_string(), args, env: Default::default(), enabled: true } })
+        }
+        QuickAddKind::Lsp => {
+            let name = parts.first().filter(|s| !s.is_empty()).ok_or_else(bad_format)?;
+            let command = parts.get(1).filter(|s| !s.is_empty()).ok_or_else(bad_format)?;
+            let args = parts.get(2).map(|s| s.split(',').filter(|a| !a.is_empty()).map(|a| a.to_string()).collect()).unwrap_or_default();
+            let extensions = parts.get(3).map(|s| s.split(',').filter(|a| !a.is_empty()).map(|a| a.to_string()).collect()).unwrap_or_default();
+            Ok(Request::LspAdd { server: single_protocol::LspServerSpec { name: name.to_string(), command: command.to_string(), args, extensions, enabled: true } })
+        }
+        QuickAddKind::Plugin => {
+            let name = parts.first().filter(|s| !s.is_empty()).ok_or_else(bad_format)?;
+            let target = parts.get(1).filter(|s| !s.is_empty()).ok_or_else(bad_format)?;
+            let opencode_module = parts.get(2).filter(|s| !s.is_empty()).map(|s| s.to_string());
+            Ok(Request::PluginAdd { plugin: single_protocol::PluginSpec { name: name.to_string(), target: target.to_string(), opencode_module } })
+        }
+        QuickAddKind::Tool => {
+            let name = parts.first().filter(|s| !s.is_empty()).ok_or_else(bad_format)?;
+            let description = parts.get(1).filter(|s| !s.is_empty()).ok_or_else(bad_format)?;
+            let risk_level = match parts.get(2).copied().unwrap_or("low") {
+                "low" => single_protocol::RiskLevel::Low,
+                "medium" => single_protocol::RiskLevel::Medium,
+                "high" => single_protocol::RiskLevel::High,
+                other => return Err(format!("unknown risk level '{other}' (expected low/medium/high)")),
+            };
+            Ok(Request::ToolAdd { tool: single_protocol::ToolSpec { name: name.to_string(), description: description.to_string(), risk_level, enabled: true } })
+        }
     }
 }

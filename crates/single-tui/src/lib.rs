@@ -3,7 +3,7 @@ pub mod client;
 pub mod ui;
 
 use anyhow::Result;
-use app::{App, InstallFlow, ProviderAddFlow, Tab, TaskAddFlow};
+use app::{App, InstallFlow, ProviderAddFlow, QuickAddFlow, Tab, TaskAddFlow};
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use crossterm::execute;
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
@@ -32,7 +32,7 @@ fn event_loop(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> Result<
     loop {
         terminal.draw(|frame| ui::draw(frame, app))?;
 
-        if app.poll_install() || app.poll_provider_add() || app.poll_task_add() {
+        if app.poll_install() || app.poll_provider_add() || app.poll_task_add() || app.poll_quick_add() {
             continue; // redraw immediately on state change
         }
 
@@ -63,6 +63,10 @@ fn handle_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> bool {
         handle_task_add_key(app, code);
         return false;
     }
+    if !matches!(app.quick_add, QuickAddFlow::Idle) {
+        handle_quick_add_key(app, code);
+        return false;
+    }
 
     match code {
         KeyCode::Char('q') => return true,
@@ -76,7 +80,11 @@ fn handle_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> bool {
         KeyCode::Char('r') => app.refresh(),
         KeyCode::Char('i') if app.tab == Tab::Agents => app.begin_install(),
         KeyCode::Char('a') if app.tab == Tab::Providers => app.begin_add_provider(),
+        KeyCode::Char('a') if matches!(app.tab, Tab::Mcp | Tab::Lsp | Tab::Plugins | Tab::Tools) => app.begin_quick_add(),
         KeyCode::Char('n') if app.tab == Tab::Tasks => app.begin_add_task(),
+        KeyCode::Char('d') if matches!(app.tab, Tab::Mcp | Tab::Lsp | Tab::Plugins | Tab::Providers | Tab::Accounts) => app.delete_selected(),
+        KeyCode::Char('e') if matches!(app.tab, Tab::Mcp | Tab::Tools) => app.toggle_selected(),
+        KeyCode::Char('s') if app.tab == Tab::Plugins => app.sync_selected_plugin(),
         _ => {}
     }
     false
@@ -153,5 +161,23 @@ fn handle_task_add_key(app: &mut App, code: KeyCode) {
             }
         }
         TaskAddFlow::Submitting { .. } | TaskAddFlow::Idle => {}
+    }
+}
+
+fn handle_quick_add_key(app: &mut App, code: KeyCode) {
+    match &app.quick_add {
+        QuickAddFlow::EnteringLine { .. } => match code {
+            KeyCode::Char(c) => app.quick_add_input(c),
+            KeyCode::Backspace => app.quick_add_backspace(),
+            KeyCode::Enter => app.quick_add_submit(),
+            KeyCode::Esc => app.cancel_quick_add(),
+            _ => {}
+        },
+        QuickAddFlow::Done { .. } | QuickAddFlow::Failed { .. } => {
+            if matches!(code, KeyCode::Enter | KeyCode::Esc) {
+                app.cancel_quick_add();
+            }
+        }
+        QuickAddFlow::Submitting { .. } | QuickAddFlow::Idle => {}
     }
 }
