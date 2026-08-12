@@ -11,12 +11,13 @@ the project's original request for that).
 - **Phase 6 (partial)** — a provider registry (OpenAI, Anthropic, ...) syncing API keys into the two agents with a verified config slot for them.
 - **Auth** — multi-account credential switching (`single account ...`) so one agent CLI (e.g. Claude Code) can have several logged-in accounts, swapped safely.
 - **Memory upgrades** — a SQLite knowledge graph (entities/observations/relations), plus optional Redis (working memory) and Qdrant (vector store) backends.
-- **Distribution** — a cross-platform release workflow (Linux/macOS × x86_64/arm64) and a `curl | sh` installer (`install.sh`), plus a tabbed TUI with an in-app interactive agent-install flow.
+- **Distribution** — a cross-platform release workflow (Linux/macOS × x86_64/arm64) and a `curl | sh` installer (`install.sh`), plus a tabbed TUI with in-app interactive agent-install and provider-add flows.
+- **Growth** — richer default MCP/LSP/tool registries seeded from this project's own verified real configuration, provider presets (OpenAI, Anthropic, OpenCode Zen, NVIDIA), automatic "learn from errors" memory on task failure, and a sequential multi-agent orchestration relay (`single orchestrate`).
 
-A multi-agent task-graph orchestrator, full provider abstraction (model
-discovery, streaming, usage accounting), a plugin/marketplace system, and
-permission *enforcement* are still out of scope — see "Not in Phase 1-6"
-below.
+A parallel/live multi-agent task-graph (as opposed to the sequential relay
+that exists), full provider abstraction (model discovery, streaming, usage
+accounting), a plugin/marketplace system, and permission *enforcement* are
+still out of scope — see "Not in Phase 1-6" below.
 
 ```text
 single (CLI, no subcommand)          single <command>
@@ -348,6 +349,63 @@ artifact, a real persisted record.
   real terminal session (tmux + a fake agent CLI with no real binary):
   confirm → running spinner → real completion, then the newly "installed"
   agent's live status updated on the next refresh.
+
+## Growth: richer defaults, providers, error-learning, orchestration
+
+- **Richer registry defaults.** `mcp.rs::default_servers()` grew from
+  git+memory to 8 entries (fetch, sequential-thinking auto-enabled;
+  filesystem/github/playwright/chrome-devtools present but disabled until
+  scoped/secreted), `lsp.rs::default_servers()` and
+  `tools.rs::default_tools()` went from empty to real starter catalogs.
+  Every entry is a package this project has directly observed running —
+  either in its own real MCP config or as one of the four LSP plugins
+  behind `~/.claude/settings.json`'s `enabledPlugins` — not an arbitrary
+  or fabricated list.
+- **Provider presets.** `single-core::providers::presets()` — OpenAI,
+  Anthropic, OpenCode Zen, NVIDIA — each base URL/env var pair
+  independently verified against the vendor's own current docs (NVIDIA:
+  `https://integrate.api.nvidia.com/v1` / `NVIDIA_API_KEY`, confirmed via
+  build.nvidia.com's own OpenAI-compatible endpoint documentation;
+  OpenCode Zen: `https://opencode.ai/zen/v1` / `OPENCODE_API_KEY`, per
+  opencode.ai/docs/providers). Configurable from the TUI (Providers tab,
+  `[a]`) or `single provider add-preset <name>`.
+- **Learn from errors.** Every task failure path in `task.rs` (worktree
+  setup failure, agent run failure, non-zero exit/timeout) now also
+  writes a project-scoped, `tool_output`-sourced memory entry via
+  `remember_failure`, so `single memory search`/`list` surface past
+  failures to whoever looks next — human or a future agent run. It's
+  best-effort: a memory-write failure never masks the real task failure.
+- **`single-runtime::orchestrate`** — multi-agent task execution: run
+  several agents in sequence on one goal via `single orchestrate "<goal>"
+  --agents a,b,c [--worktree]`. Every step is a real `task::run` call
+  (identical worktree isolation, artifact capture, and error-learning to
+  a standalone task), so this is additive, not a parallel implementation.
+  Two real mechanisms make later agents actually build on earlier ones,
+  not just watch text scroll by:
+  1. **Shared worktree** — when `--worktree` is set, one worktree is
+     created for the *whole relay* (not one per step), so agent 2 sees
+     agent 1's actual file changes on disk.
+  2. **Output hand-off** — each step's prompt is the original goal plus
+     the previous step's real captured artifact content (capped at 4000
+     chars to avoid unbounded prompt growth over a long relay).
+
+  The relay stops at the first failed step rather than handing broken/
+  missing output forward. Verified end-to-end with real `claude`→`codex`
+  runs: a plain-text goal relayed and both agents produced the expected
+  output, and a file-creation goal correctly demonstrated a real, honest
+  limit — both agents refused the write under their own default
+  non-interactive safety/approval policies, since neither `task::run` nor
+  `orchestrate` auto-injects an agent's own permission-bypass flags (e.g.
+  Claude's `--dangerously-skip-permissions`, Codex's approval-policy
+  flags). SingleCLI treats that as the agent's decision to make, not one
+  to silently override — a user who wants that needs to configure it
+  through the agent's own trust mechanism.
+
+  **Honest scope**: this is a sequential relay, not the full spec's
+  parallel task-graph/DAG with live bidirectional agent messaging — see
+  the module doc comment on `orchestrate.rs` for why (no long-lived
+  cross-request process state yet, and none of the five CLIs speak a
+  shared live inter-agent protocol to begin with).
 
 ## Not in Phase 1-6
 

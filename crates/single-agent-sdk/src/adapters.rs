@@ -67,9 +67,17 @@ impl AgentAdapter for CodexAdapter {
     }
 
     /// `codex exec "<prompt>"` — confirmed non-interactive mode via
-    /// `codex exec --help` on the reference machine.
+    /// `codex exec --help` on the reference machine. `--skip-git-repo-check`
+    /// is also real (confirmed the same way): without it, `codex exec`
+    /// refuses to run in a directory that isn't a trusted git repo, which
+    /// would otherwise break `single task run --agent codex` for any `cwd`
+    /// that isn't already a repo. This doesn't bypass a SingleCLI-level
+    /// trust decision — `cwd` here is already whatever directory the
+    /// caller (a plain `task run`, or `orchestrate`'s shared worktree)
+    /// deliberately chose; it just stops codex from re-litigating that
+    /// choice with its own redundant check.
     fn run_prompt(&self, cwd: &Path, prompt: &str, timeout: Duration) -> Result<RunOutcome> {
-        run_command("codex", &["exec".to_string(), prompt.to_string()], cwd, timeout)
+        run_command("codex", &["exec".to_string(), "--skip-git-repo-check".to_string(), prompt.to_string()], cwd, timeout)
     }
 }
 

@@ -52,13 +52,15 @@ single mcp list         # the unified MCP registry
 single setup --yes       # install missing agent CLIs + sync config
 single install-integrations --yes   # sync MCP config into every agent, with backups
 single task run "add a .gitignore" --agent claude   # delegate a prompt to a real agent, synchronously
+single orchestrate "add tests for the parser" --agents claude,codex --worktree   # relay across multiple agents
 
 single account capture claude work      # snapshot the currently logged-in Claude account
 single account use claude personal      # switch to a different captured account
 
-single provider add anthropic --env-var ANTHROPIC_API_KEY
-single provider set-key anthropic sk-ant-...
-single provider sync anthropic --agents claude --yes
+single provider presets                             # OpenAI, Anthropic, OpenCode Zen, NVIDIA
+single provider add-preset nvidia
+single provider set-key nvidia nvapi-...
+single provider sync nvidia --agents claude --yes
 
 single memory graph create-entity SingleCLI project
 single memory graph show                # dump the shared knowledge graph
@@ -104,15 +106,28 @@ Every list/inspect command supports `--json` for scripting.
   optional Redis working memory (`single memory cache ...`,
   `SINGLE_REDIS_URL`) and Qdrant vector storage/search for RAG
   (`single memory vector ...`, `SINGLE_QDRANT_URL`) — both built and
-  tested against real local instances.
+  tested against real local instances. Task failures are automatically
+  recorded as searchable memory ("learn from errors").
+- **Multi-agent orchestration** — `single orchestrate "<goal>" --agents
+  a,b,c [--worktree]` runs several agents in sequence on one goal, sharing
+  one git worktree and handing each agent the previous one's real
+  captured output. A sequential relay, not live parallel chat — see
+  `docs/architecture.md` for the honest scope.
+- **Provider presets** — OpenAI, Anthropic, OpenCode Zen, and NVIDIA,
+  configurable from the TUI's Providers tab (`[a]`, masked key entry
+  straight to the OS keychain) or `single provider add-preset <name>`.
+- **Richer starter registries** — the default MCP/LSP/tool catalogs ship
+  with real, commonly-used entries (fetch, sequential-thinking,
+  rust-analyzer, pyright, docker, gh, ...) instead of a near-empty list,
+  seeded from this project's own verified working configuration.
 
 ## What's not (yet)
 
-A multi-agent task-graph orchestrator (parallel execution, agent-to-agent
-communication, automatic agent selection), permission *enforcement* (the
-model exists, nothing calls it), a real text-to-vector embeddings pipeline
-(Qdrant integration stores/searches vectors you already have), LSP syncing
-into agents, a plugin marketplace, workflows, and full model/provider
+A parallel/live multi-agent task-graph (as opposed to the sequential
+relay that exists), permission *enforcement* (the model exists, nothing
+calls it), a real text-to-vector embeddings pipeline (Qdrant integration
+stores/searches vectors you already have), LSP syncing into agents, a
+plugin marketplace, workflows, and full model/provider
 abstraction (discovery, streaming, usage accounting) are later work. See
 `docs/architecture.md`'s "Not in Phase 1-6" section for the full, honest
 list.

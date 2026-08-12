@@ -188,6 +188,23 @@ fn print_data(data: ResponseData) {
                 );
             }
         }
+        ResponseData::OrchestrateResult(records) => {
+            println!("Relay ({} step(s)):", records.len());
+            for (i, r) in records.iter().enumerate() {
+                let mark = match r.status {
+                    single_protocol::TaskStatus::Completed => "✓",
+                    single_protocol::TaskStatus::Failed => "✗",
+                    _ => "·",
+                };
+                println!("  {mark} step {} — {} (task #{}): {}", i + 1, r.agent, r.id, r.summary.clone().unwrap_or_default());
+            }
+            if let Some(last) = records.last() {
+                if last.status == single_protocol::TaskStatus::Failed {
+                    eprintln!("relay stopped early after a failed step; see `single task inspect {}`", last.id);
+                    std::process::exit(1);
+                }
+            }
+        }
         ResponseData::AccountProfile(info) => print_account_profile(&info),
         ResponseData::AccountProfiles(profiles) => {
             if profiles.is_empty() {

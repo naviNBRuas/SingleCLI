@@ -197,6 +197,17 @@ fn dispatch(ctx: &Context, request: Request) -> anyhow::Result<ResponseData> {
             let record = crate::task::get(&conn, id)?.ok_or_else(|| anyhow::anyhow!("no task with id {id}"))?;
             Ok(ResponseData::Task(record))
         }
+        Request::Orchestrate { goal, agents, cwd, use_worktree, timeout_secs } => {
+            let conn = task_db(ctx)?;
+            let records = crate::orchestrate::run(&conn, ctx, crate::orchestrate::OrchestrateOptions {
+                goal: &goal,
+                agents: &agents,
+                cwd: std::path::Path::new(&cwd),
+                use_worktree,
+                timeout: std::time::Duration::from_secs(timeout_secs),
+            })?;
+            Ok(ResponseData::OrchestrateResult(records))
+        }
         Request::AccountCapture { agent, name } => {
             let home = integrations::home_dir()?;
             let info = single_core::account::capture(&ctx.dirs.accounts_dir(), &home, &agent, &name)?;

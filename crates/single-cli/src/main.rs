@@ -71,12 +71,24 @@ enum Command {
         json: bool,
     },
     /// Run a task: delegate a prompt to one real agent CLI, synchronously.
-    ///
-    /// Not a multi-agent orchestrator yet (see docs/architecture.md) — one
-    /// task, one agent, blocking until it finishes or times out.
     Task {
         #[command(subcommand)]
         action: TaskCommand,
+    },
+    /// Run several agents in sequence on one goal: each agent runs in the
+    /// same shared git worktree and is handed the previous agent's real
+    /// output. A sequential relay, not live parallel/bidirectional
+    /// multi-agent chat — see docs/architecture.md for the honest scope.
+    Orchestrate {
+        goal: String,
+        #[arg(long, value_delimiter = ',', required = true)]
+        agents: Vec<String>,
+        #[arg(long)]
+        cwd: Option<String>,
+        #[arg(long)]
+        worktree: bool,
+        #[arg(long, default_value = "300")]
+        timeout_secs: u64,
     },
     /// Switch between multiple logged-in accounts for an agent (e.g. two
     /// Claude Code accounts). Log in normally with the agent's own CLI
@@ -788,6 +800,12 @@ fn main() -> anyhow::Result<()> {
                 render::print(response, json);
             }
         },
+        Command::Orchestrate { goal, agents, cwd, worktree, timeout_secs } => {
+            let cwd = cwd.unwrap_or_else(|| ".".to_string());
+            let cwd = std::fs::canonicalize(&cwd).map(|p| p.display().to_string()).unwrap_or(cwd);
+            let response = client::send(&socket_path, Request::Orchestrate { goal, agents, cwd, use_worktree: worktree, timeout_secs })?;
+            render::print(response, false);
+        }
         Command::Provider { action } => match action {
             ProviderCommand::Add { name, env_var, base_url } => {
                 let response = client::send(&socket_path, Request::ProviderAdd { name, env_var_name: env_var, base_url })?;
