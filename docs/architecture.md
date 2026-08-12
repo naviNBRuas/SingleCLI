@@ -14,11 +14,12 @@ the project's original request for that).
 - **Distribution** — a cross-platform release workflow (Linux/macOS × x86_64/arm64) and a `curl | sh` installer (`install.sh`), plus a tabbed TUI with in-app interactive agent-install and provider-add flows.
 - **Growth** — richer default MCP/LSP/tool registries seeded from this project's own verified real configuration, provider presets (OpenAI, Anthropic, OpenCode Zen, NVIDIA), automatic "learn from errors" memory on task failure, and a sequential multi-agent orchestration relay (`single orchestrate`).
 - **Self-update** — `single update` checks GitHub Releases and replaces its own binaries in place; a `stable` channel (tagged `vX.Y.Z` releases) and a rolling `nightly` channel that tracks every push to `main`.
+- **Growth Phase 2** — a plugin registry synced into every agent with a real plugin-install command (`claude`/`codex`/`opencode`/`agy`); LSP sync into OpenCode's real `opencode.jsonc` `lsp` key; skills synced into Claude Code's real skill directory; account profiles gained a human label and a manually-tracked usability status, plus isolated-`$HOME` materialization so multiple accounts of the same agent can run **concurrently**; MCP/LSP preset catalogs for growing the registries without a code change per entry; an expanded tool registry; and a TUI that covers the full config surface (MCP/LSP/Plugins/Tools tabs, in-app task creation).
 
 A parallel/live multi-agent task-graph (as opposed to the sequential relay
 that exists), full provider abstraction (model discovery, streaming, usage
-accounting), a plugin/marketplace system, and permission *enforcement* are
-still out of scope — see "Not in Phase 1-6" below.
+accounting), and permission *enforcement* are still out of scope — see
+"Not in Phase 1-6" below.
 
 ```text
 single (CLI, no subcommand)          single <command>
@@ -131,13 +132,17 @@ investigation.
   add/remove/enable/disable/inspect`.
 - **`single-core::lsp`** — a registry mirroring `mcp.rs`'s shape
   (`~/.config/single/lsp.toml`), exposed as `single lsp
-  list/add/remove/inspect`. There is **no agent sync yet** for LSP (unlike
-  MCP's `configure_mcp`) — Claude Code's LSP support is a marketplace
+  list/add/remove/inspect`. **Agent sync exists for OpenCode**
+  (`AgentAdapter::configure_lsp`/`remove_lsp`, wired into `single
+  install-integrations`/`uninstall-integrations` alongside MCP): it writes
+  into `opencode.jsonc`'s real `lsp` key (`{"command": [...]}`, keyed by
+  name), skipping disabled entries since no per-entry enable field is
+  confirmed there. Claude Code's LSP support is still a marketplace
   *plugin* mechanism (`enabledPlugins` in `~/.claude/settings.json`), a
-  fundamentally different shape from "register an arbitrary command," and
-  OpenCode's native `lsp` key was left unwired to avoid promising a
-  capability without deciding how to reconcile the two mechanisms. The
-  registry itself is real and tested; syncing it into agents is future work.
+  fundamentally different shape from "register an arbitrary command," so
+  `configure_lsp` stays the trait's default "unsupported" for claude/
+  codex/agy/perplexity rather than guessing a translation. See "Growth
+  Phase 2 additions" below for the preset catalog on top of this registry.
 - **`single-core::tools`** — a metadata catalog
   (`~/.config/single/tools.toml`: name, description, risk level, enabled),
   exposed as `single tool list/add/inspect/enable/disable`. Deliberately
@@ -162,9 +167,13 @@ investigation.
 - **`single-core::skills`** — local directory-based skills under
   `~/.config/single/skills/<name>/`, exposed as `single skill
   list/install/remove/inspect`. `install` copies a local source directory
-  in; there's no network/marketplace fetch (that needs the Phase 6 plugin
-  system) and SingleCLI doesn't interpret a skill's contents yet
-  (translating it into each agent's native skill mechanism is future work).
+  in; there's no network/marketplace fetch and SingleCLI doesn't interpret
+  a skill's contents. **`single skill sync-claude <name>`** (added in
+  Growth Phase 2, `single_core::skills::sync_to_claude`) copies a skill
+  into Claude Code's real skill directory (`~/.claude/skills/<name>/`,
+  confirmed via `claude plugin init --help`'s own scaffold-path output),
+  backing up any pre-existing same-named directory first. Other agents'
+  skill mechanisms remain untranslated.
 
 ## Phase 3 additions
 
@@ -290,6 +299,19 @@ artifact, a real persisted record.
   - Every snapshot file is `0600`; every live-state write is backed up
     first; no token contents are ever printed, logged, or recorded in the
     event log — only agent/profile names and timestamps.
+  - **Growth Phase 2**: profiles gained an optional human `label` (`single
+    account capture ... --label you@email.com`) and a manually-set
+    `AccountStatus` (`available`/`rate_limited`/`needs_topup`/`unknown`
+    via `single account set-status`) — never auto-detected, since no
+    agent exposes a verified quota/rate-limit API; SingleCLI just
+    remembers what it's told. `single_core::account::ensure_isolated_home`
+    materializes a per-account `$HOME` (copies the real home's
+    non-credential config once, then overlays that account's captured
+    credentials), so `single task run --account <name>` can run **multiple
+    accounts of the same agent concurrently** (e.g. two `claude`, three
+    `codex`) without any of them clobbering another's live login state —
+    the `AgentAdapter::run_prompt`/`single-agent-sdk::run::run_command`
+    plumbing takes an optional `$HOME` override for exactly this.
 
 ## Memory upgrades: knowledge graph, Redis, Qdrant
 
@@ -437,12 +459,64 @@ stable|nightly] [--check] [--yes]`, mirroring the real `claude update`/
   confirmed by the file's hash changing and the updated binary still
   running correctly afterward.
 
+## Growth Phase 2 additions
+
+- **`single-core::plugins`** — a plugin registry (`plugins.toml`: `name`,
+  `target` — the `plugin[@marketplace]` selector used verbatim by
+  claude/codex/agy — and an optional `opencode_module`, since OpenCode's
+  real `opencode plugin <module>` command addresses plugins by plain npm
+  module name, a genuinely different scheme). `single plugin
+  add/remove/list/inspect` manage the registry; `single plugin sync <name>
+  --agents ... [--yes]` actually installs it via each agent's own real
+  command (`AgentAdapter::install_plugin`: `claude plugin install`, `codex
+  plugin add`, `opencode plugin <module>`, `agy plugin install` — each
+  confirmed against that CLI's own `--help`). This is plugin
+  *installation*, not a marketplace browser — SingleCLI doesn't discover
+  or search available plugins, it installs a target you already know
+  by name.
+- **MCP/LSP preset catalogs** — `single-core::mcp::presets()` and
+  `single-core::lsp::presets()` mirror the provider-presets pattern: a
+  named starter config not yet in the user's registry, opted into one at a
+  time (`single mcp/lsp add-preset <name>`) instead of needing a code
+  change per entry. Every LSP preset's command/flags were confirmed via
+  that binary's own `--help` on the reference machine (`clangd`,
+  `bash-language-server`, `yaml-language-server`, `terraform-ls`,
+  `vscode-json-language-server`, on top of the five defaults); every MCP
+  preset's npm package was confirmed to resolve a real published version
+  via `npm view <package> version` (`brave-search`, `slack`, `puppeteer`,
+  `postgres`) — all four ship disabled since each needs a secret or drives
+  something invasive, same posture as `github`/`playwright` in the
+  original defaults.
+- **Expanded tool registry** — `tools.rs::default_tools()` grew from 7 to
+  26 entries (ripgrep, fd, jq, make, compilers/build tools per language,
+  package managers, `ssh`, `kubectl`/`helm`/`ansible`, the three major
+  cloud CLIs, `tmux`, `vim`), each confirmed present on the reference
+  machine (`command -v`) before being added, with risk levels reflecting
+  what the tool can actually reach (cloud/cluster/remote-shell tools are
+  `High`).
+- **TUI: full config surface.** Three new tabs (**LSP / Plugins / Tools**,
+  alongside the existing Agents/Tasks/MCP/Providers/Accounts/Memory/Help)
+  render their registries live with selection highlighting. A generic
+  "quick add" flow (`[a]`, one pipe-separated line parsed per registry
+  type — deliberately a power-user shortcut, not a five-screen wizard, for
+  cases needing finer control like MCP env vars the full `single ...
+  add` CLI still exists) covers MCP/LSP/Plugins/Tools; `[d]` removes,
+  `[e]` toggles enabled/disabled where the registry supports it, `[s]`
+  syncs the selected plugin into every registered agent.
+- **TUI: task creation.** `[n]` on the Tasks tab opens a three-step flow —
+  description, workspace path, then toggle-select one or more agents
+  (space to toggle) — that calls `TaskRun` for a single agent or
+  `Orchestrate` for more than one, mirroring the same background-thread-
+  plus-`mpsc`-channel shape as the existing install/provider-add flows so
+  the UI keeps redrawing while the request is in flight.
+
 ## Not in Phase 1-6
 
 Per the original spec's own §50 "Development Strategy" (build vertically,
 don't implement everything at once): a multi-agent task-graph orchestrator,
-an event *stream* (vs. the persisted log that exists), an LSP-to-agent
-sync layer, a plugin/marketplace system, permission *enforcement* (the
+an event *stream* (vs. the persisted log that exists), a plugin
+*marketplace/discovery* layer (installing a named plugin is real; browsing
+or searching what's available is not), permission *enforcement* (the
 model exists, nothing calls it), a real embeddings pipeline (text →
 vector), task-scoped context selection, workflows, full model/provider
 abstraction (discovery, streaming, usage accounting), and full process

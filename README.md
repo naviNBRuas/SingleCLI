@@ -6,9 +6,11 @@ new agent CLI you describe in a TOML file. Configure MCP servers,
 provider keys, and accounts once in SingleCLI; every supported agent gets
 the same configuration synced into its own native format.
 
-> **Status: Phases 1-4 done, Phases 5-6 partial.** See "What's
-> implemented" below and `docs/architecture.md` for the full picture,
-> including what's deliberately *not* here yet.
+> **Status: Phases 1-4 done, Phases 5-6 partial, plus two rounds of
+> growth work (plugins, multi-account concurrency, LSP/skills sync,
+> preset catalogs, a fuller TUI).** See "What's implemented" below and
+> `docs/architecture.md` for the full picture, including what's
+> deliberately *not* here yet.
 
 ## Why
 
@@ -62,11 +64,29 @@ single provider add-preset nvidia
 single provider set-key nvidia nvapi-...
 single provider sync nvidia --agents claude --yes
 
+single mcp presets                                  # brave-search, slack, puppeteer, postgres
+single mcp add-preset brave-search
+single lsp presets                                  # rust-analyzer, pyright, typescript, gopls, dockerfile, clangd, bash, yaml, terraform, json
+single lsp add-preset clangd
+
+single plugin add my-plugin my-plugin@official       # target used verbatim by claude/codex/agy
+single plugin sync my-plugin --agents claude --yes   # runs `claude plugin install my-plugin@official`
+
+single account capture claude work --label work@example.com   # snapshot the currently logged-in Claude account
+single account use claude personal                             # switch to a different captured account
+single account set-status claude work rate_limited             # track usability (manual — no agent exposes a quota API)
+single task run "..." --agent claude --account work             # run against an isolated $HOME so multiple
+                                                                  # accounts of the same agent run concurrently
+
+single skill install my-skill ./my-skill-dir
+single skill sync-claude my-skill       # copies it into ~/.claude/skills/my-skill/
+
 single memory graph create-entity SingleCLI project
 single memory graph show                # dump the shared knowledge graph
 
-single                  # launch the TUI: Agents/Tasks/MCP/Providers/Accounts/Memory tabs,
-                        # press [i] on an agent to install it interactively (like Claude Code's own setup)
+single                  # launch the TUI: Agents/Tasks/MCP/LSP/Plugins/Tools/Providers/Accounts/Memory tabs,
+                        # [i] installs an agent interactively, [n] creates a task, [a] quick-adds
+                        # into MCP/LSP/Plugins/Tools, [d]/[e]/[s] remove/toggle/sync the selection
 
 single update --check                       # is a newer stable build available?
 single update --yes                         # replace the running binaries in place
@@ -123,21 +143,48 @@ Every list/inspect command supports `--json` for scripting.
 - **Richer starter registries** — the default MCP/LSP/tool catalogs ship
   with real, commonly-used entries (fetch, sequential-thinking,
   rust-analyzer, pyright, docker, gh, ...) instead of a near-empty list,
-  seeded from this project's own verified working configuration.
+  seeded from this project's own verified working configuration, plus
+  preset catalogs (`single mcp/lsp presets`, `add-preset <name>`) to grow
+  either registry without a code change.
 - **Self-update** — `single update` checks GitHub Releases and replaces
   its own binaries in place, on a `stable` (tagged releases) or `nightly`
   (rebuilt on every push to `main`) channel.
+- **Plugin management** — `single plugin add/remove/list/inspect/sync`:
+  installs a named plugin via each agent's own real command (`claude
+  plugin install`, `codex plugin add`, `opencode plugin <module>`, `agy
+  plugin install`). Installation only — no marketplace browsing/discovery.
+- **LSP sync into OpenCode** — `single install-integrations` now writes
+  the LSP registry into `opencode.jsonc`'s real `lsp` key alongside MCP
+  (the only agent with a confirmed native LSP config surface).
+- **Skills synced into Claude Code** — `single skill sync-claude <name>`
+  copies a locally-installed skill into Claude's real skill directory
+  (`~/.claude/skills/<name>/`), backing up any existing same-named
+  directory first.
+- **Account labels, status, and concurrent multi-account execution** —
+  captured account profiles can carry a human label and a manually-set
+  status (`available`/`rate_limited`/`needs_topup`/`unknown` — never
+  auto-detected, since no agent exposes a verified quota API). `single
+  task run --account <name>` runs against a materialized, isolated
+  `$HOME` for that account instead of swapping the live one in place, so
+  multiple accounts of the same agent (two `claude`, three `codex`, ...)
+  can run **concurrently** without clobbering each other.
+- **TUI: full config surface + task creation** — LSP/Plugins/Tools tabs
+  alongside the original Agents/Tasks/MCP/Providers/Accounts/Memory/Help;
+  a quick-add flow for MCP/LSP/Plugins/Tools, remove/toggle/sync
+  keybindings, and an in-TUI task-creation flow (description → workspace
+  path → pick one or more agents).
 
 ## What's not (yet)
 
 A parallel/live multi-agent task-graph (as opposed to the sequential
 relay that exists), permission *enforcement* (the model exists, nothing
 calls it), a real text-to-vector embeddings pipeline (Qdrant integration
-stores/searches vectors you already have), LSP syncing into agents, a
-plugin marketplace, workflows, and full model/provider
-abstraction (discovery, streaming, usage accounting) are later work. See
-`docs/architecture.md`'s "Not in Phase 1-6" section for the full, honest
-list.
+stores/searches vectors you already have), LSP syncing into agents other
+than OpenCode, a plugin marketplace/discovery layer (installing a named
+plugin is real; browsing what's available is not), workflows, and full
+model/provider abstraction (discovery, streaming, usage accounting) are
+later work. See `docs/architecture.md`'s "Not in Phase 1-6" section for
+the full, honest list.
 
 ## Development
 
