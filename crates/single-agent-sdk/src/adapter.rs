@@ -59,7 +59,13 @@ pub trait AgentAdapter {
     /// multiple isolated accounts of the same agent run concurrently (see
     /// `single-core::account::ensure_isolated_home`); `None` runs against
     /// the caller's real `$HOME` as before.
-    fn run_prompt(&self, _cwd: &Path, _prompt: &str, _home: Option<&Path>, _timeout: Duration) -> Result<RunOutcome> {
+    ///
+    /// `live_output_path`, when set, receives the agent's stdout/stderr
+    /// tee'd there as they're produced (see
+    /// `single-agent-sdk::run::run_command_live`), so a concurrent reader
+    /// — the TUI's task-detail view — can watch the run in progress
+    /// instead of only seeing output once it finishes.
+    fn run_prompt(&self, _cwd: &Path, _prompt: &str, _home: Option<&Path>, _live_output_path: Option<&Path>, _timeout: Duration) -> Result<RunOutcome> {
         anyhow::bail!("{} has no non-interactive run mode wired up", self.command())
     }
 
@@ -88,8 +94,15 @@ pub trait AgentAdapter {
     }
 }
 
-pub(crate) fn run_with_prompt_flag(command: &str, cwd: &Path, prompt: &str, home: Option<&Path>, timeout: Duration) -> Result<RunOutcome> {
-    crate::run::run_command_with_home(command, &["-p".to_string(), prompt.to_string()], cwd, home, timeout)
+pub(crate) fn run_with_prompt_flag(
+    command: &str,
+    cwd: &Path,
+    prompt: &str,
+    home: Option<&Path>,
+    live_output_path: Option<&Path>,
+    timeout: Duration,
+) -> Result<RunOutcome> {
+    crate::run::run_command_live(command, &["-p".to_string(), prompt.to_string()], cwd, home, live_output_path, timeout)
 }
 
 fn unsupported_lsp(agent: &str, home: &Path) -> IntegrationWrite {

@@ -6,9 +6,10 @@
 
 use anyhow::{Context, Result};
 use single_protocol::RunOutcome;
-use std::io::Read;
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 /// Runs `command` attached to the real terminal (inherited stdin/stdout/
@@ -45,6 +46,28 @@ pub fn run_command(command: &str, args: &[String], cwd: &Path, timeout: Duration
 /// CLI reads/writes its config relative to whatever `$HOME` it sees, same
 /// as any other well-behaved Unix program.
 pub fn run_command_with_home(command: &str, args: &[String], cwd: &Path, home: Option<&Path>, timeout: Duration) -> Result<RunOutcome> {
+    run_command_live(command, args, cwd, home, None, timeout)
+}
+
+/// Same as `run_command_with_home`, but when `live_output_path` is set,
+/// stdout/stderr are tee'd to that file **as the process produces them**
+/// (both streams interleaved, line-buffered), not just captured and
+/// returned after the process exits. This is what lets a concurrent
+/// caller — the TUI's task-detail view, polling on its own connection —
+/// watch a long-running agent invocation while it's still in flight,
+/// instead of only seeing output once the whole thing finishes. Reading
+/// happens on two background threads (one per stream) so the child's
+/// pipes are drained continuously; the previous read-after-wait shape
+/// risked the child blocking on a full pipe buffer for chatty output,
+/// which this also incidentally fixes.
+pub fn run_command_live(
+    command: &str,
+    args: &[String],
+    cwd: &Path,
+    home: Option<&Path>,
+    live_output_path: Option<&Path>,
+    timeout: Duration,
+) -> Result<RunOutcome> {
     let start = Instant::now();
     let mut cmd = Command::new(command);
     cmd.args(args).current_dir(cwd).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
@@ -52,6 +75,24 @@ pub fn run_command_with_home(command: &str, args: &[String], cwd: &Path, home: O
         cmd.env("HOME", home);
     }
     let mut child = cmd.spawn().with_context(|| format!("spawning {command}"))?;
+
+    let tee_file: Option<Arc<Mutex<std::fs::File>>> = live_output_path
+        .and_then(|p| std::fs::File::create(p).ok())
+        .map(|f| Arc::new(Mutex::new(f)));
+
+    let stdout_buf = Arc::new(Mutex::new(String::new()));
+    let stderr_buf = Arc::new(Mutex::new(String::new()));
+
+    let stdout_handle = child.stdout.take().map(|pipe| {
+        let buf = Arc::clone(&stdout_buf);
+        let tee = tee_file.clone();
+        std::thread::spawn(move || drain_into(pipe, buf, tee))
+    });
+    let stderr_handle = child.stderr.take().map(|pipe| {
+        let buf = Arc::clone(&stderr_buf);
+        let tee = tee_file.clone();
+        std::thread::spawn(move || drain_into(pipe, buf, tee))
+    });
 
     let deadline = start + timeout;
     let timed_out = loop {
@@ -66,17 +107,17 @@ pub fn run_command_with_home(command: &str, args: &[String], cwd: &Path, home: O
         }
     };
 
-    let mut stdout = String::new();
-    let mut stderr = String::new();
-    if let Some(mut out) = child.stdout.take() {
-        let _ = out.read_to_string(&mut stdout);
+    if let Some(h) = stdout_handle {
+        let _ = h.join();
     }
-    if let Some(mut err) = child.stderr.take() {
-        let _ = err.read_to_string(&mut stderr);
+    if let Some(h) = stderr_handle {
+        let _ = h.join();
     }
 
     let exit_code = child.wait().ok().and_then(|s| s.code());
     let success = !timed_out && exit_code == Some(0);
+    let stdout = Arc::try_unwrap(stdout_buf).map(|m| m.into_inner().unwrap_or_default()).unwrap_or_default();
+    let stderr = Arc::try_unwrap(stderr_buf).map(|m| m.into_inner().unwrap_or_default()).unwrap_or_default();
 
     Ok(RunOutcome {
         success,
@@ -86,6 +127,26 @@ pub fn run_command_with_home(command: &str, args: &[String], cwd: &Path, home: O
         timed_out,
         duration_ms: start.elapsed().as_millis(),
     })
+}
+
+/// Reads `pipe` line by line, accumulating into `buf` and — when `tee` is
+/// set — appending each line to the shared file immediately (flushed, so
+/// a concurrent reader of that file sees it right away).
+fn drain_into(pipe: impl Read, buf: Arc<Mutex<String>>, tee: Option<Arc<Mutex<std::fs::File>>>) {
+    let reader = BufReader::new(pipe);
+    for line in reader.lines() {
+        let Ok(line) = line else { break };
+        if let Some(tee) = &tee {
+            if let Ok(mut f) = tee.lock() {
+                let _ = writeln!(f, "{line}");
+                let _ = f.flush();
+            }
+        }
+        if let Ok(mut b) = buf.lock() {
+            b.push_str(&line);
+            b.push('\n');
+        }
+    }
 }
 
 #[cfg(test)]
@@ -108,6 +169,24 @@ mod tests {
         let outcome = run_command("sh", &["-c".into(), "exit 3".into()], dir.path(), Duration::from_secs(5)).unwrap();
         assert!(!outcome.success);
         assert_eq!(outcome.exit_code, Some(3));
+    }
+
+    #[test]
+    fn live_output_path_tees_the_same_content_as_the_captured_outcome() {
+        let dir = tempfile::tempdir().unwrap();
+        let live_path = dir.path().join("live.txt");
+        let outcome = run_command_live(
+            "sh",
+            &["-c".into(), "echo first; sleep 0.3; echo second".into()],
+            dir.path(),
+            None,
+            Some(&live_path),
+            Duration::from_secs(5),
+        )
+        .unwrap();
+        assert!(outcome.success);
+        assert_eq!(outcome.stdout, "first\nsecond\n");
+        assert_eq!(std::fs::read_to_string(&live_path).unwrap(), "first\nsecond\n");
     }
 
     #[test]

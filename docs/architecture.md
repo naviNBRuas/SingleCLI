@@ -634,6 +634,47 @@ stable|nightly] [--check] [--yes]`, mirroring the real `claude update`/
   installed" section for the full reasoning — same honesty standard as
   the Perplexity caveat above, not a guessed substitute.
 
+## Growth Phase 5: live task output in the TUI
+
+- **`single-agent-sdk::run::run_command_live`** replaces the old
+  read-after-wait capture: two background threads drain the child's
+  stdout/stderr pipes as the process runs (line by line), each
+  accumulating into the final `RunOutcome` and, when a
+  `live_output_path` is given, tee-ing every line to that file
+  immediately (flushed). Incidentally fixes a latent risk in the old
+  code too — a chatty child could fill its pipe buffer and block on
+  `write()` while nothing was reading it until `try_wait()` returned;
+  continuous draining removes that possibility.
+- **`AgentAdapter::run_prompt`** gained a `live_output_path: Option<&Path>`
+  parameter (threaded through all 11 built-in adapters plus
+  `GenericAdapter`, mechanical given the pattern was already established
+  for `home`). `single-runtime::task::run` pre-creates the artifacts
+  directory and computes a live path
+  (`SingleDirs::task_live_output_path(id)`, `task-<id>.live.txt`) before
+  invoking the agent, and removes it once the run finishes and the final
+  artifact (`task-<id>.txt`) is written.
+- **TUI: task-detail viewer.** `Enter` on a Tasks-tab row opens a modal
+  showing status/exit code/summary and the task's output — reading the
+  live file directly off disk (same `SingleDirs` methods the runtime
+  used to write it, no new IPC needed since both processes are always
+  local) while the task is `Running`, auto-refreshing every 500ms via
+  `TaskInspect`, and switching to the final artifact once it finishes.
+  Since an `orchestrate` run creates one task row per agent per step,
+  this is also how you inspect each agent in a multi-agent run
+  individually — select its row, press `Enter`. `single_tui::run` now
+  takes the resolved `SingleDirs` (not just the socket path) so the TUI
+  can compute these paths itself.
+- **Honest scope**: this is disk-file polling, not a push-based live
+  event stream — the runtime doesn't notify the TUI when new output
+  arrives, the TUI just re-reads the file periodically while a task is
+  running. Good enough for a human watching a task in a terminal;
+  wouldn't be the right primitive for, say, a sub-100ms-latency use case.
+- Verified end-to-end with a real subprocess (a custom TOML agent running
+  `sh -c "echo one; sleep 2; echo two; sleep 2; echo three"`): the live
+  file showed `one` within 0.5s and `two` within 2.5s of it actually
+  being echoed — genuinely incremental, not buffered until exit — and
+  was removed once the task completed, leaving only the final artifact.
+
 ## Not in Phase 1-6
 
 Per the original spec's own §50 "Development Strategy" (build vertically,

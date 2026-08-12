@@ -76,10 +76,10 @@ impl AgentAdapter for GenericAdapter {
         }
     }
 
-    fn run_prompt(&self, cwd: &Path, prompt: &str, home: Option<&Path>, timeout: Duration) -> Result<RunOutcome> {
+    fn run_prompt(&self, cwd: &Path, prompt: &str, home: Option<&Path>, live_output_path: Option<&Path>, timeout: Duration) -> Result<RunOutcome> {
         match &self.def.run {
-            Some(run) if run.mode == "flag" => crate::run::run_command_with_home(&self.def.command, &[run.value.clone(), prompt.to_string()], cwd, home, timeout),
-            Some(run) if run.mode == "subcommand" => crate::run::run_command_with_home(&self.def.command, &[run.value.clone(), prompt.to_string()], cwd, home, timeout),
+            Some(run) if run.mode == "flag" => crate::run::run_command_live(&self.def.command, &[run.value.clone(), prompt.to_string()], cwd, home, live_output_path, timeout),
+            Some(run) if run.mode == "subcommand" => crate::run::run_command_live(&self.def.command, &[run.value.clone(), prompt.to_string()], cwd, home, live_output_path, timeout),
             _ => anyhow::bail!("{} has no [run] mode defined", self.def.name),
         }
     }
@@ -264,6 +264,6 @@ mod tests {
         let mut def = sample_def();
         def.run = None;
         let adapter = GenericAdapter::new(def);
-        assert!(adapter.run_prompt(dir.path(), "hi", None, Duration::from_secs(1)).is_err());
+        assert!(adapter.run_prompt(dir.path(), "hi", None, None, Duration::from_secs(1)).is_err());
     }
 }

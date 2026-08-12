@@ -607,7 +607,7 @@ fn main() -> anyhow::Result<()> {
 
     let Some(command) = cli.command else {
         daemon::ensure_running(&dirs)?;
-        return single_tui::run(&socket_path);
+        return single_tui::run(dirs);
     };
 
     // Self-update needs no runtime/socket at all — it just talks to

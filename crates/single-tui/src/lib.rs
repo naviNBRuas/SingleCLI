@@ -3,24 +3,24 @@ pub mod client;
 pub mod ui;
 
 use anyhow::Result;
-use app::{App, InstallFlow, ProviderAddFlow, QuickAddFlow, Tab, TaskAddFlow};
+use app::{App, InstallFlow, ProviderAddFlow, QuickAddFlow, Tab, TaskAddFlow, TaskDetailFlow};
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use crossterm::execute;
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
-use std::path::Path;
+use single_core::SingleDirs;
 use std::time::Duration;
 
 /// Runs the SingleCLI dashboard: a tabbed control center over the runtime
 /// socket (Agents/Tasks/MCP/Providers/Accounts/Memory/Help), including
 /// interactive in-TUI agent-install and provider-add flows.
-pub fn run(socket_path: &Path) -> Result<()> {
+pub fn run(dirs: SingleDirs) -> Result<()> {
     enable_raw_mode()?;
     let mut stdout = std::io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
     let backend = ratatui::backend::CrosstermBackend::new(stdout);
     let mut terminal = ratatui::Terminal::new(backend)?;
 
-    let mut app = App::new(socket_path);
+    let mut app = App::new(dirs);
     let result = event_loop(&mut terminal, &mut app);
 
     disable_raw_mode()?;
@@ -32,7 +32,7 @@ fn event_loop(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> Result<
     loop {
         terminal.draw(|frame| ui::draw(frame, app))?;
 
-        if app.poll_install() || app.poll_provider_add() || app.poll_task_add() || app.poll_quick_add() {
+        if app.poll_install() || app.poll_provider_add() || app.poll_task_add() || app.poll_quick_add() || app.poll_task_detail() {
             continue; // redraw immediately on state change
         }
 
@@ -67,6 +67,10 @@ fn handle_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> bool {
         handle_quick_add_key(app, code);
         return false;
     }
+    if !matches!(app.task_detail, TaskDetailFlow::Idle) {
+        handle_task_detail_key(app, code);
+        return false;
+    }
 
     match code {
         KeyCode::Char('q') => return true,
@@ -82,12 +86,19 @@ fn handle_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> bool {
         KeyCode::Char('a') if app.tab == Tab::Providers => app.begin_add_provider(),
         KeyCode::Char('a') if matches!(app.tab, Tab::Mcp | Tab::Lsp | Tab::Plugins | Tab::Tools) => app.begin_quick_add(),
         KeyCode::Char('n') if app.tab == Tab::Tasks => app.begin_add_task(),
+        KeyCode::Enter if app.tab == Tab::Tasks => app.begin_view_task(),
         KeyCode::Char('d') if matches!(app.tab, Tab::Mcp | Tab::Lsp | Tab::Plugins | Tab::Providers | Tab::Accounts) => app.delete_selected(),
         KeyCode::Char('e') if matches!(app.tab, Tab::Mcp | Tab::Tools) => app.toggle_selected(),
         KeyCode::Char('s') if app.tab == Tab::Plugins => app.sync_selected_plugin(),
         _ => {}
     }
     false
+}
+
+fn handle_task_detail_key(app: &mut App, code: KeyCode) {
+    if matches!(code, KeyCode::Enter | KeyCode::Esc | KeyCode::Char('q')) {
+        app.cancel_task_detail();
+    }
 }
 
 fn handle_install_key(app: &mut App, code: KeyCode) {

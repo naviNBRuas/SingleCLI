@@ -1,9 +1,10 @@
 use crate::client::call;
+use single_core::SingleDirs;
 use single_protocol::{
     AccountProfileInfo, AgentInfo, LspServerSpec, McpServerInfo, PluginSpec, ProviderPresetInfo,
-    ProviderSpec, Request, Response, ResponseData, RuntimeStatus, SetupAction, TaskRecord, ToolSpec,
+    ProviderSpec, Request, Response, ResponseData, RuntimeStatus, SetupAction, TaskRecord, TaskStatus, ToolSpec,
 };
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -138,8 +139,21 @@ pub enum QuickAddFlow {
     Failed { kind: QuickAddKind, error: String },
 }
 
+/// State of the task-detail viewer (Tasks tab, `Enter` on a row): shows a
+/// single task's full output, live-tailed while it's still running (see
+/// `single_core::SingleDirs::task_live_output_path` /
+/// `single-agent-sdk::run::run_command_live`) and switching to the final
+/// artifact once it finishes. Since an `orchestrate` run creates one task
+/// row per agent per step, this is also how each agent in a multi-agent
+/// run gets inspected individually — select its row, press `Enter`.
+pub enum TaskDetailFlow {
+    Idle,
+    Viewing { task: TaskRecord, output: String, last_polled: Instant },
+}
+
 pub struct App {
     pub socket_path: PathBuf,
+    pub dirs: SingleDirs,
     pub tab: Tab,
     pub selected: usize,
     pub status: Option<RuntimeStatus>,
@@ -161,13 +175,16 @@ pub struct App {
     pub provider_add: ProviderAddFlow,
     pub task_add: TaskAddFlow,
     pub quick_add: QuickAddFlow,
+    pub task_detail: TaskDetailFlow,
     pub last_refresh: Instant,
 }
 
 impl App {
-    pub fn new(socket_path: &Path) -> Self {
+    pub fn new(dirs: SingleDirs) -> Self {
+        let socket_path = dirs.socket_path();
         let mut app = Self {
-            socket_path: socket_path.to_path_buf(),
+            socket_path,
+            dirs,
             tab: Tab::Agents,
             selected: 0,
             status: None,
@@ -189,6 +206,7 @@ impl App {
             provider_add: ProviderAddFlow::Idle,
             task_add: TaskAddFlow::Idle,
             quick_add: QuickAddFlow::Idle,
+            task_detail: TaskDetailFlow::Idle,
             last_refresh: Instant::now(),
         };
         app.refresh();
@@ -676,6 +694,47 @@ impl App {
         let Some(plugin) = self.plugins.get(self.selected) else { return };
         self.raw(Request::PluginSync { name: plugin.name.clone(), agents: Vec::new(), dry_run: false });
         self.refresh();
+    }
+
+    /// Opens the task-detail viewer for the selected row (Tasks tab).
+    pub fn begin_view_task(&mut self) {
+        if self.tab != Tab::Tasks {
+            return;
+        }
+        let Some(task) = self.tasks.get(self.selected).cloned() else { return };
+        let output = self.read_task_output(&task);
+        self.task_detail = TaskDetailFlow::Viewing { task, output, last_polled: Instant::now() };
+    }
+
+    pub fn cancel_task_detail(&mut self) {
+        self.task_detail = TaskDetailFlow::Idle;
+    }
+
+    fn read_task_output(&self, task: &TaskRecord) -> String {
+        let path = if task.status == TaskStatus::Running {
+            self.dirs.task_live_output_path(task.id)
+        } else {
+            self.dirs.task_artifact_path(task.id)
+        };
+        std::fs::read_to_string(&path).unwrap_or_else(|_| "(no output yet)".to_string())
+    }
+
+    /// Re-fetches the viewed task and its output while it's still
+    /// running, throttled so this doesn't hit the socket/disk every
+    /// single event-loop tick. Stops polling once the task finishes —
+    /// there's nothing left to change.
+    pub fn poll_task_detail(&mut self) -> bool {
+        let TaskDetailFlow::Viewing { task, last_polled, .. } = &self.task_detail else { return false };
+        if task.status != TaskStatus::Running || last_polled.elapsed() < Duration::from_millis(500) {
+            return false;
+        }
+        let id = task.id;
+        let Some(updated) = self.fetch(Request::TaskInspect { id }, |d| match d { ResponseData::Task(t) => Some(t), _ => None }) else {
+            return false;
+        };
+        let output = self.read_task_output(&updated);
+        self.task_detail = TaskDetailFlow::Viewing { task: updated, output, last_polled: Instant::now() };
+        true
     }
 }
 

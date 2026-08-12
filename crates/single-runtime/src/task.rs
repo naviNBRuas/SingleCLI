@@ -203,15 +203,16 @@ pub fn run(conn: &Connection, ctx: &Context, opts: RunTaskOptions) -> Result<Tas
         }
     };
 
-    let outcome = adapter.run_prompt(&run_cwd, opts.description, Some(&isolated_home), opts.timeout);
+    std::fs::create_dir_all(ctx.dirs.artifacts_dir())?;
+    let live_output_path = ctx.dirs.task_live_output_path(id);
+    let outcome = adapter.run_prompt(&run_cwd, opts.description, Some(&isolated_home), Some(&live_output_path), opts.timeout);
+    let _ = std::fs::remove_file(&live_output_path); // superseded by the final artifact below; best-effort cleanup
 
     let worktree_path_str = opts.use_worktree.then(|| run_cwd.display().to_string());
 
     match outcome {
         Ok(outcome) => {
-            let artifacts_dir = ctx.dirs.state_dir().join("artifacts");
-            std::fs::create_dir_all(&artifacts_dir)?;
-            let artifact_path = artifacts_dir.join(format!("task-{id}.txt"));
+            let artifact_path = ctx.dirs.task_artifact_path(id);
             std::fs::write(&artifact_path, format!("{}\n--- stderr ---\n{}", outcome.stdout, outcome.stderr))?;
 
             let status = if outcome.success { TaskStatus::Completed } else { TaskStatus::Failed };

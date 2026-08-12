@@ -107,6 +107,26 @@ impl SingleDirs {
         self.root.join("homes")
     }
 
+    pub fn artifacts_dir(&self) -> PathBuf {
+        self.state_dir().join("artifacts")
+    }
+
+    /// Where a finished task's full captured stdout+stderr lives.
+    pub fn task_artifact_path(&self, id: i64) -> PathBuf {
+        self.artifacts_dir().join(format!("task-{id}.txt"))
+    }
+
+    /// Where a task's output is tee'd *while it's still running* (see
+    /// `single-agent-sdk::run::run_command_live`) — the TUI's task-detail
+    /// view reads this file for a live view, then switches to
+    /// `task_artifact_path` once the task finishes. Same naming
+    /// convention on both ends (runtime writer, TUI reader) rather than a
+    /// value passed over the socket, since both already agree on
+    /// `SingleDirs`.
+    pub fn task_live_output_path(&self, id: i64) -> PathBuf {
+        self.artifacts_dir().join(format!("task-{id}.live.txt"))
+    }
+
     /// Creates the subset of the directory tree Phase 1 needs. Never touches
     /// anything outside `self.root`.
     pub fn ensure_created(&self) -> Result<()> {

@@ -95,8 +95,10 @@ single memory graph create-entity SingleCLI project
 single memory graph show                # dump the shared knowledge graph
 
 single                  # launch the TUI: Agents/Tasks/MCP/LSP/Plugins/Tools/Providers/Accounts/Memory tabs,
-                        # [i] installs an agent interactively, [n] creates a task, [a] quick-adds
-                        # into MCP/LSP/Plugins/Tools, [d]/[e]/[s] remove/toggle/sync the selection
+                        # [i] installs an agent interactively, [n] creates a task, [enter] on a task
+                        # shows its live output (auto-refreshing while running); orchestrate runs
+                        # create one row per agent per step, so each agent's own output is one [enter] away.
+                        # [a] quick-adds into MCP/LSP/Plugins/Tools, [d]/[e]/[s] remove/toggle/sync the selection
 
 single update --check                       # is a newer stable build available?
 single update --yes                         # replace the running binaries in place
@@ -183,6 +185,12 @@ Every list/inspect command supports `--json` for scripting.
   a quick-add flow for MCP/LSP/Plugins/Tools, remove/toggle/sync
   keybindings, and an in-TUI task-creation flow (description → workspace
   path → pick one or more agents).
+- **Live task output in the TUI** — press `Enter` on any row in the Tasks
+  tab to see that task's real output, tailed as it's produced while the
+  task is still running (auto-refreshing) and switching to the full
+  final output once it finishes. Since an `orchestrate` run creates a
+  separate task row per agent per step, this is how you watch each agent
+  in a multi-agent run individually.
 - **Isolated agent homes + `single agent login`** — every agent runs
   against a SingleCLI-managed home under `~/.config/single/homes/<agent>/`
   (bootstrapped from the real one exactly once), never the real, ambient

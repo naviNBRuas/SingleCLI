@@ -1,7 +1,7 @@
 use crate::adapter::{run_with_prompt_flag, AgentAdapter};
 use crate::backup::backup_before_write;
 use crate::formats;
-use crate::run::{run_command_with_home, run_interactive_with_home};
+use crate::run::{run_command_live, run_command_with_home, run_interactive_with_home};
 use anyhow::Result;
 use single_protocol::{IntegrationWrite, McpServerSpec, RunOutcome};
 use std::path::Path;
@@ -44,8 +44,8 @@ impl AgentAdapter for ClaudeAdapter {
 
     /// `claude -p "<prompt>"` — confirmed non-interactive print mode via
     /// `claude --help` on the reference machine.
-    fn run_prompt(&self, cwd: &Path, prompt: &str, home: Option<&Path>, timeout: Duration) -> Result<RunOutcome> {
-        run_with_prompt_flag("claude", cwd, prompt, home, timeout)
+    fn run_prompt(&self, cwd: &Path, prompt: &str, home: Option<&Path>, live_output_path: Option<&Path>, timeout: Duration) -> Result<RunOutcome> {
+        run_with_prompt_flag("claude", cwd, prompt, home, live_output_path, timeout)
     }
 
     /// `claude plugin install <plugin[@marketplace]>` — confirmed real via
@@ -95,8 +95,8 @@ impl AgentAdapter for CodexAdapter {
     /// caller (a plain `task run`, or `orchestrate`'s shared worktree)
     /// deliberately chose; it just stops codex from re-litigating that
     /// choice with its own redundant check.
-    fn run_prompt(&self, cwd: &Path, prompt: &str, home: Option<&Path>, timeout: Duration) -> Result<RunOutcome> {
-        run_command_with_home("codex", &["exec".to_string(), "--skip-git-repo-check".to_string(), prompt.to_string()], cwd, home, timeout)
+    fn run_prompt(&self, cwd: &Path, prompt: &str, home: Option<&Path>, live_output_path: Option<&Path>, timeout: Duration) -> Result<RunOutcome> {
+        run_command_live("codex", &["exec".to_string(), "--skip-git-repo-check".to_string(), prompt.to_string()], cwd, home, live_output_path, timeout)
     }
 
     /// `codex plugin add <plugin[@marketplace]>` — confirmed real via
@@ -165,12 +165,13 @@ impl AgentAdapter for OpenCodeAdapter {
     /// `opencode run "<prompt>" --dir <cwd>` — confirmed non-interactive
     /// mode and `--dir` flag via `opencode run --help` on the reference
     /// machine.
-    fn run_prompt(&self, cwd: &Path, prompt: &str, home: Option<&Path>, timeout: Duration) -> Result<RunOutcome> {
-        run_command_with_home(
+    fn run_prompt(&self, cwd: &Path, prompt: &str, home: Option<&Path>, live_output_path: Option<&Path>, timeout: Duration) -> Result<RunOutcome> {
+        run_command_live(
             "opencode",
             &["run".to_string(), prompt.to_string(), "--dir".to_string(), cwd.display().to_string()],
             cwd,
             home,
+            live_output_path,
             timeout,
         )
     }
@@ -208,8 +209,8 @@ impl AgentAdapter for AgyAdapter {
 
     /// `agy -p "<prompt>"` — confirmed non-interactive print mode via
     /// `agy --help` on the reference machine.
-    fn run_prompt(&self, cwd: &Path, prompt: &str, home: Option<&Path>, timeout: Duration) -> Result<RunOutcome> {
-        run_with_prompt_flag("agy", cwd, prompt, home, timeout)
+    fn run_prompt(&self, cwd: &Path, prompt: &str, home: Option<&Path>, live_output_path: Option<&Path>, timeout: Duration) -> Result<RunOutcome> {
+        run_with_prompt_flag("agy", cwd, prompt, home, live_output_path, timeout)
     }
 
     /// `agy plugin install <plugin[@marketplace]>` — confirmed real via
@@ -273,8 +274,8 @@ impl AgentAdapter for CursorAdapter {
 
     /// `cursor-agent -p "<prompt>"` — confirmed non-interactive print mode
     /// via `cursor-agent --help` on the reference machine.
-    fn run_prompt(&self, cwd: &Path, prompt: &str, home: Option<&Path>, timeout: Duration) -> Result<RunOutcome> {
-        run_command_with_home("cursor-agent", &["-p".to_string(), prompt.to_string()], cwd, home, timeout)
+    fn run_prompt(&self, cwd: &Path, prompt: &str, home: Option<&Path>, live_output_path: Option<&Path>, timeout: Duration) -> Result<RunOutcome> {
+        run_command_live("cursor-agent", &["-p".to_string(), prompt.to_string()], cwd, home, live_output_path, timeout)
     }
 
     /// `cursor-agent login` — confirmed real via `cursor-agent --help` on
@@ -303,8 +304,8 @@ impl AgentAdapter for AiderAdapter {
     /// `aider --message "<prompt>" --yes-always` — confirmed non-interactive
     /// mode via `aider --help` on the reference machine (`--yes-always`
     /// skips the confirmation prompts `--message` alone would still hit).
-    fn run_prompt(&self, cwd: &Path, prompt: &str, home: Option<&Path>, timeout: Duration) -> Result<RunOutcome> {
-        run_command_with_home("aider", &["--message".to_string(), prompt.to_string(), "--yes-always".to_string()], cwd, home, timeout)
+    fn run_prompt(&self, cwd: &Path, prompt: &str, home: Option<&Path>, live_output_path: Option<&Path>, timeout: Duration) -> Result<RunOutcome> {
+        run_command_live("aider", &["--message".to_string(), prompt.to_string(), "--yes-always".to_string()], cwd, home, live_output_path, timeout)
     }
 
     // No `login`: aider authenticates via API-key flags/env vars
@@ -339,12 +340,13 @@ impl AgentAdapter for GooseAdapter {
     /// non-interactive mode via `goose run --help` on the reference
     /// machine (`--no-session` skips creating a session file, `--quiet`
     /// prints only the model's response).
-    fn run_prompt(&self, cwd: &Path, prompt: &str, home: Option<&Path>, timeout: Duration) -> Result<RunOutcome> {
-        run_command_with_home(
+    fn run_prompt(&self, cwd: &Path, prompt: &str, home: Option<&Path>, live_output_path: Option<&Path>, timeout: Duration) -> Result<RunOutcome> {
+        run_command_live(
             "goose",
             &["run".to_string(), "--text".to_string(), prompt.to_string(), "--no-session".to_string(), "--quiet".to_string()],
             cwd,
             home,
+            live_output_path,
             timeout,
         )
     }
@@ -390,8 +392,8 @@ impl AgentAdapter for CopilotAdapter {
     /// nothing to auto-approve tool calls with and can't complete), the
     /// same "needed to function at all, not an extra permission grant"
     /// reasoning already applied to codex's `--skip-git-repo-check`.
-    fn run_prompt(&self, cwd: &Path, prompt: &str, home: Option<&Path>, timeout: Duration) -> Result<RunOutcome> {
-        run_command_with_home("copilot", &["-p".to_string(), prompt.to_string(), "--allow-all-tools".to_string()], cwd, home, timeout)
+    fn run_prompt(&self, cwd: &Path, prompt: &str, home: Option<&Path>, live_output_path: Option<&Path>, timeout: Duration) -> Result<RunOutcome> {
+        run_command_live("copilot", &["-p".to_string(), prompt.to_string(), "--allow-all-tools".to_string()], cwd, home, live_output_path, timeout)
     }
 
     /// `copilot login` — confirmed real via `copilot login --help` on the
@@ -433,12 +435,13 @@ impl AgentAdapter for KiroAdapter {
 
     /// `kiro-cli chat --no-interactive "<prompt>" --trust-all-tools` —
     /// confirmed real via `kiro-cli chat --help` on the reference machine.
-    fn run_prompt(&self, cwd: &Path, prompt: &str, home: Option<&Path>, timeout: Duration) -> Result<RunOutcome> {
-        run_command_with_home(
+    fn run_prompt(&self, cwd: &Path, prompt: &str, home: Option<&Path>, live_output_path: Option<&Path>, timeout: Duration) -> Result<RunOutcome> {
+        run_command_live(
             "kiro-cli",
             &["chat".to_string(), "--no-interactive".to_string(), prompt.to_string(), "--trust-all-tools".to_string()],
             cwd,
             home,
+            live_output_path,
             timeout,
         )
     }
@@ -468,8 +471,8 @@ impl AgentAdapter for CodyAdapter {
     /// `cody chat -m "<prompt>"` — per Sourcegraph's own Cody CLI install
     /// docs (fetched directly, not run locally — this agent is marked
     /// `unverified` in the registry for that reason).
-    fn run_prompt(&self, cwd: &Path, prompt: &str, home: Option<&Path>, timeout: Duration) -> Result<RunOutcome> {
-        run_command_with_home("cody", &["chat".to_string(), "-m".to_string(), prompt.to_string()], cwd, home, timeout)
+    fn run_prompt(&self, cwd: &Path, prompt: &str, home: Option<&Path>, live_output_path: Option<&Path>, timeout: Duration) -> Result<RunOutcome> {
+        run_command_live("cody", &["chat".to_string(), "-m".to_string(), prompt.to_string()], cwd, home, live_output_path, timeout)
     }
 
     /// `cody auth login --web` — per Sourcegraph's Cody CLI docs.
@@ -617,6 +620,6 @@ mod tests {
         // rather than silently claiming to run a prompt against it.
         let dir = tempfile::tempdir().unwrap();
         let adapter = PerplexityAdapter;
-        assert!(adapter.run_prompt(dir.path(), "hello", None, Duration::from_secs(1)).is_err());
+        assert!(adapter.run_prompt(dir.path(), "hello", None, None, Duration::from_secs(1)).is_err());
     }
 }

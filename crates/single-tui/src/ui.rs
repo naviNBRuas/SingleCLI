@@ -1,8 +1,8 @@
-use crate::app::{App, InstallFlow, ProviderAddFlow, QuickAddFlow, Tab, TaskAddFlow};
+use crate::app::{App, InstallFlow, ProviderAddFlow, QuickAddFlow, Tab, TaskAddFlow, TaskDetailFlow};
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Cell, Clear, List, ListItem, Paragraph, Row, Table};
+use ratatui::widgets::{Block, Borders, Cell, Clear, List, ListItem, Paragraph, Row, Table, Wrap};
 use ratatui::Frame;
 
 const ACCENT: Color = Color::Cyan;
@@ -37,6 +37,9 @@ pub fn draw(frame: &mut Frame, app: &App) {
     }
     if !matches!(app.quick_add, QuickAddFlow::Idle) {
         draw_quick_add_modal(frame, area, app);
+    }
+    if !matches!(app.task_detail, TaskDetailFlow::Idle) {
+        draw_task_detail_modal(frame, area, app);
     }
 }
 
@@ -161,7 +164,7 @@ fn draw_tasks(frame: &mut Frame, area: Rect, app: &App) {
         .collect();
     let table = Table::new(rows, [Constraint::Length(6), Constraint::Length(12), Constraint::Length(12), Constraint::Min(20)])
         .header(Row::new(vec!["ID", "Status", "Agent", "Description"]).style(Style::default().add_modifier(Modifier::BOLD)))
-        .block(Block::default().borders(Borders::ALL).title(" Tasks — [n] new task "));
+        .block(Block::default().borders(Borders::ALL).title(" Tasks — [n] new task  [enter] view output "));
     frame.render_widget(table, area);
 }
 
@@ -334,6 +337,8 @@ fn draw_help(frame: &mut Frame, area: Rect) {
         Line::from(""),
         Line::from(Span::styled("Tasks tab", Style::default().add_modifier(Modifier::BOLD))),
         Line::from("  n                    new task: description, workspace path, then pick one or more agents (space to toggle)"),
+        Line::from("  enter                view a task's output — live-tailed while it's running, full output once it finishes."),
+        Line::from("                       orchestrate runs create one row per agent per step, so select any row to see just that agent."),
         Line::from(""),
         Line::from(Span::styled("MCP / LSP / Plugins / Tools tabs", Style::default().add_modifier(Modifier::BOLD))),
         Line::from("  a                    quick add (one line, pipe-separated fields — shown in the modal)"),
@@ -435,6 +440,58 @@ fn draw_provider_add_modal(frame: &mut Frame, area: Rect, app: &App) {
 
     let block = Block::default().borders(Borders::ALL).title(title).border_style(Style::default().fg(ACCENT));
     frame.render_widget(Paragraph::new(lines).block(block), modal_area);
+}
+
+fn draw_task_detail_modal(frame: &mut Frame, area: Rect, app: &App) {
+    let modal_area = centered_rect(90, 85, area);
+    frame.render_widget(Clear, modal_area);
+
+    let TaskDetailFlow::Viewing { task, output, .. } = &app.task_detail else { return };
+
+    let (status_label, status_color) = match task.status {
+        single_protocol::TaskStatus::Completed => ("completed", OK),
+        single_protocol::TaskStatus::Failed => ("failed", BAD),
+        single_protocol::TaskStatus::Running => ("running…", WARN),
+        single_protocol::TaskStatus::Created => ("created", MUTED),
+    };
+
+    let outer = Block::default()
+        .borders(Borders::ALL)
+        .title(format!(" Task #{} — {} ", task.id, task.agent))
+        .border_style(Style::default().fg(ACCENT));
+    let inner = outer.inner(modal_area);
+    frame.render_widget(outer, modal_area);
+
+    let sections = Layout::vertical([Constraint::Length(4), Constraint::Min(0), Constraint::Length(1)]).split(inner);
+
+    let mut header_lines = vec![
+        Line::from(vec![
+            Span::styled("status: ", Style::default().fg(MUTED)),
+            Span::styled(status_label, Style::default().fg(status_color).add_modifier(Modifier::BOLD)),
+            Span::raw("   "),
+            Span::styled("exit: ", Style::default().fg(MUTED)),
+            Span::raw(task.exit_code.map(|c| c.to_string()).unwrap_or_else(|| "-".into())),
+            Span::raw(if task.timed_out { "   (timed out)" } else { "" }),
+        ]),
+        Line::from(Span::styled(task.description.clone(), Style::default())),
+    ];
+    if let Some(summary) = &task.summary {
+        header_lines.push(Line::from(Span::styled(format!("summary: {summary}"), Style::default().fg(MUTED))));
+    }
+    frame.render_widget(Paragraph::new(header_lines).wrap(Wrap { trim: false }), sections[0]);
+
+    let output_block = Block::default().borders(Borders::ALL).title(if task.status == single_protocol::TaskStatus::Running {
+        " live output (auto-refreshing) "
+    } else {
+        " output "
+    });
+    let output_paragraph = Paragraph::new(output.as_str()).wrap(Wrap { trim: false }).block(output_block);
+    frame.render_widget(output_paragraph, sections[1]);
+
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled("[enter/esc/q] close", Style::default().fg(MUTED)))),
+        sections[2],
+    );
 }
 
 fn draw_task_add_modal(frame: &mut Frame, area: Rect, app: &App) {

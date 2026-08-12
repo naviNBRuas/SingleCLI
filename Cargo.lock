@@ -1706,6 +1706,7 @@ dependencies = [
  "crossterm",
  "ratatui",
  "serde_json",
+ "single-core",
  "single-protocol",
 ]
 
