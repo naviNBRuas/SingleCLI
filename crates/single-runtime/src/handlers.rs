@@ -177,13 +177,14 @@ fn dispatch(ctx: &Context, request: Request) -> anyhow::Result<ResponseData> {
         Request::ContextShow { cwd } => {
             Ok(ResponseData::Context(single_core::project_context::resolve(std::path::Path::new(&cwd))))
         }
-        Request::TaskRun { description, agent, cwd, use_worktree, timeout_secs } => {
+        Request::TaskRun { description, agent, cwd, use_worktree, account, timeout_secs } => {
             let conn = task_db(ctx)?;
             let record = crate::task::run(&conn, ctx, crate::task::RunTaskOptions {
                 description: &description,
                 agent: &agent,
                 cwd: std::path::Path::new(&cwd),
                 use_worktree,
+                account: account.as_deref(),
                 timeout: std::time::Duration::from_secs(timeout_secs),
             })?;
             Ok(ResponseData::Task(record))
@@ -208,9 +209,9 @@ fn dispatch(ctx: &Context, request: Request) -> anyhow::Result<ResponseData> {
             })?;
             Ok(ResponseData::OrchestrateResult(records))
         }
-        Request::AccountCapture { agent, name } => {
+        Request::AccountCapture { agent, name, label } => {
             let home = integrations::home_dir()?;
-            let info = single_core::account::capture(&ctx.dirs.accounts_dir(), &home, &agent, &name)?;
+            let info = single_core::account::capture(&ctx.dirs.accounts_dir(), &home, &agent, &name, label)?;
             crate::state::open(&ctx.dirs.db_path())
                 .and_then(|conn| crate::state::record_event(&conn, "account.captured", &format!("{agent}/{name}")))
                 .ok();
@@ -231,6 +232,10 @@ fn dispatch(ctx: &Context, request: Request) -> anyhow::Result<ResponseData> {
             if !single_core::account::remove(&ctx.dirs.accounts_dir(), &agent, &name)? {
                 anyhow::bail!("no profile named '{name}' for agent '{agent}'");
             }
+            Ok(ResponseData::Empty)
+        }
+        Request::AccountSetStatus { agent, name, status } => {
+            single_core::account::set_status(&ctx.dirs.accounts_dir(), &agent, &name, status)?;
             Ok(ResponseData::Empty)
         }
         Request::ProviderAdd { name, env_var_name, base_url } => {
@@ -289,6 +294,51 @@ fn dispatch(ctx: &Context, request: Request) -> anyhow::Result<ResponseData> {
                 results.push(result);
             }
             Ok(ResponseData::ProviderSyncResults(results))
+        }
+        Request::PluginAdd { plugin } => {
+            single_core::plugins::add(&ctx.dirs.plugins_registry_file(), plugin)?;
+            Ok(ResponseData::Empty)
+        }
+        Request::PluginRemove { name } => {
+            if !single_core::plugins::remove(&ctx.dirs.plugins_registry_file(), &name)? {
+                anyhow::bail!("no such plugin: {name}");
+            }
+            Ok(ResponseData::Empty)
+        }
+        Request::PluginList => {
+            Ok(ResponseData::Plugins(single_core::plugins::load(&ctx.dirs.plugins_registry_file())?))
+        }
+        Request::PluginInspect { name } => {
+            let plugin = single_core::plugins::find(&ctx.dirs.plugins_registry_file(), &name)?
+                .ok_or_else(|| anyhow::anyhow!("no such plugin: {name}"))?;
+            Ok(ResponseData::Plugin(plugin))
+        }
+        Request::PluginSync { name, agents, dry_run } => {
+            let plugin = single_core::plugins::find(&ctx.dirs.plugins_registry_file(), &name)?
+                .ok_or_else(|| anyhow::anyhow!("no such plugin: {name}"))?;
+            let home = integrations::home_dir()?;
+            let target_agents: Vec<String> = if agents.is_empty() { ctx.registry.iter().map(|a| a.name.clone()).collect() } else { agents };
+            let mut results = Vec::new();
+            for agent in target_agents {
+                let selector = if agent == "opencode" {
+                    plugin.opencode_module.clone().unwrap_or_else(|| plugin.target.clone())
+                } else {
+                    plugin.target.clone()
+                };
+                let (applied, detail) = match for_agent_with_custom(&agent, &ctx.dirs.agents_dir()) {
+                    Some(adapter) if dry_run => {
+                        (false, format!("dry run: would run `{} plugin install {selector}`", adapter.command()))
+                    }
+                    Some(adapter) => match adapter.install_plugin(&selector, &home, std::time::Duration::from_secs(60)) {
+                        Ok(outcome) if outcome.success => (true, "installed".to_string()),
+                        Ok(outcome) => (false, format!("exited with {:?}: {}", outcome.exit_code, outcome.stderr)),
+                        Err(err) => (false, err.to_string()),
+                    },
+                    None => (false, format!("no adapter for agent '{agent}'")),
+                };
+                results.push(single_protocol::PluginInstallResult { plugin: name.clone(), agent, applied, detail });
+            }
+            Ok(ResponseData::PluginSyncResults(results))
         }
         Request::KgCreateEntity { name, entity_type } => {
             let conn = kg_db(ctx)?;

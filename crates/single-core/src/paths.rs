@@ -93,6 +93,10 @@ impl SingleDirs {
         self.root.join("providers.toml")
     }
 
+    pub fn plugins_registry_file(&self) -> PathBuf {
+        self.root.join("plugins.toml")
+    }
+
     /// Creates the subset of the directory tree Phase 1 needs. Never touches
     /// anything outside `self.root`.
     pub fn ensure_created(&self) -> Result<()> {

@@ -14,6 +14,7 @@
 //! just for one agent at a time, one task at a time.
 
 use crate::context::Context;
+use crate::integrations;
 use crate::memory;
 use anyhow::{Context as _, Result};
 use rusqlite::{params, Connection, OptionalExtension};
@@ -131,6 +132,10 @@ pub struct RunTaskOptions<'a> {
     pub agent: &'a str,
     pub cwd: &'a Path,
     pub use_worktree: bool,
+    /// If set, runs against this captured account's isolated `$HOME`
+    /// (`single_core::account::ensure_isolated_home`) instead of the real
+    /// one — lets multiple accounts of the same agent run concurrently.
+    pub account: Option<&'a str>,
     pub timeout: Duration,
 }
 
@@ -176,7 +181,20 @@ pub fn run(conn: &Connection, ctx: &Context, opts: RunTaskOptions) -> Result<Tas
     set_status(conn, id, TaskStatus::Running)?;
     crate::state::record_event(conn, "task.started", &format!("#{id} cwd={}", run_cwd.display()))?;
 
-    let outcome = adapter.run_prompt(&run_cwd, opts.description, opts.timeout);
+    let isolated_home = match opts.account {
+        Some(name) => match integrations::home_dir().and_then(|home| single_core::account::ensure_isolated_home(&ctx.dirs.accounts_dir(), &home, opts.agent, name)) {
+            Ok(dir) => Some(dir),
+            Err(e) => {
+                finish(conn, id, TaskStatus::Failed, None, None, None, false, Some(&format!("failed to materialize isolated home for account '{name}': {e:#}")))?;
+                crate::state::record_event(conn, "task.failed", &format!("#{id} account isolation failed: {e:#}"))?;
+                remember_failure(conn, id, opts.agent, opts.description, &format!("account isolation failed: {e:#}"));
+                return get(conn, id)?.context("task disappeared after being created");
+            }
+        },
+        None => None,
+    };
+
+    let outcome = adapter.run_prompt(&run_cwd, opts.description, isolated_home.as_deref(), opts.timeout);
 
     let worktree_path_str = opts.use_worktree.then(|| run_cwd.display().to_string());
 
@@ -298,7 +316,7 @@ mod tests {
         if !single_agent_sdk::adapters::for_agent("claude").unwrap().discover().detected {
             return;
         }
-        let opts = RunTaskOptions { description: "x", agent: "claude", cwd: dir.path(), use_worktree: true, timeout: Duration::from_secs(1) };
+        let opts = RunTaskOptions { description: "x", agent: "claude", cwd: dir.path(), use_worktree: true, account: None, timeout: Duration::from_secs(1) };
         let task = run(&conn, &ctx, opts).unwrap();
         assert_eq!(task.status, TaskStatus::Failed);
         assert!(task.summary.unwrap().contains("not a git repository"));
@@ -312,6 +330,6 @@ mod tests {
     }
 
     fn task_run_result(conn: &Connection, ctx: &Context, cwd: &Path, agent: &str) -> Result<TaskRecord> {
-        run(conn, ctx, RunTaskOptions { description: "x", agent, cwd, use_worktree: false, timeout: Duration::from_secs(1) })
+        run(conn, ctx, RunTaskOptions { description: "x", agent, cwd, use_worktree: false, account: None, timeout: Duration::from_secs(1) })
     }
 }

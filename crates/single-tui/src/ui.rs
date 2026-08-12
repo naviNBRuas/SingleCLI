@@ -1,4 +1,4 @@
-use crate::app::{App, InstallFlow, ProviderAddFlow, Tab};
+use crate::app::{App, InstallFlow, ProviderAddFlow, Tab, TaskAddFlow};
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -31,6 +31,9 @@ pub fn draw(frame: &mut Frame, app: &App) {
     }
     if !matches!(app.provider_add, ProviderAddFlow::Idle) {
         draw_provider_add_modal(frame, area, app);
+    }
+    if !matches!(app.task_add, TaskAddFlow::Idle) {
+        draw_task_add_modal(frame, area, app);
     }
 }
 
@@ -152,7 +155,7 @@ fn draw_tasks(frame: &mut Frame, area: Rect, app: &App) {
         .collect();
     let table = Table::new(rows, [Constraint::Length(6), Constraint::Length(12), Constraint::Length(12), Constraint::Min(20)])
         .header(Row::new(vec!["ID", "Status", "Agent", "Description"]).style(Style::default().add_modifier(Modifier::BOLD)))
-        .block(Block::default().borders(Borders::ALL).title(" Tasks — single task run \"...\" --agent <name> "));
+        .block(Block::default().borders(Borders::ALL).title(" Tasks — [n] new task "));
     frame.render_widget(table, area);
 }
 
@@ -195,9 +198,17 @@ fn draw_accounts(frame: &mut Frame, area: Rect, app: &App) {
         .iter()
         .map(|a| {
             let flag = if a.unverified_complete { " (best-effort)" } else { "" };
+            let (status_label, status_color) = match a.status {
+                single_protocol::AccountStatus::Available => ("available", OK),
+                single_protocol::AccountStatus::RateLimited => ("rate_limited", WARN),
+                single_protocol::AccountStatus::NeedsTopup => ("needs_topup", BAD),
+                single_protocol::AccountStatus::Unknown => ("unknown", MUTED),
+            };
             ListItem::new(Line::from(vec![
                 Span::styled(format!("{:<12}", a.agent), Style::default().add_modifier(Modifier::BOLD)),
                 Span::raw(format!("{:<16} ", a.name)),
+                Span::raw(format!("{:<24} ", a.label.as_deref().unwrap_or("-"))),
+                Span::styled(format!("[{status_label}] "), Style::default().fg(status_color)),
                 Span::styled(format!("{}{flag}", a.captured_at), Style::default().fg(MUTED)),
             ]))
         })
@@ -246,6 +257,9 @@ fn draw_help(frame: &mut Frame, area: Rect) {
         Line::from(Span::styled("Providers tab", Style::default().add_modifier(Modifier::BOLD))),
         Line::from("  a                    add a provider (OpenAI/Anthropic/OpenCode Zen/NVIDIA presets), key goes straight to your OS keychain"),
         Line::from(""),
+        Line::from(Span::styled("Tasks tab", Style::default().add_modifier(Modifier::BOLD))),
+        Line::from("  n                    new task: description, workspace path, then pick one or more agents (space to toggle)"),
+        Line::from(""),
         Line::from(Span::styled("Everything else", Style::default().add_modifier(Modifier::BOLD))),
         Line::from("  Use the `single` CLI for actions not yet in the TUI: mcp add, provider add/sync,"),
         Line::from("  account capture/use, task run, memory graph/cache/vector — see `single --help`."),
@@ -258,7 +272,7 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
     let text = if let Some(err) = &app.error {
         Line::from(Span::styled(format!("error: {err}"), Style::default().fg(BAD)))
     } else {
-        Line::from(Span::styled("[tab] switch  [↑↓] move  [i] install agent  [a] add provider  [r] refresh  [q] quit", Style::default().fg(MUTED)))
+        Line::from(Span::styled("[tab] switch  [↑↓] move  [i] install agent  [a] add provider  [n] new task  [r] refresh  [q] quit", Style::default().fg(MUTED)))
     };
     frame.render_widget(Paragraph::new(text), area);
 }
@@ -336,6 +350,77 @@ fn draw_provider_add_modal(frame: &mut Frame, area: Rect, app: &App) {
             ],
         ),
         ProviderAddFlow::Idle => (" ", vec![]),
+    };
+
+    let block = Block::default().borders(Borders::ALL).title(title).border_style(Style::default().fg(ACCENT));
+    frame.render_widget(Paragraph::new(lines).block(block), modal_area);
+}
+
+fn draw_task_add_modal(frame: &mut Frame, area: Rect, app: &App) {
+    let modal_area = centered_rect(65, 55, area);
+    frame.render_widget(Clear, modal_area);
+
+    let (title, lines): (&str, Vec<Line>) = match &app.task_add {
+        TaskAddFlow::EnteringDescription { input } => (
+            " New task — description ",
+            vec![
+                Line::from(format!("Description: {input}")),
+                Line::from(""),
+                Line::from("[enter] next  [esc] cancel"),
+            ],
+        ),
+        TaskAddFlow::EnteringCwd { description, input } => (
+            " New task — workspace path ",
+            vec![
+                Line::from(Span::styled(description.clone(), Style::default().fg(MUTED))),
+                Line::from(""),
+                Line::from(format!("Workspace path: {input}")),
+                Line::from(Span::styled("  (defaults to \".\" if left empty)", Style::default().fg(MUTED))),
+                Line::from(""),
+                Line::from("[enter] next  [esc] cancel"),
+            ],
+        ),
+        TaskAddFlow::PickingAgents { description, cwd, agent_names, chosen, cursor } => {
+            let mut lines = vec![
+                Line::from(Span::styled(description.clone(), Style::default().fg(MUTED))),
+                Line::from(Span::styled(format!("cwd: {cwd}"), Style::default().fg(MUTED))),
+                Line::from(""),
+                Line::from("Agents (space to toggle; picking >1 orchestrates them together):"),
+            ];
+            if agent_names.is_empty() {
+                lines.push(Line::from(Span::styled("  (no detected agents)", Style::default().fg(BAD))));
+            }
+            for (i, name) in agent_names.iter().enumerate() {
+                let mark = if chosen[i] { "[x]" } else { "[ ]" };
+                let style = if i == *cursor { selected_style() } else { Style::default() };
+                lines.push(Line::from(Span::styled(format!("  {mark} {name}"), style)));
+            }
+            lines.push(Line::from(""));
+            lines.push(Line::from("[↑↓] move  [space] toggle  [enter] run  [esc] cancel"));
+            (" New task — agent(s) ", lines)
+        }
+        TaskAddFlow::Submitting { .. } => (" Running… ", vec![Line::from("Submitting to the runtime...")]),
+        TaskAddFlow::Done { count } => (
+            " Task submitted ",
+            vec![
+                Line::from(Span::styled(format!("Started against {count} agent(s)"), Style::default().fg(OK))),
+                Line::from(""),
+                Line::from("Check the Tasks tab for progress."),
+                Line::from(""),
+                Line::from("[enter/esc] close"),
+            ],
+        ),
+        TaskAddFlow::Failed { error } => (
+            " Failed ",
+            vec![
+                Line::from(Span::styled("Could not start task", Style::default().fg(BAD))),
+                Line::from(""),
+                Line::from(error.clone()),
+                Line::from(""),
+                Line::from("[enter/esc] close"),
+            ],
+        ),
+        TaskAddFlow::Idle => (" ", vec![]),
     };
 
     let block = Block::default().borders(Borders::ALL).title(title).border_style(Style::default().fg(ACCENT));

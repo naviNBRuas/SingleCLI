@@ -1,7 +1,7 @@
 use crate::adapter::{run_with_prompt_flag, AgentAdapter};
 use crate::backup::backup_before_write;
 use crate::formats;
-use crate::run::run_command;
+use crate::run::{run_command, run_command_with_home};
 use anyhow::Result;
 use single_protocol::{IntegrationWrite, McpServerSpec, RunOutcome};
 use std::path::Path;
@@ -38,8 +38,15 @@ impl AgentAdapter for ClaudeAdapter {
 
     /// `claude -p "<prompt>"` — confirmed non-interactive print mode via
     /// `claude --help` on the reference machine.
-    fn run_prompt(&self, cwd: &Path, prompt: &str, timeout: Duration) -> Result<RunOutcome> {
-        run_with_prompt_flag("claude", cwd, prompt, timeout)
+    fn run_prompt(&self, cwd: &Path, prompt: &str, home: Option<&Path>, timeout: Duration) -> Result<RunOutcome> {
+        run_with_prompt_flag("claude", cwd, prompt, home, timeout)
+    }
+
+    /// `claude plugin install <plugin[@marketplace]>` — confirmed real via
+    /// `claude plugin --help` on the reference machine (aliased `claude
+    /// plugin i`).
+    fn install_plugin(&self, target: &str, cwd: &Path, timeout: Duration) -> Result<RunOutcome> {
+        run_command("claude", &["plugin".to_string(), "install".to_string(), target.to_string()], cwd, timeout)
     }
 }
 
@@ -76,8 +83,19 @@ impl AgentAdapter for CodexAdapter {
     /// caller (a plain `task run`, or `orchestrate`'s shared worktree)
     /// deliberately chose; it just stops codex from re-litigating that
     /// choice with its own redundant check.
-    fn run_prompt(&self, cwd: &Path, prompt: &str, timeout: Duration) -> Result<RunOutcome> {
-        run_command("codex", &["exec".to_string(), "--skip-git-repo-check".to_string(), prompt.to_string()], cwd, timeout)
+    fn run_prompt(&self, cwd: &Path, prompt: &str, home: Option<&Path>, timeout: Duration) -> Result<RunOutcome> {
+        run_command_with_home("codex", &["exec".to_string(), "--skip-git-repo-check".to_string(), prompt.to_string()], cwd, home, timeout)
+    }
+
+    /// `codex plugin add <plugin[@marketplace]>` — confirmed real via
+    /// `codex plugin add --help` on the reference machine. Requires the
+    /// marketplace to already be configured (`codex plugin marketplace
+    /// add`) if `target` uses `@marketplace` — SingleCLI doesn't auto-add
+    /// marketplaces on the user's behalf, since that's a real trust
+    /// decision (what code source to pull plugins from), not a config
+    /// sync operation.
+    fn install_plugin(&self, target: &str, cwd: &Path, timeout: Duration) -> Result<RunOutcome> {
+        run_command("codex", &["plugin".to_string(), "add".to_string(), target.to_string()], cwd, timeout)
     }
 }
 
@@ -107,13 +125,24 @@ impl AgentAdapter for OpenCodeAdapter {
     /// `opencode run "<prompt>" --dir <cwd>` — confirmed non-interactive
     /// mode and `--dir` flag via `opencode run --help` on the reference
     /// machine.
-    fn run_prompt(&self, cwd: &Path, prompt: &str, timeout: Duration) -> Result<RunOutcome> {
-        run_command(
+    fn run_prompt(&self, cwd: &Path, prompt: &str, home: Option<&Path>, timeout: Duration) -> Result<RunOutcome> {
+        run_command_with_home(
             "opencode",
             &["run".to_string(), prompt.to_string(), "--dir".to_string(), cwd.display().to_string()],
             cwd,
+            home,
             timeout,
         )
+    }
+
+    /// `opencode plugin <npm-module>` — confirmed real via `opencode
+    /// plugin --help` on the reference machine. Unlike claude/codex/agy,
+    /// OpenCode addresses plugins by plain npm module name, not
+    /// `name@marketplace` — `target` here is expected to already be that
+    /// npm module name (the caller picks `PluginSpec::opencode_module`
+    /// rather than `PluginSpec::target` before calling this for opencode).
+    fn install_plugin(&self, target: &str, cwd: &Path, timeout: Duration) -> Result<RunOutcome> {
+        run_command("opencode", &["plugin".to_string(), target.to_string()], cwd, timeout)
     }
 }
 
@@ -132,8 +161,14 @@ impl AgentAdapter for AgyAdapter {
 
     /// `agy -p "<prompt>"` — confirmed non-interactive print mode via
     /// `agy --help` on the reference machine.
-    fn run_prompt(&self, cwd: &Path, prompt: &str, timeout: Duration) -> Result<RunOutcome> {
-        run_with_prompt_flag("agy", cwd, prompt, timeout)
+    fn run_prompt(&self, cwd: &Path, prompt: &str, home: Option<&Path>, timeout: Duration) -> Result<RunOutcome> {
+        run_with_prompt_flag("agy", cwd, prompt, home, timeout)
+    }
+
+    /// `agy plugin install <plugin[@marketplace]>` — confirmed real via
+    /// `agy plugin --help` on the reference machine.
+    fn install_plugin(&self, target: &str, cwd: &Path, timeout: Duration) -> Result<RunOutcome> {
+        run_command("agy", &["plugin".to_string(), "install".to_string(), target.to_string()], cwd, timeout)
     }
 }
 
@@ -292,6 +327,6 @@ mod tests {
         // rather than silently claiming to run a prompt against it.
         let dir = tempfile::tempdir().unwrap();
         let adapter = PerplexityAdapter;
-        assert!(adapter.run_prompt(dir.path(), "hello", Duration::from_secs(1)).is_err());
+        assert!(adapter.run_prompt(dir.path(), "hello", None, Duration::from_secs(1)).is_err());
     }
 }

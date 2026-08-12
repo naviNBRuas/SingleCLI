@@ -12,15 +12,24 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 pub fn run_command(command: &str, args: &[String], cwd: &Path, timeout: Duration) -> Result<RunOutcome> {
+    run_command_with_home(command, args, cwd, None, timeout)
+}
+
+/// Same as `run_command`, but when `home` is set, overrides `$HOME` for the
+/// child process. This is what lets multiple isolated accounts of the same
+/// agent CLI run concurrently without stepping on each other's live
+/// credentials/session state — each account gets its own materialized HOME
+/// directory (see `single-core::account::ensure_isolated_home`), and the
+/// CLI reads/writes its config relative to whatever `$HOME` it sees, same
+/// as any other well-behaved Unix program.
+pub fn run_command_with_home(command: &str, args: &[String], cwd: &Path, home: Option<&Path>, timeout: Duration) -> Result<RunOutcome> {
     let start = Instant::now();
-    let mut child = Command::new(command)
-        .args(args)
-        .current_dir(cwd)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .with_context(|| format!("spawning {command}"))?;
+    let mut cmd = Command::new(command);
+    cmd.args(args).current_dir(cwd).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    if let Some(home) = home {
+        cmd.env("HOME", home);
+    }
+    let mut child = cmd.spawn().with_context(|| format!("spawning {command}"))?;
 
     let deadline = start + timeout;
     let timed_out = loop {

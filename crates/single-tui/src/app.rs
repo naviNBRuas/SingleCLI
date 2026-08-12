@@ -72,6 +72,20 @@ pub enum ProviderAddFlow {
     Failed { preset_name: String, error: String },
 }
 
+/// State of the in-TUI "create a task" flow: description, workspace path,
+/// then one or more agents (toggle-select — picking more than one runs
+/// `Orchestrate` instead of a plain `TaskRun`). Mirrors `ProviderAddFlow`'s
+/// step-then-background-thread shape.
+pub enum TaskAddFlow {
+    Idle,
+    EnteringDescription { input: String },
+    EnteringCwd { description: String, input: String },
+    PickingAgents { description: String, cwd: String, agent_names: Vec<String>, chosen: Vec<bool>, cursor: usize },
+    Submitting { rx: mpsc::Receiver<anyhow::Result<usize>> },
+    Done { count: usize },
+    Failed { error: String },
+}
+
 pub struct App {
     pub socket_path: PathBuf,
     pub tab: Tab,
@@ -90,6 +104,7 @@ pub struct App {
     pub error: Option<String>,
     pub install: InstallFlow,
     pub provider_add: ProviderAddFlow,
+    pub task_add: TaskAddFlow,
     pub last_refresh: Instant,
 }
 
@@ -113,6 +128,7 @@ impl App {
             error: None,
             install: InstallFlow::Idle,
             provider_add: ProviderAddFlow::Idle,
+            task_add: TaskAddFlow::Idle,
             last_refresh: Instant::now(),
         };
         app.refresh();
@@ -360,6 +376,122 @@ impl App {
                 self.provider_add = match result {
                     Ok(()) => ProviderAddFlow::Done { preset_name: preset_name.clone() },
                     Err(e) => ProviderAddFlow::Failed { preset_name: preset_name.clone(), error: e.to_string() },
+                };
+                self.refresh();
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Opens the task-creation flow (spec: "in the TUI, i want to be able
+    /// to create tasks, specify workspace paths, agent(s), and so on").
+    pub fn begin_add_task(&mut self) {
+        if self.tab != Tab::Tasks {
+            return;
+        }
+        self.task_add = TaskAddFlow::EnteringDescription { input: String::new() };
+    }
+
+    pub fn task_desc_input(&mut self, c: char) {
+        if let TaskAddFlow::EnteringDescription { input } = &mut self.task_add {
+            input.push(c);
+        }
+    }
+
+    pub fn task_desc_backspace(&mut self) {
+        if let TaskAddFlow::EnteringDescription { input } = &mut self.task_add {
+            input.pop();
+        }
+    }
+
+    pub fn task_desc_submit(&mut self) {
+        let TaskAddFlow::EnteringDescription { input } = &self.task_add else { return };
+        if input.is_empty() {
+            self.error = Some("description cannot be empty".into());
+            return;
+        }
+        self.task_add = TaskAddFlow::EnteringCwd { description: input.clone(), input: ".".to_string() };
+    }
+
+    pub fn task_cwd_input(&mut self, c: char) {
+        if let TaskAddFlow::EnteringCwd { input, .. } = &mut self.task_add {
+            input.push(c);
+        }
+    }
+
+    pub fn task_cwd_backspace(&mut self) {
+        if let TaskAddFlow::EnteringCwd { input, .. } = &mut self.task_add {
+            input.pop();
+        }
+    }
+
+    pub fn task_cwd_submit(&mut self) {
+        let TaskAddFlow::EnteringCwd { description, input } = &self.task_add else { return };
+        let cwd = if input.is_empty() { ".".to_string() } else { input.clone() };
+        let cwd = std::fs::canonicalize(&cwd).map(|p| p.display().to_string()).unwrap_or(cwd);
+        let agent_names: Vec<String> = self.agents.iter().filter(|a| a.detected).map(|a| a.name.clone()).collect();
+        let chosen = vec![false; agent_names.len()];
+        self.task_add = TaskAddFlow::PickingAgents { description: description.clone(), cwd, agent_names, chosen, cursor: 0 };
+    }
+
+    pub fn task_agents_move(&mut self, delta: i32) {
+        if let TaskAddFlow::PickingAgents { agent_names, cursor, .. } = &mut self.task_add {
+            if !agent_names.is_empty() {
+                let len = agent_names.len() as i32;
+                *cursor = ((*cursor as i32 + delta).rem_euclid(len)) as usize;
+            }
+        }
+    }
+
+    pub fn task_agents_toggle(&mut self) {
+        if let TaskAddFlow::PickingAgents { chosen, cursor, .. } = &mut self.task_add {
+            if let Some(c) = chosen.get_mut(*cursor) {
+                *c = !*c;
+            }
+        }
+    }
+
+    pub fn task_agents_submit(&mut self) {
+        let TaskAddFlow::PickingAgents { description, cwd, agent_names, chosen, .. } = &self.task_add else { return };
+        let selected: Vec<String> = agent_names.iter().zip(chosen).filter(|(_, on)| **on).map(|(n, _)| n.clone()).collect();
+        if selected.is_empty() {
+            self.error = Some("pick at least one agent (space to toggle)".into());
+            return;
+        }
+        let description = description.clone();
+        let cwd = cwd.clone();
+        let socket_path = self.socket_path.clone();
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let result = (|| -> anyhow::Result<usize> {
+                if selected.len() == 1 {
+                    match call(&socket_path, &Request::TaskRun { description, agent: selected[0].clone(), cwd, use_worktree: false, account: None, timeout_secs: 300 })? {
+                        Response::Ok { .. } => Ok(1),
+                        Response::Error { message } => anyhow::bail!(message),
+                    }
+                } else {
+                    match call(&socket_path, &Request::Orchestrate { goal: description, agents: selected.clone(), cwd, use_worktree: true, timeout_secs: 300 })? {
+                        Response::Ok { .. } => Ok(selected.len()),
+                        Response::Error { message } => anyhow::bail!(message),
+                    }
+                }
+            })();
+            let _ = tx.send(result);
+        });
+        self.task_add = TaskAddFlow::Submitting { rx };
+    }
+
+    pub fn cancel_task_add(&mut self) {
+        self.task_add = TaskAddFlow::Idle;
+    }
+
+    pub fn poll_task_add(&mut self) -> bool {
+        if let TaskAddFlow::Submitting { rx } = &self.task_add {
+            if let Ok(result) = rx.try_recv() {
+                self.task_add = match result {
+                    Ok(count) => TaskAddFlow::Done { count },
+                    Err(e) => TaskAddFlow::Failed { error: e.to_string() },
                 };
                 self.refresh();
                 return true;

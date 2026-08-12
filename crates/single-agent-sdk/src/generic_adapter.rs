@@ -6,7 +6,6 @@
 use crate::adapter::AgentAdapter;
 use crate::backup::backup_before_write;
 use crate::discover::{discover, Discovery};
-use crate::run::run_command;
 use anyhow::Result;
 use serde_json::{Map, Value};
 use single_core::custom_agents::CustomAgentFile;
@@ -77,10 +76,10 @@ impl AgentAdapter for GenericAdapter {
         }
     }
 
-    fn run_prompt(&self, cwd: &Path, prompt: &str, timeout: Duration) -> Result<RunOutcome> {
+    fn run_prompt(&self, cwd: &Path, prompt: &str, home: Option<&Path>, timeout: Duration) -> Result<RunOutcome> {
         match &self.def.run {
-            Some(run) if run.mode == "flag" => run_command(&self.def.command, &[run.value.clone(), prompt.to_string()], cwd, timeout),
-            Some(run) if run.mode == "subcommand" => run_command(&self.def.command, &[run.value.clone(), prompt.to_string()], cwd, timeout),
+            Some(run) if run.mode == "flag" => crate::run::run_command_with_home(&self.def.command, &[run.value.clone(), prompt.to_string()], cwd, home, timeout),
+            Some(run) if run.mode == "subcommand" => crate::run::run_command_with_home(&self.def.command, &[run.value.clone(), prompt.to_string()], cwd, home, timeout),
             _ => anyhow::bail!("{} has no [run] mode defined", self.def.name),
         }
     }
@@ -265,6 +264,6 @@ mod tests {
         let mut def = sample_def();
         def.run = None;
         let adapter = GenericAdapter::new(def);
-        assert!(adapter.run_prompt(dir.path(), "hi", Duration::from_secs(1)).is_err());
+        assert!(adapter.run_prompt(dir.path(), "hi", None, Duration::from_secs(1)).is_err());
     }
 }

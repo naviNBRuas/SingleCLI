@@ -212,7 +212,8 @@ fn print_data(data: ResponseData) {
             }
             for p in profiles {
                 let flag = if p.unverified_complete { " (best-effort — not confirmed complete)" } else { "" };
-                println!("{:<10} {:<16} {}{flag}", p.agent, p.name, p.captured_at);
+                let label = p.label.as_deref().unwrap_or("-");
+                println!("{:<10} {:<16} {:<28} [{}] {}{flag}", p.agent, p.name, label, p.status.as_str(), p.captured_at);
             }
         }
         ResponseData::AccountSwitched(result) => {
@@ -242,6 +243,25 @@ fn print_data(data: ResponseData) {
                 if let Some(backup) = r.backup_path {
                     println!("      backup: {backup}");
                 }
+            }
+        }
+        ResponseData::Plugin(p) => {
+            println!("name:            {}", p.name);
+            println!("target:          {}", p.target);
+            println!("opencode_module: {}", p.opencode_module.as_deref().unwrap_or("-"));
+        }
+        ResponseData::Plugins(plugins) => {
+            if plugins.is_empty() {
+                println!("(no plugins registered)");
+            }
+            for p in plugins {
+                println!("{:<16} {:<28} {}", p.name, p.target, p.opencode_module.as_deref().unwrap_or("-"));
+            }
+        }
+        ResponseData::PluginSyncResults(results) => {
+            for r in results {
+                let mark = if r.applied { "✓" } else { "·" };
+                println!("  {mark} {:<12} {}", r.agent, r.detail);
             }
         }
         ResponseData::KgEntityId(id) => println!("#{id}"),
@@ -387,6 +407,8 @@ fn print_task(task: &single_protocol::TaskRecord) {
 
 fn print_account_profile(info: &single_protocol::AccountProfileInfo) {
     println!("{}/{}", info.agent, info.name);
+    println!("  label:    {}", info.label.as_deref().unwrap_or("-"));
+    println!("  status:   {}", info.status.as_str());
     println!("  captured: {}", info.captured_at);
     if info.unverified_complete {
         println!("  note:     best-effort capture — not confirmed to cover 100% of this agent's login state");

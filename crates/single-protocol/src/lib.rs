@@ -59,14 +59,15 @@ pub enum Request {
     MemoryDelete { id: i64 },
     MemoryList { scope: Option<MemoryScope> },
     ContextShow { cwd: String },
-    TaskRun { description: String, agent: String, cwd: String, use_worktree: bool, timeout_secs: u64 },
+    TaskRun { description: String, agent: String, cwd: String, use_worktree: bool, account: Option<String>, timeout_secs: u64 },
     TaskList,
     TaskInspect { id: i64 },
     Orchestrate { goal: String, agents: Vec<String>, cwd: String, use_worktree: bool, timeout_secs: u64 },
-    AccountCapture { agent: String, name: String },
+    AccountCapture { agent: String, name: String, label: Option<String> },
     AccountUse { agent: String, name: String },
     AccountList { agent: Option<String> },
     AccountRemove { agent: String, name: String },
+    AccountSetStatus { agent: String, name: String, status: AccountStatus },
     ProviderAdd { name: String, env_var_name: String, base_url: Option<String> },
     ProviderAddPreset { name: String },
     ProviderPresetList,
@@ -97,6 +98,11 @@ pub enum Request {
     UninstallIntegrations,
     ProfileList,
     ProfileUse { name: String },
+    PluginAdd { plugin: PluginSpec },
+    PluginRemove { name: String },
+    PluginList,
+    PluginInspect { name: String },
+    PluginSync { name: String, agents: Vec<String>, dry_run: bool },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -153,6 +159,9 @@ pub enum ResponseData {
     SetupPlan(SetupPlan),
     IntegrationResult(IntegrationResult),
     Profiles(Vec<String>),
+    Plugin(PluginSpec),
+    Plugins(Vec<PluginSpec>),
+    PluginSyncResults(Vec<PluginInstallResult>),
     Empty,
 }
 
@@ -438,8 +447,51 @@ pub struct RunOutcome {
 pub struct AccountProfileInfo {
     pub agent: String,
     pub name: String,
+    /// Human-readable identity (email or display name) for this captured
+    /// login, so multiple accounts per agent are distinguishable at a
+    /// glance. Set at capture time; SingleCLI has no way to read it back
+    /// out of the agent's own credential files, so it's user-supplied.
+    pub label: Option<String>,
     pub captured_at: String,
     pub unverified_complete: bool,
+    /// Manually-set usability of this account. There is no verified,
+    /// stable API across claude/codex/agy for querying live quota/rate-
+    /// limit state, so this is never auto-detected — the user (or a task
+    /// failure surfaced elsewhere) sets it, and SingleCLI just remembers
+    /// and displays it.
+    #[serde(default)]
+    pub status: AccountStatus,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AccountStatus {
+    #[default]
+    Unknown,
+    Available,
+    RateLimited,
+    NeedsTopup,
+}
+
+impl AccountStatus {
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "unknown" => Self::Unknown,
+            "available" => Self::Available,
+            "rate_limited" | "rate-limited" => Self::RateLimited,
+            "needs_topup" | "needs-topup" => Self::NeedsTopup,
+            _ => return None,
+        })
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Unknown => "unknown",
+            Self::Available => "available",
+            Self::RateLimited => "rate_limited",
+            Self::NeedsTopup => "needs_topup",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -487,6 +539,28 @@ pub struct ProviderPresetInfo {
     pub name: String,
     pub env_var_name: String,
     pub base_url: String,
+}
+
+/// A plugin registered across agents (spec section 29/41). `target` is
+/// used verbatim for the three agents that share the real, verified
+/// `plugin[@marketplace]` convention (`claude plugin install`, `codex
+/// plugin add`, `agy plugin install`); `opencode_module`, if set, is used
+/// for OpenCode, whose real plugin command (`opencode plugin <module>`)
+/// takes a plain npm module name instead — a genuinely different
+/// addressing scheme, not a naming inconsistency this project invented.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PluginSpec {
+    pub name: String,
+    pub target: String,
+    pub opencode_module: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PluginInstallResult {
+    pub plugin: String,
+    pub agent: String,
+    pub applied: bool,
+    pub detail: String,
 }
 
 /// A registered LLM provider (spec section 30): OpenAI, Anthropic,

@@ -3,7 +3,7 @@ pub mod client;
 pub mod ui;
 
 use anyhow::Result;
-use app::{App, InstallFlow, ProviderAddFlow, Tab};
+use app::{App, InstallFlow, ProviderAddFlow, Tab, TaskAddFlow};
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use crossterm::execute;
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
@@ -32,7 +32,7 @@ fn event_loop(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> Result<
     loop {
         terminal.draw(|frame| ui::draw(frame, app))?;
 
-        if app.poll_install() || app.poll_provider_add() {
+        if app.poll_install() || app.poll_provider_add() || app.poll_task_add() {
             continue; // redraw immediately on state change
         }
 
@@ -59,6 +59,10 @@ fn handle_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> bool {
         handle_provider_add_key(app, code);
         return false;
     }
+    if !matches!(app.task_add, TaskAddFlow::Idle) {
+        handle_task_add_key(app, code);
+        return false;
+    }
 
     match code {
         KeyCode::Char('q') => return true,
@@ -72,6 +76,7 @@ fn handle_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> bool {
         KeyCode::Char('r') => app.refresh(),
         KeyCode::Char('i') if app.tab == Tab::Agents => app.begin_install(),
         KeyCode::Char('a') if app.tab == Tab::Providers => app.begin_add_provider(),
+        KeyCode::Char('n') if app.tab == Tab::Tasks => app.begin_add_task(),
         _ => {}
     }
     false
@@ -115,5 +120,38 @@ fn handle_provider_add_key(app: &mut App, code: KeyCode) {
             }
         }
         ProviderAddFlow::Submitting { .. } | ProviderAddFlow::Idle => {}
+    }
+}
+
+fn handle_task_add_key(app: &mut App, code: KeyCode) {
+    match &app.task_add {
+        TaskAddFlow::EnteringDescription { .. } => match code {
+            KeyCode::Char(c) => app.task_desc_input(c),
+            KeyCode::Backspace => app.task_desc_backspace(),
+            KeyCode::Enter => app.task_desc_submit(),
+            KeyCode::Esc => app.cancel_task_add(),
+            _ => {}
+        },
+        TaskAddFlow::EnteringCwd { .. } => match code {
+            KeyCode::Char(c) => app.task_cwd_input(c),
+            KeyCode::Backspace => app.task_cwd_backspace(),
+            KeyCode::Enter => app.task_cwd_submit(),
+            KeyCode::Esc => app.cancel_task_add(),
+            _ => {}
+        },
+        TaskAddFlow::PickingAgents { .. } => match code {
+            KeyCode::Down | KeyCode::Char('j') => app.task_agents_move(1),
+            KeyCode::Up | KeyCode::Char('k') => app.task_agents_move(-1),
+            KeyCode::Char(' ') => app.task_agents_toggle(),
+            KeyCode::Enter => app.task_agents_submit(),
+            KeyCode::Esc => app.cancel_task_add(),
+            _ => {}
+        },
+        TaskAddFlow::Done { .. } | TaskAddFlow::Failed { .. } => {
+            if matches!(code, KeyCode::Enter | KeyCode::Esc) {
+                app.cancel_task_add();
+            }
+        }
+        TaskAddFlow::Submitting { .. } | TaskAddFlow::Idle => {}
     }
 }

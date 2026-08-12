@@ -40,7 +40,7 @@
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use single_protocol::{AccountProfileInfo, AccountSwitchResult};
+use single_protocol::{AccountProfileInfo, AccountStatus, AccountSwitchResult};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -49,6 +49,10 @@ use std::path::{Path, PathBuf};
 struct ProfileMeta {
     captured_at: String,
     unverified_complete: bool,
+    #[serde(default)]
+    label: Option<String>,
+    #[serde(default)]
+    status: AccountStatus,
 }
 
 /// Which agents support account switching at all, and how "complete" the
@@ -92,7 +96,7 @@ fn backup(path: &Path) -> Result<Option<PathBuf>> {
 /// Captures the agent's currently-live login state into a new named
 /// profile. Fails if the agent isn't currently logged in (best-effort
 /// check: the relevant file(s) must exist).
-pub fn capture(accounts_root: &Path, home: &Path, agent: &str, name: &str) -> Result<AccountProfileInfo> {
+pub fn capture(accounts_root: &Path, home: &Path, agent: &str, name: &str, label: Option<String>) -> Result<AccountProfileInfo> {
     let unverified_complete = support(agent)?;
     let dir = profile_dir(accounts_root, agent, name);
     fs::create_dir_all(&dir)?;
@@ -135,10 +139,31 @@ pub fn capture(accounts_root: &Path, home: &Path, agent: &str, name: &str) -> Re
         _ => unreachable!("support() already rejected unsupported agents"),
     }
 
-    let meta = ProfileMeta { captured_at: chrono::Utc::now().to_rfc3339(), unverified_complete };
+    let meta = ProfileMeta { captured_at: chrono::Utc::now().to_rfc3339(), unverified_complete, label, status: AccountStatus::Unknown };
     fs::write(dir.join("meta.json"), serde_json::to_string_pretty(&meta)?)?;
 
-    Ok(AccountProfileInfo { agent: agent.to_string(), name: name.to_string(), captured_at: meta.captured_at, unverified_complete })
+    Ok(AccountProfileInfo {
+        agent: agent.to_string(),
+        name: name.to_string(),
+        label: meta.label,
+        captured_at: meta.captured_at,
+        unverified_complete,
+        status: meta.status,
+    })
+}
+
+/// Sets the manually-tracked usability status of a captured account (see
+/// `AccountStatus` docs — SingleCLI never auto-detects this).
+pub fn set_status(accounts_root: &Path, agent: &str, name: &str, status: AccountStatus) -> Result<()> {
+    let dir = profile_dir(accounts_root, agent, name);
+    let meta_path = dir.join("meta.json");
+    if !meta_path.exists() {
+        bail!("no profile named '{name}' for agent '{agent}'");
+    }
+    let mut meta: ProfileMeta = serde_json::from_str(&fs::read_to_string(&meta_path)?)?;
+    meta.status = status;
+    fs::write(&meta_path, serde_json::to_string_pretty(&meta)?)?;
+    Ok(())
 }
 
 /// Swaps a captured profile into place as the agent's live login state,
@@ -194,6 +219,75 @@ pub fn switch(accounts_root: &Path, home: &Path, agent: &str, name: &str) -> Res
     Ok(AccountSwitchResult { agent: agent.to_string(), name: name.to_string(), backed_up })
 }
 
+/// Materializes an isolated `$HOME` for `agent`/`name` at
+/// `<accounts_root>/<agent>/<name>/home`, so this captured account can run
+/// **concurrently** with other accounts of the same agent (spec: "2 claude
+/// code, 3 codex... as i need") without any of them overwriting each
+/// other's live credentials the way `switch` does. On every call, copies
+/// `base_home`'s non-credential config the first time (so MCP servers /
+/// settings carry over from the real install) and always re-overlays this
+/// profile's captured credentials on top, so re-running after `capture`
+/// picks up refreshed tokens. Returns the isolated home directory —
+/// callers pass it as `$HOME` to the agent's subprocess (see
+/// `single-agent-sdk::run::run_command_with_home`).
+pub fn ensure_isolated_home(accounts_root: &Path, base_home: &Path, agent: &str, name: &str) -> Result<PathBuf> {
+    support(agent)?;
+    let profile = profile_dir(accounts_root, agent, name);
+    if !profile.exists() {
+        bail!("no profile named '{name}' for agent '{agent}'");
+    }
+    let isolated = profile.join("home");
+    fs::create_dir_all(&isolated)?;
+
+    match agent {
+        "claude" => {
+            let config_path = isolated.join(".claude.json");
+            if !config_path.exists() {
+                let base_config = base_home.join(".claude.json");
+                if base_config.exists() {
+                    fs::copy(&base_config, &config_path)?;
+                }
+            }
+            fs::create_dir_all(isolated.join(".claude"))?;
+            write_secure(&isolated.join(".claude/.credentials.json"), &fs::read(profile.join("credentials.json"))?)?;
+            let oauth_fields: Value = serde_json::from_slice(&fs::read(profile.join("oauth_account.json"))?)?;
+            merge_json_fields(&config_path, &oauth_fields)?;
+        }
+        "codex" => {
+            let isolated_codex_dir = isolated.join(".codex");
+            fs::create_dir_all(&isolated_codex_dir)?;
+            let config_path = isolated_codex_dir.join("config.toml");
+            if !config_path.exists() {
+                let base_config = base_home.join(".codex").join("config.toml");
+                if base_config.exists() {
+                    fs::copy(&base_config, &config_path)?;
+                }
+            }
+            write_secure(&isolated_codex_dir.join("auth.json"), &fs::read(profile.join("auth.json"))?)?;
+        }
+        "agy" => {
+            let base_state_dir = base_home.join(".gemini/antigravity-cli");
+            let isolated_state_dir = isolated.join(".gemini/antigravity-cli");
+            fs::create_dir_all(&isolated_state_dir)?;
+            for filename in ["jetski_state.pbtxt", "settings.json"] {
+                let snapshot = profile.join(filename);
+                if snapshot.exists() {
+                    write_secure(&isolated_state_dir.join(filename), &fs::read(&snapshot)?)?;
+                } else {
+                    let base_file = base_state_dir.join(filename);
+                    let dest = isolated_state_dir.join(filename);
+                    if base_file.exists() && !dest.exists() {
+                        fs::copy(&base_file, &dest)?;
+                    }
+                }
+            }
+        }
+        _ => unreachable!("support() already rejected unsupported agents"),
+    }
+
+    Ok(isolated)
+}
+
 pub fn list(accounts_root: &Path, agent_filter: Option<&str>) -> Result<Vec<AccountProfileInfo>> {
     let mut results = Vec::new();
     if !accounts_root.exists() {
@@ -222,8 +316,10 @@ pub fn list(accounts_root: &Path, agent_filter: Option<&str>) -> Result<Vec<Acco
                     results.push(AccountProfileInfo {
                         agent: agent.clone(),
                         name,
+                        label: meta.label,
                         captured_at: meta.captured_at,
                         unverified_complete: meta.unverified_complete,
+                        status: meta.status,
                     });
                 }
             }
@@ -295,13 +391,13 @@ mod tests {
         let home = setup_fake_home();
         let accounts_root = tempfile::tempdir().unwrap();
 
-        capture(accounts_root.path(), home.path(), "claude", "work").unwrap();
+        capture(accounts_root.path(), home.path(), "claude", "work", None).unwrap();
 
         // Simulate logging into a second account: different creds, different oauthAccount,
         // but numStartups (unrelated config) also changes to prove it's untouched by switch.
         fs::write(home.path().join(".claude/.credentials.json"), r#"{"claudeAiOauth":{"token":"secretC"}}"#).unwrap();
         fs::write(home.path().join(".claude.json"), r#"{"numStartups": 99, "oauthAccount": {"email":"b@example.com"}, "userID": "user-b"}"#).unwrap();
-        capture(accounts_root.path(), home.path(), "claude", "personal").unwrap();
+        capture(accounts_root.path(), home.path(), "claude", "personal", None).unwrap();
 
         let result = switch(accounts_root.path(), home.path(), "claude", "work").unwrap();
         assert_eq!(result.backed_up.len(), 2);
@@ -321,7 +417,7 @@ mod tests {
     fn codex_full_file_swap_round_trips() {
         let home = setup_fake_home();
         let accounts_root = tempfile::tempdir().unwrap();
-        capture(accounts_root.path(), home.path(), "codex", "work").unwrap();
+        capture(accounts_root.path(), home.path(), "codex", "work", None).unwrap();
 
         fs::write(home.path().join(".codex/auth.json"), r#"{"auth_mode":"apikey","tokens":{"access":"secretD"}}"#).unwrap();
         switch(accounts_root.path(), home.path(), "codex", "work").unwrap();
@@ -334,32 +430,55 @@ mod tests {
     fn capture_fails_when_not_logged_in() {
         let home = tempfile::tempdir().unwrap();
         let accounts_root = tempfile::tempdir().unwrap();
-        assert!(capture(accounts_root.path(), home.path(), "codex", "x").is_err());
+        assert!(capture(accounts_root.path(), home.path(), "codex", "x", None).is_err());
     }
 
     #[test]
     fn opencode_and_perplexity_are_explicitly_unsupported() {
         let home = setup_fake_home();
         let accounts_root = tempfile::tempdir().unwrap();
-        assert!(capture(accounts_root.path(), home.path(), "opencode", "x").is_err());
-        assert!(capture(accounts_root.path(), home.path(), "perplexity", "x").is_err());
+        assert!(capture(accounts_root.path(), home.path(), "opencode", "x", None).is_err());
+        assert!(capture(accounts_root.path(), home.path(), "perplexity", "x", None).is_err());
     }
 
     #[test]
     fn snapshot_files_are_written_with_owner_only_permissions() {
         let home = setup_fake_home();
         let accounts_root = tempfile::tempdir().unwrap();
-        capture(accounts_root.path(), home.path(), "codex", "work").unwrap();
+        capture(accounts_root.path(), home.path(), "codex", "work", None).unwrap();
         let perms = fs::metadata(accounts_root.path().join("codex/work/auth.json")).unwrap().permissions();
         assert_eq!(perms.mode() & 0o777, 0o600);
+    }
+
+    #[test]
+    fn isolated_homes_let_two_accounts_of_the_same_agent_coexist() {
+        let home = setup_fake_home();
+        let accounts_root = tempfile::tempdir().unwrap();
+        capture(accounts_root.path(), home.path(), "codex", "work", Some("work@example.com".into())).unwrap();
+
+        fs::write(home.path().join(".codex/auth.json"), r#"{"auth_mode":"apikey","tokens":{"access":"secretPersonal"}}"#).unwrap();
+        capture(accounts_root.path(), home.path(), "codex", "personal", Some("me@example.com".into())).unwrap();
+
+        let work_home = ensure_isolated_home(accounts_root.path(), home.path(), "codex", "work").unwrap();
+        let personal_home = ensure_isolated_home(accounts_root.path(), home.path(), "codex", "personal").unwrap();
+        assert_ne!(work_home, personal_home);
+
+        let work_auth: Value = serde_json::from_str(&fs::read_to_string(work_home.join(".codex/auth.json")).unwrap()).unwrap();
+        assert_eq!(work_auth["tokens"]["access"], "secretB");
+        let personal_auth: Value = serde_json::from_str(&fs::read_to_string(personal_home.join(".codex/auth.json")).unwrap()).unwrap();
+        assert_eq!(personal_auth["tokens"]["access"], "secretPersonal");
+
+        // The real, live $HOME's auth.json must be untouched by either call.
+        let live_auth: Value = serde_json::from_str(&fs::read_to_string(home.path().join(".codex/auth.json")).unwrap()).unwrap();
+        assert_eq!(live_auth["tokens"]["access"], "secretPersonal");
     }
 
     #[test]
     fn list_and_remove_work() {
         let home = setup_fake_home();
         let accounts_root = tempfile::tempdir().unwrap();
-        capture(accounts_root.path(), home.path(), "claude", "work").unwrap();
-        capture(accounts_root.path(), home.path(), "codex", "work").unwrap();
+        capture(accounts_root.path(), home.path(), "claude", "work", None).unwrap();
+        capture(accounts_root.path(), home.path(), "codex", "work", None).unwrap();
 
         let all = list(accounts_root.path(), None).unwrap();
         assert_eq!(all.len(), 2);

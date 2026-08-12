@@ -1,5 +1,4 @@
 use crate::discover::{discover, Discovery};
-use crate::run::run_command;
 use anyhow::Result;
 use single_protocol::{IntegrationWrite, McpServerSpec, RunOutcome};
 use std::path::Path;
@@ -39,11 +38,24 @@ pub trait AgentAdapter {
     /// killing the process and setting `timed_out: true` if it runs past
     /// `timeout`. Default: unsupported (used by agents with no verified
     /// non-interactive mode, e.g. `pplx`, which isn't a coding agent at all).
-    fn run_prompt(&self, _cwd: &Path, _prompt: &str, _timeout: Duration) -> Result<RunOutcome> {
+    ///
+    /// `home` overrides `$HOME` for the subprocess when set — this is how
+    /// multiple isolated accounts of the same agent run concurrently (see
+    /// `single-core::account::ensure_isolated_home`); `None` runs against
+    /// the caller's real `$HOME` as before.
+    fn run_prompt(&self, _cwd: &Path, _prompt: &str, _home: Option<&Path>, _timeout: Duration) -> Result<RunOutcome> {
         anyhow::bail!("{} has no non-interactive run mode wired up", self.command())
+    }
+
+    /// Installs a plugin via this agent's own real plugin-install command
+    /// (`claude plugin install`, `codex plugin add`, `opencode plugin`,
+    /// `agy plugin install` — verified per-agent, see each impl). Default:
+    /// unsupported (agents with no verified plugin CLI, e.g. `pplx`).
+    fn install_plugin(&self, _target: &str, _cwd: &Path, _timeout: Duration) -> Result<RunOutcome> {
+        anyhow::bail!("{} has no verified plugin-install command wired up", self.command())
     }
 }
 
-pub(crate) fn run_with_prompt_flag(command: &str, cwd: &Path, prompt: &str, timeout: Duration) -> Result<RunOutcome> {
-    run_command(command, &["-p".to_string(), prompt.to_string()], cwd, timeout)
+pub(crate) fn run_with_prompt_flag(command: &str, cwd: &Path, prompt: &str, home: Option<&Path>, timeout: Duration) -> Result<RunOutcome> {
+    crate::run::run_command_with_home(command, &["-p".to_string(), prompt.to_string()], cwd, home, timeout)
 }

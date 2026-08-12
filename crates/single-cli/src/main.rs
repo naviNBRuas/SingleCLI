@@ -104,6 +104,12 @@ enum Command {
         #[command(subcommand)]
         action: ProviderCommand,
     },
+    /// Manage plugins and sync installs into agents that have a real
+    /// plugin-install command (claude, codex, opencode, agy).
+    Plugin {
+        #[command(subcommand)]
+        action: PluginCommand,
+    },
     /// Manage profiles.
     Profile {
         #[command(subcommand)]
@@ -471,10 +477,50 @@ enum ProviderCommand {
 }
 
 #[derive(Subcommand)]
+enum PluginCommand {
+    /// Register a plugin. `target` is the `plugin[@marketplace]` selector
+    /// used verbatim by claude/codex/agy; `--opencode-module` is the plain
+    /// npm module name OpenCode's real `opencode plugin <module>` command
+    /// needs instead (a genuinely different addressing scheme, not set
+    /// automatically from `target`).
+    Add {
+        name: String,
+        target: String,
+        #[arg(long)]
+        opencode_module: Option<String>,
+    },
+    Remove { name: String },
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    Inspect {
+        name: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Install the plugin into the named agents (all registered agents if none given).
+    Sync {
+        name: String,
+        #[arg(long, value_delimiter = ',')]
+        agents: Vec<String>,
+        #[arg(long)]
+        yes: bool,
+    },
+}
+
+#[derive(Subcommand)]
 enum AccountCommand {
     /// Capture the agent's currently-live login state as a named profile.
     /// Log in normally with the agent's own CLI first.
-    Capture { agent: String, name: String },
+    Capture {
+        agent: String,
+        name: String,
+        /// Human-readable identity (email/display name) so multiple
+        /// accounts per agent are distinguishable later.
+        #[arg(long)]
+        label: Option<String>,
+    },
     /// Swap a captured profile into place as the agent's live login state
     /// (backs up whatever was live first).
     Use { agent: String, name: String },
@@ -485,6 +531,15 @@ enum AccountCommand {
         json: bool,
     },
     Remove { agent: String, name: String },
+    /// Manually record whether an account is usable, rate-limited, or
+    /// needs a top-up. Never auto-detected (no verified quota API across
+    /// agents) — you or a failed task tell SingleCLI, and it remembers.
+    SetStatus {
+        agent: String,
+        name: String,
+        /// One of: available, rate_limited, needs_topup, unknown
+        status: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -500,6 +555,10 @@ enum TaskCommand {
         /// Isolate the run in a new git worktree + branch (requires `cwd` to be inside a git repo).
         #[arg(long)]
         worktree: bool,
+        /// Run as this captured account (isolated $HOME — see `single account capture`)
+        /// instead of the real one, so multiple accounts of the same agent can run concurrently.
+        #[arg(long)]
+        account: Option<String>,
         #[arg(long, default_value = "300")]
         timeout_secs: u64,
         #[arg(long)]
@@ -796,7 +855,7 @@ fn main() -> anyhow::Result<()> {
             render::print(response, json);
         }
         Command::Task { action } => match action {
-            TaskCommand::Run { description, agent, cwd, worktree, timeout_secs, json } => {
+            TaskCommand::Run { description, agent, cwd, worktree, account, timeout_secs, json } => {
                 let cwd = cwd.unwrap_or_else(|| ".".to_string());
                 let cwd = std::fs::canonicalize(&cwd).map(|p| p.display().to_string()).unwrap_or(cwd);
                 let response = client::send(&socket_path, Request::TaskRun {
@@ -804,6 +863,7 @@ fn main() -> anyhow::Result<()> {
                     agent,
                     cwd,
                     use_worktree: worktree,
+                    account,
                     timeout_secs,
                 })?;
                 render::print(response, json);
@@ -860,9 +920,34 @@ fn main() -> anyhow::Result<()> {
                 render::print(response, false);
             }
         },
+        Command::Plugin { action } => match action {
+            PluginCommand::Add { name, target, opencode_module } => {
+                let response = client::send(&socket_path, Request::PluginAdd { plugin: single_protocol::PluginSpec { name, target, opencode_module } })?;
+                render::print(response, false);
+            }
+            PluginCommand::Remove { name } => {
+                let response = client::send(&socket_path, Request::PluginRemove { name })?;
+                render::print(response, false);
+            }
+            PluginCommand::List { json } => {
+                let response = client::send(&socket_path, Request::PluginList)?;
+                render::print(response, json);
+            }
+            PluginCommand::Inspect { name, json } => {
+                let response = client::send(&socket_path, Request::PluginInspect { name })?;
+                render::print(response, json);
+            }
+            PluginCommand::Sync { name, agents, yes } => {
+                if !yes {
+                    eprintln!("Dry run (pass --yes to actually install the plugin into agent CLIs).");
+                }
+                let response = client::send(&socket_path, Request::PluginSync { name, agents, dry_run: !yes })?;
+                render::print(response, false);
+            }
+        },
         Command::Account { action } => match action {
-            AccountCommand::Capture { agent, name } => {
-                let response = client::send(&socket_path, Request::AccountCapture { agent, name })?;
+            AccountCommand::Capture { agent, name, label } => {
+                let response = client::send(&socket_path, Request::AccountCapture { agent, name, label })?;
                 render::print(response, false);
             }
             AccountCommand::Use { agent, name } => {
@@ -875,6 +960,12 @@ fn main() -> anyhow::Result<()> {
             }
             AccountCommand::Remove { agent, name } => {
                 let response = client::send(&socket_path, Request::AccountRemove { agent, name })?;
+                render::print(response, false);
+            }
+            AccountCommand::SetStatus { agent, name, status } => {
+                let status = single_protocol::AccountStatus::parse(&status)
+                    .ok_or_else(|| anyhow::anyhow!("invalid status '{status}' (expected: available, rate_limited, needs_topup, unknown)"))?;
+                let response = client::send(&socket_path, Request::AccountSetStatus { agent, name, status })?;
                 render::print(response, false);
             }
         },

@@ -58,7 +58,7 @@ pub fn run(conn: &Connection, ctx: &Context, opts: OrchestrateOptions) -> Result
 
         crate::state::record_event(conn, "orchestrate.step_started", &format!("agent={agent} step={}/{}", i + 1, opts.agents.len()))?;
 
-        let record = task::run(conn, ctx, RunTaskOptions { description: &description, agent, cwd: &shared_cwd, use_worktree: false, timeout: opts.timeout })?;
+        let record = task::run(conn, ctx, RunTaskOptions { description: &description, agent, cwd: &shared_cwd, use_worktree: false, account: None, timeout: opts.timeout })?;
 
         let failed = record.status == TaskStatus::Failed;
         crate::state::record_event(
