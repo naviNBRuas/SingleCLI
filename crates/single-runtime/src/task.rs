@@ -14,10 +14,11 @@
 //! just for one agent at a time, one task at a time.
 
 use crate::context::Context;
+use crate::memory;
 use anyhow::{Context as _, Result};
 use rusqlite::{params, Connection, OptionalExtension};
 use single_agent_sdk::adapters::for_agent_with_custom;
-use single_protocol::{TaskRecord, TaskStatus};
+use single_protocol::{MemoryScope, MemorySource, TaskStatus, TaskRecord};
 use std::path::Path;
 use std::time::Duration;
 
@@ -156,6 +157,7 @@ pub fn run(conn: &Connection, ctx: &Context, opts: RunTaskOptions) -> Result<Tas
         let Some(repo_root) = repo_ctx.repo_root else {
             finish(conn, id, TaskStatus::Failed, None, None, None, false, Some("not a git repository; --worktree requires one"))?;
             crate::state::record_event(conn, "task.failed", &format!("#{id} not a git repository"))?;
+            remember_failure(conn, id, opts.agent, opts.description, "not a git repository; --worktree requires one");
             return get(conn, id)?.context("task disappeared after being created");
         };
         let worktree_path = ctx.dirs.state_dir().join("worktrees").join(format!("task-{id}"));
@@ -163,6 +165,7 @@ pub fn run(conn: &Connection, ctx: &Context, opts: RunTaskOptions) -> Result<Tas
         if let Err(e) = single_core::worktree::add(Path::new(&repo_root), &worktree_path, &branch) {
             finish(conn, id, TaskStatus::Failed, None, None, None, false, Some(&format!("worktree setup failed: {e:#}")))?;
             crate::state::record_event(conn, "task.failed", &format!("#{id} worktree setup failed: {e:#}"))?;
+            remember_failure(conn, id, opts.agent, opts.description, &format!("worktree setup failed: {e:#}"));
             return get(conn, id)?.context("task disappeared after being created");
         }
         worktree_path
@@ -197,14 +200,40 @@ pub fn run(conn: &Connection, ctx: &Context, opts: RunTaskOptions) -> Result<Tas
                 Some(&summary),
             )?;
             crate::state::record_event(conn, if outcome.success { "task.completed" } else { "task.failed" }, &format!("#{id} {summary}"))?;
+            if !outcome.success {
+                remember_failure(conn, id, opts.agent, opts.description, &summary);
+            }
         }
         Err(e) => {
             finish(conn, id, TaskStatus::Failed, worktree_path_str.as_deref(), None, None, false, Some(&format!("{e:#}")))?;
             crate::state::record_event(conn, "task.failed", &format!("#{id} {e:#}"))?;
+            remember_failure(conn, id, opts.agent, opts.description, &format!("{e:#}"));
         }
     }
 
     get(conn, id)?.context("task disappeared after finishing")
+}
+
+/// "Learn from errors": every task failure is also written to the memory
+/// store (project-scoped, source=tool_output, since it's this project's
+/// own tooling reporting what went wrong rather than something a user or
+/// agent asserted) so `single memory search`/`single memory list` surface
+/// past failures for whoever — human or agent — looks next. Best-effort:
+/// a memory-write failure must never mask the real task failure it's
+/// trying to record, so errors here are swallowed, not propagated.
+fn remember_failure(conn: &Connection, id: i64, agent: &str, description: &str, detail: &str) {
+    let _ = memory::ensure_schema(conn);
+    let _ = memory::store(conn, memory::NewMemory {
+        scope: Some(MemoryScope::Project),
+        source: Some(MemorySource::ToolOutput),
+        agent: Some(agent.to_string()),
+        task: Some(id.to_string()),
+        title: format!("task #{id} failed ({agent})"),
+        content: format!("prompt: {description}\nfailure: {detail}"),
+        confidence: Some(1.0),
+        expires_in_seconds: None,
+        ..Default::default()
+    });
 }
 
 fn summarize(stdout: &str, timed_out: bool, exit_code: Option<i32>) -> String {
@@ -273,6 +302,13 @@ mod tests {
         let task = run(&conn, &ctx, opts).unwrap();
         assert_eq!(task.status, TaskStatus::Failed);
         assert!(task.summary.unwrap().contains("not a git repository"));
+
+        // "Learn from errors": the failure should also have been written
+        // to the memory store, not just the task record.
+        let memories = memory::search(&conn, "not a git repository", None, None).unwrap();
+        assert_eq!(memories.len(), 1);
+        assert_eq!(memories[0].source, MemorySource::ToolOutput);
+        assert_eq!(memories[0].agent.as_deref(), Some("claude"));
     }
 
     fn task_run_result(conn: &Connection, ctx: &Context, cwd: &Path, agent: &str) -> Result<TaskRecord> {
