@@ -88,6 +88,9 @@ enum Command {
         cwd: Option<String>,
         #[arg(long)]
         worktree: bool,
+        /// See `single task run --help`'s --real-home — applies to every step.
+        #[arg(long)]
+        real_home: bool,
         #[arg(long, default_value = "300")]
         timeout_secs: u64,
     },
@@ -577,6 +580,12 @@ enum TaskCommand {
         /// instead of the real one, so multiple accounts of the same agent can run concurrently.
         #[arg(long)]
         account: Option<String>,
+        /// Skip SingleCLI's isolated $HOME and run against your real, ambient one instead —
+        /// for tasks that need to actually touch your real system (dotfiles, packages, desktop
+        /// config), not a sandboxed copy. The agent gets full access to your real credentials
+        /// and files; only use this when that's exactly what you want.
+        #[arg(long)]
+        real_home: bool,
         #[arg(long, default_value = "300")]
         timeout_secs: u64,
         #[arg(long)]
@@ -904,15 +913,19 @@ fn main() -> anyhow::Result<()> {
             render::print(response, json);
         }
         Command::Task { action } => match action {
-            TaskCommand::Run { description, agent, cwd, worktree, account, timeout_secs, json } => {
+            TaskCommand::Run { description, agent, cwd, worktree, account, real_home, timeout_secs, json } => {
                 let cwd = cwd.unwrap_or_else(|| ".".to_string());
                 let cwd = std::fs::canonicalize(&cwd).map(|p| p.display().to_string()).unwrap_or(cwd);
+                if real_home {
+                    eprintln!("warning: running against your real $HOME — {agent} will see your real credentials/config and can modify real files.");
+                }
                 let response = client::send(&socket_path, Request::TaskRun {
                     description,
                     agent,
                     cwd,
                     use_worktree: worktree,
                     account,
+                    real_home,
                     timeout_secs,
                 })?;
                 render::print(response, json);
@@ -926,10 +939,13 @@ fn main() -> anyhow::Result<()> {
                 render::print(response, json);
             }
         },
-        Command::Orchestrate { goal, agents, cwd, worktree, timeout_secs } => {
+        Command::Orchestrate { goal, agents, cwd, worktree, real_home, timeout_secs } => {
             let cwd = cwd.unwrap_or_else(|| ".".to_string());
             let cwd = std::fs::canonicalize(&cwd).map(|p| p.display().to_string()).unwrap_or(cwd);
-            let response = client::send(&socket_path, Request::Orchestrate { goal, agents, cwd, use_worktree: worktree, timeout_secs })?;
+            if real_home {
+                eprintln!("warning: running against your real $HOME — every agent in this relay will see your real credentials/config and can modify real files.");
+            }
+            let response = client::send(&socket_path, Request::Orchestrate { goal, agents, cwd, use_worktree: worktree, real_home, timeout_secs })?;
             render::print(response, false);
         }
         Command::Provider { action } => match action {

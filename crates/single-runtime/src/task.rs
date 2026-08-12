@@ -135,7 +135,16 @@ pub struct RunTaskOptions<'a> {
     /// If set, runs against this captured account's isolated `$HOME`
     /// (`single_core::account::ensure_isolated_home`) instead of the real
     /// one — lets multiple accounts of the same agent run concurrently.
+    /// Ignored when `real_home` is set.
     pub account: Option<&'a str>,
+    /// Skips isolated-home materialization entirely and runs the agent
+    /// against the real, ambient `$HOME` — for tasks that need to
+    /// actually modify the real system (dotfiles, installed packages,
+    /// desktop config), not a SingleCLI-managed sandbox copy. An
+    /// explicit opt-in: the agent gets full access to real credentials
+    /// and files, which is exactly what the isolated-home default exists
+    /// to avoid in the ordinary case.
+    pub real_home: bool,
     pub timeout: Duration,
 }
 
@@ -184,28 +193,35 @@ pub fn run(conn: &Connection, ctx: &Context, opts: RunTaskOptions) -> Result<Tas
     // Every run goes against a SingleCLI-managed home, never the real
     // ambient $HOME (single_core::agent_home docs) — either the default
     // per-agent isolated home, or, when --account is given, that named
-    // account's own isolated home (single_core::account docs).
-    let isolated_home = match opts.account {
-        Some(name) => integrations::home_dir()
-            .and_then(|home| single_core::account::ensure_isolated_home(&ctx.dirs.accounts_dir(), &home, opts.agent, name))
-            .map_err(|e| format!("failed to materialize isolated home for account '{name}': {e:#}")),
-        None => integrations::home_dir()
-            .and_then(|home| single_core::agent_home::ensure_bootstrapped(&ctx.dirs.homes_dir(), &home, opts.agent))
-            .map_err(|e| format!("failed to materialize isolated home for agent '{}': {e:#}", opts.agent)),
-    };
-    let isolated_home = match isolated_home {
-        Ok(dir) => dir,
-        Err(detail) => {
-            finish(conn, id, TaskStatus::Failed, None, None, None, false, Some(&detail))?;
-            crate::state::record_event(conn, "task.failed", &format!("#{id} {detail}"))?;
-            remember_failure(conn, id, opts.agent, opts.description, &detail);
-            return get(conn, id)?.context("task disappeared after being created");
+    // account's own isolated home (single_core::account docs) — unless
+    // `real_home` explicitly opts out (see RunTaskOptions::real_home
+    // docs), in which case `home` stays None and the agent inherits the
+    // daemon's own real environment.
+    let home: Option<std::path::PathBuf> = if opts.real_home {
+        None
+    } else {
+        let resolved = match opts.account {
+            Some(name) => integrations::home_dir()
+                .and_then(|home| single_core::account::ensure_isolated_home(&ctx.dirs.accounts_dir(), &home, opts.agent, name))
+                .map_err(|e| format!("failed to materialize isolated home for account '{name}': {e:#}")),
+            None => integrations::home_dir()
+                .and_then(|home| single_core::agent_home::ensure_bootstrapped(&ctx.dirs.homes_dir(), &home, opts.agent))
+                .map_err(|e| format!("failed to materialize isolated home for agent '{}': {e:#}", opts.agent)),
+        };
+        match resolved {
+            Ok(dir) => Some(dir),
+            Err(detail) => {
+                finish(conn, id, TaskStatus::Failed, None, None, None, false, Some(&detail))?;
+                crate::state::record_event(conn, "task.failed", &format!("#{id} {detail}"))?;
+                remember_failure(conn, id, opts.agent, opts.description, &detail);
+                return get(conn, id)?.context("task disappeared after being created");
+            }
         }
     };
 
     std::fs::create_dir_all(ctx.dirs.artifacts_dir())?;
     let live_output_path = ctx.dirs.task_live_output_path(id);
-    let outcome = adapter.run_prompt(&run_cwd, opts.description, Some(&isolated_home), Some(&live_output_path), opts.timeout);
+    let outcome = adapter.run_prompt(&run_cwd, opts.description, home.as_deref(), Some(&live_output_path), opts.timeout);
     let _ = std::fs::remove_file(&live_output_path); // superseded by the final artifact below; best-effort cleanup
 
     let worktree_path_str = opts.use_worktree.then(|| run_cwd.display().to_string());
@@ -326,7 +342,7 @@ mod tests {
         if !single_agent_sdk::adapters::for_agent("claude").unwrap().discover().detected {
             return;
         }
-        let opts = RunTaskOptions { description: "x", agent: "claude", cwd: dir.path(), use_worktree: true, account: None, timeout: Duration::from_secs(1) };
+        let opts = RunTaskOptions { description: "x", agent: "claude", cwd: dir.path(), use_worktree: true, account: None, real_home: false, timeout: Duration::from_secs(1) };
         let task = run(&conn, &ctx, opts).unwrap();
         assert_eq!(task.status, TaskStatus::Failed);
         assert!(task.summary.unwrap().contains("not a git repository"));
@@ -340,6 +356,6 @@ mod tests {
     }
 
     fn task_run_result(conn: &Connection, ctx: &Context, cwd: &Path, agent: &str) -> Result<TaskRecord> {
-        run(conn, ctx, RunTaskOptions { description: "x", agent, cwd, use_worktree: false, account: None, timeout: Duration::from_secs(1) })
+        run(conn, ctx, RunTaskOptions { description: "x", agent, cwd, use_worktree: false, account: None, real_home: false, timeout: Duration::from_secs(1) })
     }
 }

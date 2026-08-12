@@ -162,6 +162,7 @@ fn handle_task_add_key(app: &mut App, code: KeyCode) {
             KeyCode::Down | KeyCode::Char('j') => app.task_agents_move(1),
             KeyCode::Up | KeyCode::Char('k') => app.task_agents_move(-1),
             KeyCode::Char(' ') => app.task_agents_toggle(),
+            KeyCode::Char('g') => app.task_toggle_real_home(),
             KeyCode::Enter => app.task_agents_submit(),
             KeyCode::Esc => app.cancel_task_add(),
             _ => {}

@@ -675,6 +675,34 @@ stable|nightly] [--check] [--yes]`, mirroring the real `claude update`/
   being echoed — genuinely incremental, not buffered until exit — and
   was removed once the task completed, leaving only the final artifact.
 
+## Growth Phase 6: `--real-home` for system-configuration tasks
+
+The isolated-home architecture (Growth Phase 2/Isolation section above)
+means every task now runs against a SingleCLI-managed sandbox `$HOME` by
+default — exactly the point, for agent config/credentials. But it created
+a real gap for a legitimate use case: asking an agent, via `single task
+run`, to actually configure the real machine (dotfiles, installed
+packages, desktop config) — those edits would land in the fake isolated
+home instead of the real system, silently.
+
+- **`Request::TaskRun`/`Orchestrate` gained `real_home: bool`** (also
+  `RunTaskOptions`/`OrchestrateOptions`). When set, `single-runtime::task`
+  skips isolated-home materialization entirely and passes `None` as the
+  `$HOME` override to `run_prompt` — the agent subprocess then inherits
+  the daemon's own real environment, i.e. the actual logged-in user's
+  real `$HOME`, same as before the isolation pivot.
+- **Exposed as `single task run --real-home` / `single orchestrate
+  --real-home`**, and as a `[g]` toggle in the TUI's task-creation flow
+  (Tasks tab, `[n]`, agent-picking step). Off by default — this is a
+  deliberate, visible opt-in (the CLI prints a warning when used) since
+  it gives the agent full access to real credentials and files, which is
+  exactly what the isolated-home default exists to prevent in the
+  ordinary case.
+- Verified for real: `single task run 'echo HOME=$HOME' --agent
+  <custom-agent>` printed the isolated home path by default and the real
+  `$HOME` with `--real-home`, confirming the override actually reaches
+  the subprocess and nothing else changed.
+
 ## Not in Phase 1-6
 
 Per the original spec's own §50 "Development Strategy" (build vertically,

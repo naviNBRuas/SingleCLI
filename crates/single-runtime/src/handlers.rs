@@ -215,7 +215,7 @@ fn dispatch(ctx: &Context, request: Request) -> anyhow::Result<ResponseData> {
         Request::ContextShow { cwd } => {
             Ok(ResponseData::Context(single_core::project_context::resolve(std::path::Path::new(&cwd))))
         }
-        Request::TaskRun { description, agent, cwd, use_worktree, account, timeout_secs } => {
+        Request::TaskRun { description, agent, cwd, use_worktree, account, real_home, timeout_secs } => {
             let conn = task_db(ctx)?;
             let record = crate::task::run(&conn, ctx, crate::task::RunTaskOptions {
                 description: &description,
@@ -223,6 +223,7 @@ fn dispatch(ctx: &Context, request: Request) -> anyhow::Result<ResponseData> {
                 cwd: std::path::Path::new(&cwd),
                 use_worktree,
                 account: account.as_deref(),
+                real_home,
                 timeout: std::time::Duration::from_secs(timeout_secs),
             })?;
             Ok(ResponseData::Task(record))
@@ -236,13 +237,14 @@ fn dispatch(ctx: &Context, request: Request) -> anyhow::Result<ResponseData> {
             let record = crate::task::get(&conn, id)?.ok_or_else(|| anyhow::anyhow!("no task with id {id}"))?;
             Ok(ResponseData::Task(record))
         }
-        Request::Orchestrate { goal, agents, cwd, use_worktree, timeout_secs } => {
+        Request::Orchestrate { goal, agents, cwd, use_worktree, real_home, timeout_secs } => {
             let conn = task_db(ctx)?;
             let records = crate::orchestrate::run(&conn, ctx, crate::orchestrate::OrchestrateOptions {
                 goal: &goal,
                 agents: &agents,
                 cwd: std::path::Path::new(&cwd),
                 use_worktree,
+                real_home,
                 timeout: std::time::Duration::from_secs(timeout_secs),
             })?;
             Ok(ResponseData::OrchestrateResult(records))

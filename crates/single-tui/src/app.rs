@@ -89,7 +89,7 @@ pub enum TaskAddFlow {
     Idle,
     EnteringDescription { input: String },
     EnteringCwd { description: String, input: String },
-    PickingAgents { description: String, cwd: String, agent_names: Vec<String>, chosen: Vec<bool>, cursor: usize },
+    PickingAgents { description: String, cwd: String, agent_names: Vec<String>, chosen: Vec<bool>, cursor: usize, real_home: bool },
     Submitting { rx: mpsc::Receiver<anyhow::Result<usize>> },
     Done { count: usize },
     Failed { error: String },
@@ -516,7 +516,7 @@ impl App {
         let cwd = std::fs::canonicalize(&cwd).map(|p| p.display().to_string()).unwrap_or(cwd);
         let agent_names: Vec<String> = self.agents.iter().filter(|a| a.detected).map(|a| a.name.clone()).collect();
         let chosen = vec![false; agent_names.len()];
-        self.task_add = TaskAddFlow::PickingAgents { description: description.clone(), cwd, agent_names, chosen, cursor: 0 };
+        self.task_add = TaskAddFlow::PickingAgents { description: description.clone(), cwd, agent_names, chosen, cursor: 0, real_home: false };
     }
 
     pub fn task_agents_move(&mut self, delta: i32) {
@@ -536,8 +536,18 @@ impl App {
         }
     }
 
+    /// Toggles whether this task runs against the real, ambient $HOME
+    /// instead of SingleCLI's isolated one — for tasks that need to
+    /// actually modify the real system (see `Request::TaskRun::real_home`
+    /// docs). Off by default.
+    pub fn task_toggle_real_home(&mut self) {
+        if let TaskAddFlow::PickingAgents { real_home, .. } = &mut self.task_add {
+            *real_home = !*real_home;
+        }
+    }
+
     pub fn task_agents_submit(&mut self) {
-        let TaskAddFlow::PickingAgents { description, cwd, agent_names, chosen, .. } = &self.task_add else { return };
+        let TaskAddFlow::PickingAgents { description, cwd, agent_names, chosen, real_home, .. } = &self.task_add else { return };
         let selected: Vec<String> = agent_names.iter().zip(chosen).filter(|(_, on)| **on).map(|(n, _)| n.clone()).collect();
         if selected.is_empty() {
             self.error = Some("pick at least one agent (space to toggle)".into());
@@ -545,17 +555,18 @@ impl App {
         }
         let description = description.clone();
         let cwd = cwd.clone();
+        let real_home = *real_home;
         let socket_path = self.socket_path.clone();
         let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || {
             let result = (|| -> anyhow::Result<usize> {
                 if selected.len() == 1 {
-                    match call(&socket_path, &Request::TaskRun { description, agent: selected[0].clone(), cwd, use_worktree: false, account: None, timeout_secs: 300 })? {
+                    match call(&socket_path, &Request::TaskRun { description, agent: selected[0].clone(), cwd, use_worktree: false, account: None, real_home, timeout_secs: 300 })? {
                         Response::Ok { .. } => Ok(1),
                         Response::Error { message } => anyhow::bail!(message),
                     }
                 } else {
-                    match call(&socket_path, &Request::Orchestrate { goal: description, agents: selected.clone(), cwd, use_worktree: true, timeout_secs: 300 })? {
+                    match call(&socket_path, &Request::Orchestrate { goal: description, agents: selected.clone(), cwd, use_worktree: true, real_home, timeout_secs: 300 })? {
                         Response::Ok { .. } => Ok(selected.len()),
                         Response::Error { message } => anyhow::bail!(message),
                     }

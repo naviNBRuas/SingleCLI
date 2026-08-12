@@ -63,8 +63,12 @@ single agent login codex    # same for codex, opencode, or perplexity
 single mcp list         # the unified MCP registry
 single setup --yes       # install missing agent CLIs + sync config
 single install-integrations --yes   # sync MCP config into every agent, with backups
-single task run "add a .gitignore" --agent claude   # delegate a prompt to a real agent, synchronously
+single task run "add a .gitignore" --agent claude --cwd ~/code/some-project   # delegate a prompt in any project directory
 single orchestrate "add tests for the parser" --agents claude,codex --worktree   # relay across multiple agents
+
+# use an agent, through single, to actually set up a fresh machine (real $HOME, not the sandbox):
+single task run "install my usual dev tools, set up my dotfiles, configure the desktop" \
+  --agent claude --real-home --timeout-secs 3600
 
 single account capture claude work      # snapshot the currently logged-in Claude account
 single account use claude personal      # switch to a different captured account
@@ -185,6 +189,14 @@ Every list/inspect command supports `--json` for scripting.
   a quick-add flow for MCP/LSP/Plugins/Tools, remove/toggle/sync
   keybindings, and an in-TUI task-creation flow (description → workspace
   path → pick one or more agents).
+- **`--real-home` for system-configuration tasks** — `single task run
+  --agent claude --real-home "set up my dotfiles, install my usual
+  tools, make this look nice"` runs against your actual `$HOME`, not the
+  isolated sandbox every other task uses. Off by default (prints a
+  warning when used) since it gives the agent real credentials/file
+  access — for the one legitimate case where that's the point: using an
+  agent through `single` to actually configure your machine. Also a
+  `[g]` toggle in the TUI's task-creation flow.
 - **Live task output in the TUI** — press `Enter` on any row in the Tasks
   tab to see that task's real output, tailed as it's produced while the
   task is still running (auto-refreshing) and switching to the full

@@ -66,10 +66,25 @@ pub enum Request {
     MemoryDelete { id: i64 },
     MemoryList { scope: Option<MemoryScope> },
     ContextShow { cwd: String },
-    TaskRun { description: String, agent: String, cwd: String, use_worktree: bool, account: Option<String>, timeout_secs: u64 },
+    TaskRun {
+        description: String,
+        agent: String,
+        cwd: String,
+        use_worktree: bool,
+        account: Option<String>,
+        /// Skips the usual SingleCLI-managed isolated $HOME
+        /// (`single_core::agent_home`) and runs the agent against the
+        /// real, ambient $HOME instead — for tasks that need to actually
+        /// touch the real system (dotfiles, installed packages, desktop
+        /// config), not a sandboxed copy. Off by default: this gives the
+        /// agent full access to your real credentials and files, an
+        /// explicit choice, not the default posture.
+        real_home: bool,
+        timeout_secs: u64,
+    },
     TaskList,
     TaskInspect { id: i64 },
-    Orchestrate { goal: String, agents: Vec<String>, cwd: String, use_worktree: bool, timeout_secs: u64 },
+    Orchestrate { goal: String, agents: Vec<String>, cwd: String, use_worktree: bool, real_home: bool, timeout_secs: u64 },
     AccountCapture { agent: String, name: String, label: Option<String> },
     AccountUse { agent: String, name: String },
     AccountList { agent: Option<String> },

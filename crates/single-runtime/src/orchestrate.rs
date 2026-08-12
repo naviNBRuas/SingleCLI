@@ -28,6 +28,8 @@ pub struct OrchestrateOptions<'a> {
     pub agents: &'a [String],
     pub cwd: &'a Path,
     pub use_worktree: bool,
+    /// See `task::RunTaskOptions::real_home` — applies to every step.
+    pub real_home: bool,
     pub timeout: Duration,
 }
 
@@ -58,7 +60,15 @@ pub fn run(conn: &Connection, ctx: &Context, opts: OrchestrateOptions) -> Result
 
         crate::state::record_event(conn, "orchestrate.step_started", &format!("agent={agent} step={}/{}", i + 1, opts.agents.len()))?;
 
-        let record = task::run(conn, ctx, RunTaskOptions { description: &description, agent, cwd: &shared_cwd, use_worktree: false, account: None, timeout: opts.timeout })?;
+        let record = task::run(conn, ctx, RunTaskOptions {
+            description: &description,
+            agent,
+            cwd: &shared_cwd,
+            use_worktree: false,
+            account: None,
+            real_home: opts.real_home,
+            timeout: opts.timeout,
+        })?;
 
         let failed = record.status == TaskStatus::Failed;
         crate::state::record_event(
@@ -161,7 +171,7 @@ mod tests {
         dirs.ensure_created().unwrap();
         let ctx = Context { dirs, resolved: single_core::ResolvedConfig::default(), registry: single_core::builtin_registry() };
 
-        let opts = OrchestrateOptions { goal: "x", agents: &[], cwd: dir.path(), use_worktree: false, timeout: Duration::from_secs(1) };
+        let opts = OrchestrateOptions { goal: "x", agents: &[], cwd: dir.path(), use_worktree: false, real_home: false, timeout: Duration::from_secs(1) };
         assert!(run(&conn, &ctx, opts).is_err());
     }
 }

@@ -518,7 +518,7 @@ fn draw_task_add_modal(frame: &mut Frame, area: Rect, app: &App) {
                 Line::from("[enter] next  [esc] cancel"),
             ],
         ),
-        TaskAddFlow::PickingAgents { description, cwd, agent_names, chosen, cursor } => {
+        TaskAddFlow::PickingAgents { description, cwd, agent_names, chosen, cursor, real_home } => {
             let mut lines = vec![
                 Line::from(Span::styled(description.clone(), Style::default().fg(MUTED))),
                 Line::from(Span::styled(format!("cwd: {cwd}"), Style::default().fg(MUTED))),
@@ -534,7 +534,13 @@ fn draw_task_add_modal(frame: &mut Frame, area: Rect, app: &App) {
                 lines.push(Line::from(Span::styled(format!("  {mark} {name}"), style)));
             }
             lines.push(Line::from(""));
-            lines.push(Line::from("[↑↓] move  [space] toggle  [enter] run  [esc] cancel"));
+            let (real_home_mark, real_home_color) = if *real_home { ("[x]", WARN) } else { ("[ ]", MUTED) };
+            lines.push(Line::from(Span::styled(
+                format!("  {real_home_mark} [g] real $HOME (touch your actual system, not the isolated sandbox)"),
+                Style::default().fg(real_home_color),
+            )));
+            lines.push(Line::from(""));
+            lines.push(Line::from("[↑↓] move  [space] toggle agent  [g] toggle real $HOME  [enter] run  [esc] cancel"));
             (" New task — agent(s) ", lines)
         }
         TaskAddFlow::Submitting { .. } => (" Running… ", vec![Line::from("Submitting to the runtime...")]),
