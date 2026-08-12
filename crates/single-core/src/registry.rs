@@ -242,6 +242,92 @@ pub fn builtin_registry() -> Vec<AgentDefinition> {
             config_paths: vec![".config/goose/config.yaml".into()],
             notes: None,
         },
+        AgentDefinition {
+            name: "copilot".into(),
+            adapter: "copilot".into(),
+            command: "copilot".into(),
+            install_method: InstallMethod::StandaloneBinary {
+                detail: "GitHub's official Copilot CLI, standalone binary at ~/.local/bin/copilot \
+                         (confirmed on the reference machine: a 177MB binary directly in \
+                         ~/.local/bin, not an npm-wrapped script — consistent with the install \
+                         script below rather than `npm install -g @github/copilot`, which is \
+                         also officially supported)"
+                    .into(),
+            },
+            bootstrap_install: Some(BootstrapInstall {
+                command: "curl -fsSL https://gh.io/copilot-install | bash".into(),
+                source: "https://docs.github.com/en/copilot/how-tos/copilot-cli/set-up-copilot-cli/install-copilot-cli".into(),
+            }),
+            unverified: false,
+            capabilities: CapabilityFlags {
+                streaming: false,
+                mcp: true, // observed real ~/.copilot/mcp-config.json shape by running `copilot mcp add` on the reference machine
+                lsp: false,
+                tools: true,
+                sessions: true, // --resume observed in --help
+                structured_output: false,
+            },
+            config_paths: vec![".copilot/mcp-config.json".into()],
+            notes: None,
+        },
+        AgentDefinition {
+            name: "kiro".into(),
+            adapter: "kiro".into(),
+            command: "kiro-cli".into(),
+            install_method: InstallMethod::StandaloneBinary {
+                detail: "AWS's Kiro CLI, standalone binary at ~/.local/bin/kiro-cli (confirmed present on the reference machine)".into(),
+            },
+            bootstrap_install: Some(BootstrapInstall {
+                command: "curl -fsSL https://cli.kiro.dev/install | bash".into(),
+                source: "https://kiro.dev/docs/cli/headless".into(),
+            }),
+            unverified: false, // installed on the reference machine; `chat`/`mcp`/`login` subcommands and flags confirmed via direct `--help` execution
+            capabilities: CapabilityFlags {
+                streaming: false,
+                mcp: false, // `kiro-cli mcp add` confirmed real via --help, but writes require login, which this project won't do just to inspect a file format
+                lsp: false,
+                tools: true,
+                sessions: true, // --resume/--resume-id/--list-sessions observed in `kiro-cli chat --help`
+                structured_output: true, // --format json|json-pretty observed in `kiro-cli chat --help`
+            },
+            config_paths: vec![],
+            notes: Some(
+                "`kiro-cli mcp add` is real (confirmed via --help) but requires being logged in \
+                 to run, so its on-disk config file format couldn't be inspected without \
+                 authenticating a real account just to check a file shape — configure_mcp stays \
+                 unsupported rather than guessing it."
+                    .into(),
+            ),
+        },
+        AgentDefinition {
+            name: "cody".into(),
+            adapter: "cody".into(),
+            command: "cody".into(),
+            install_method: InstallMethod::PackageManager {
+                detail: "Sourcegraph's Cody CLI, installed as an npm global package".into(),
+            },
+            bootstrap_install: Some(BootstrapInstall {
+                command: "npm install -g @sourcegraph/cody".into(),
+                source: "https://sourcegraph.com/docs/cody/clients/install-cli".into(),
+            }),
+            unverified: true, // not installed on the reference machine; commands sourced from sourcegraph.com docs, not confirmed by direct execution
+            capabilities: CapabilityFlags {
+                streaming: false,
+                mcp: false, // no MCP subcommand or config surface documented
+                lsp: false,
+                tools: true,
+                sessions: false,
+                structured_output: false,
+            },
+            config_paths: vec![],
+            notes: Some(
+                "Not installed on the machine this registry was built on; every command here \
+                 comes from Sourcegraph's own current docs (fetched directly), not from \
+                 running the CLI. Cody CLI is also documented as Experimental for Enterprise \
+                 accounts, i.e. Sourcegraph itself doesn't consider it stable yet."
+                    .into(),
+            ),
+        },
     ]
 }
 
@@ -250,11 +336,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn builtin_registry_has_eight_agents() {
+    fn builtin_registry_has_eleven_agents() {
         let reg = builtin_registry();
-        assert_eq!(reg.len(), 8);
+        assert_eq!(reg.len(), 11);
         let names: Vec<_> = reg.iter().map(|a| a.name.as_str()).collect();
-        assert_eq!(names, ["claude", "codex", "opencode", "agy", "perplexity", "cursor", "aider", "goose"]);
+        assert_eq!(
+            names,
+            ["claude", "codex", "opencode", "agy", "perplexity", "cursor", "aider", "goose", "copilot", "kiro", "cody"]
+        );
     }
 
     #[test]
@@ -265,7 +354,10 @@ mod tests {
                 .bootstrap_install
                 .as_ref()
                 .unwrap_or_else(|| panic!("agent {} has no bootstrap install", agent.name));
-            assert!(install.command.contains("curl"), "agent {}", agent.name);
+            // Every install command is a real one sourced from the vendor's own
+            // docs — usually a curl script, but `cody`'s only officially
+            // documented install path is an npm global install.
+            assert!(install.command.contains("curl") || install.command.contains("npm install"), "agent {}", agent.name);
             assert!(install.source.starts_with("https://"), "agent {}", agent.name);
         }
     }

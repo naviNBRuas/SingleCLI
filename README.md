@@ -2,14 +2,14 @@
 
 A unified control plane for heterogeneous AI coding-agent CLIs — Claude
 Code, Codex, OpenCode, Antigravity (`agy`), Cursor CLI, Aider, Goose,
-Perplexity's `pplx`, and any new agent CLI you describe in a TOML file.
-Configure MCP servers, provider keys, and accounts once in SingleCLI;
-every supported agent gets the same configuration synced into its own
-native format.
+GitHub Copilot CLI, Kiro CLI, Sourcegraph Cody, Perplexity's `pplx`, and
+any new agent CLI you describe in a TOML file. Configure MCP servers,
+provider keys, and accounts once in SingleCLI; every supported agent gets
+the same configuration synced into its own native format.
 
-> **Status: Phases 1-4 done, Phases 5-6 partial, plus three rounds of
+> **Status: Phases 1-4 done, Phases 5-6 partial, plus four rounds of
 > growth work (plugins, multi-account concurrency, LSP/skills sync,
-> preset catalogs, a fuller TUI, three more built-in agents).** See
+> preset catalogs, a fuller TUI, six more built-in agents).** See
 > "What's implemented" below and `docs/architecture.md` for the full picture, including what's
 > deliberately *not* here yet.
 
@@ -191,13 +191,24 @@ Every list/inspect command supports `--json` for scripting.
   `codex login`, `opencode auth login`, `pplx auth login`,
   `cursor-agent login`, `goose configure`) attached to your terminal so
   credentials land in the isolated home directly.
-- **Cursor CLI, Aider, and Goose** — three more built-in agents (8 total).
+- **Cursor CLI, Aider, and Goose** — three more built-in agents.
   Cursor gets full parity with claude/codex/opencode (MCP sync into
   `~/.cursor/mcp.json`, non-interactive runs, login); Goose gets MCP sync
   into its YAML config (`~/.config/goose/config.yaml`) plus non-interactive
   runs and its `configure` wizard wired as login; Aider gets
   non-interactive runs only — it has no MCP support and authenticates via
   API-key flags/env vars, not an interactive login.
+- **GitHub Copilot CLI, Kiro CLI, and Cody** — 11 built-in agents total.
+  Copilot gets full parity too (MCP sync into `~/.copilot/mcp-config.json`,
+  non-interactive runs, login, plugin install). Kiro gets non-interactive
+  runs and login (both confirmed by running it directly), but MCP stays
+  unsupported since its real `mcp add` command requires being logged in
+  to run, and this project won't authenticate a real account just to
+  check a file format. Cody was the one agent verified from vendor docs
+  alone (not installed on the reference machine) — non-interactive runs
+  and login only. **Windsurf was investigated and left out**: there's no
+  standalone Windsurf agent CLI anymore (it was folded into Devin
+  Desktop) — see `docs/install-methods.md` for the full reasoning.
 
 ## What's not (yet)
 

@@ -15,6 +15,9 @@ pub struct PerplexityAdapter;
 pub struct CursorAdapter;
 pub struct AiderAdapter;
 pub struct GooseAdapter;
+pub struct CopilotAdapter;
+pub struct KiroAdapter;
+pub struct CodyAdapter;
 
 impl AgentAdapter for ClaudeAdapter {
     fn command(&self) -> &str {
@@ -356,6 +359,125 @@ impl AgentAdapter for GooseAdapter {
     }
 }
 
+impl AgentAdapter for CopilotAdapter {
+    fn command(&self) -> &str {
+        "copilot"
+    }
+
+    fn configure_mcp(&self, home: &Path, servers: &[McpServerSpec], dry_run: bool) -> Result<IntegrationWrite> {
+        let path = home.join(".copilot").join("mcp-config.json");
+        let updated = formats::copilot::apply(&path, servers)?;
+        let rendered = serde_json::to_string_pretty(&updated)?;
+        write_with_backup("copilot", &path, &rendered, dry_run)
+    }
+
+    fn remove_mcp(&self, home: &Path, names: &[String], dry_run: bool) -> Result<IntegrationWrite> {
+        let path = home.join(".copilot").join("mcp-config.json");
+        match formats::copilot::remove(&path, names)? {
+            Some(updated) => {
+                let rendered = serde_json::to_string_pretty(&updated)?;
+                write_with_backup("copilot", &path, &rendered, dry_run)
+            }
+            None => Ok(unsupported_write("copilot", home, "no config file present; nothing to remove")),
+        }
+    }
+
+    /// `copilot -p "<prompt>" --allow-all-tools` — confirmed non-interactive
+    /// mode via `copilot --help` on the reference machine. `--allow-all-tools`
+    /// isn't an optional bypass here the way Claude's
+    /// `--dangerously-skip-permissions` is — Copilot's own `--help` states
+    /// it's "required for non-interactive mode" (without it `-p` has
+    /// nothing to auto-approve tool calls with and can't complete), the
+    /// same "needed to function at all, not an extra permission grant"
+    /// reasoning already applied to codex's `--skip-git-repo-check`.
+    fn run_prompt(&self, cwd: &Path, prompt: &str, home: Option<&Path>, timeout: Duration) -> Result<RunOutcome> {
+        run_command_with_home("copilot", &["-p".to_string(), prompt.to_string(), "--allow-all-tools".to_string()], cwd, home, timeout)
+    }
+
+    /// `copilot login` — confirmed real via `copilot login --help` on the
+    /// reference machine (OAuth device flow).
+    fn login(&self, home: &Path) -> Result<()> {
+        run_interactive_with_home("copilot", &["login".to_string()], home)
+    }
+
+    /// `copilot plugin install <source>` — confirmed real via `copilot
+    /// plugin install --help` on the reference machine; `source` accepts
+    /// the same `plugin@marketplace` convention as claude/codex/agy
+    /// (also `owner/repo`, `owner/repo:path`, or a git URL, but
+    /// SingleCLI's `PluginSpec::target` is passed through verbatim either
+    /// way).
+    fn install_plugin(&self, target: &str, home: &Path, timeout: Duration) -> Result<RunOutcome> {
+        run_command_with_home("copilot", &["plugin".to_string(), "install".to_string(), target.to_string()], home, Some(home), timeout)
+    }
+}
+
+impl AgentAdapter for KiroAdapter {
+    fn command(&self) -> &str {
+        "kiro-cli"
+    }
+
+    /// `kiro-cli mcp add` is real — confirmed via `kiro-cli mcp add --help`
+    /// on the reference machine, including that it writes to "the global
+    /// mcp.json" — but actually running it requires being logged in
+    /// ("error: You are not logged in, please log in with kiro-cli
+    /// login"), so the exact on-disk shape couldn't be inspected without
+    /// authenticating a real account just to check a file format. Left
+    /// unsupported rather than guessed.
+    fn configure_mcp(&self, home: &Path, _servers: &[McpServerSpec], _dry_run: bool) -> Result<IntegrationWrite> {
+        Ok(unsupported_write("kiro-cli", home, "kiro-cli's MCP config file format is not confirmed (writing it requires being logged in)"))
+    }
+
+    fn remove_mcp(&self, home: &Path, _names: &[String], _dry_run: bool) -> Result<IntegrationWrite> {
+        Ok(unsupported_write("kiro-cli", home, "kiro-cli's MCP config file format is not confirmed (writing it requires being logged in)"))
+    }
+
+    /// `kiro-cli chat --no-interactive "<prompt>" --trust-all-tools` —
+    /// confirmed real via `kiro-cli chat --help` on the reference machine.
+    fn run_prompt(&self, cwd: &Path, prompt: &str, home: Option<&Path>, timeout: Duration) -> Result<RunOutcome> {
+        run_command_with_home(
+            "kiro-cli",
+            &["chat".to_string(), "--no-interactive".to_string(), prompt.to_string(), "--trust-all-tools".to_string()],
+            cwd,
+            home,
+            timeout,
+        )
+    }
+
+    /// `kiro-cli login` — confirmed real via `kiro-cli login --help` on
+    /// the reference machine.
+    fn login(&self, home: &Path) -> Result<()> {
+        run_interactive_with_home("kiro-cli", &["login".to_string()], home)
+    }
+}
+
+impl AgentAdapter for CodyAdapter {
+    fn command(&self) -> &str {
+        "cody"
+    }
+
+    /// No MCP subcommand or config surface documented on
+    /// sourcegraph.com/docs for the Cody CLI — honest gap, not guessed.
+    fn configure_mcp(&self, home: &Path, _servers: &[McpServerSpec], _dry_run: bool) -> Result<IntegrationWrite> {
+        Ok(unsupported_write("cody", home, "cody has no documented MCP config surface"))
+    }
+
+    fn remove_mcp(&self, home: &Path, _names: &[String], _dry_run: bool) -> Result<IntegrationWrite> {
+        Ok(unsupported_write("cody", home, "cody has no documented MCP config surface"))
+    }
+
+    /// `cody chat -m "<prompt>"` — per Sourcegraph's own Cody CLI install
+    /// docs (fetched directly, not run locally — this agent is marked
+    /// `unverified` in the registry for that reason).
+    fn run_prompt(&self, cwd: &Path, prompt: &str, home: Option<&Path>, timeout: Duration) -> Result<RunOutcome> {
+        run_command_with_home("cody", &["chat".to_string(), "-m".to_string(), prompt.to_string()], cwd, home, timeout)
+    }
+
+    /// `cody auth login --web` — per Sourcegraph's Cody CLI docs.
+    fn login(&self, home: &Path) -> Result<()> {
+        run_interactive_with_home("cody", &["auth".to_string(), "login".to_string(), "--web".to_string()], home)
+    }
+}
+
 fn unsupported_write(agent: &str, home: &Path, detail: &str) -> IntegrationWrite {
     IntegrationWrite {
         agent: agent.to_string(),
@@ -402,6 +524,9 @@ pub fn for_agent(name: &str) -> Option<Box<dyn AgentAdapter>> {
         "cursor" => Some(Box::new(CursorAdapter)),
         "aider" => Some(Box::new(AiderAdapter)),
         "goose" => Some(Box::new(GooseAdapter)),
+        "copilot" => Some(Box::new(CopilotAdapter)),
+        "kiro" => Some(Box::new(KiroAdapter)),
+        "cody" => Some(Box::new(CodyAdapter)),
         _ => None,
     }
 }

@@ -17,6 +17,9 @@ into `crates/single-core/src/registry.rs`.
 | Cursor CLI | `cursor-agent` | `curl https://cursor.com/install -fsS \| bash` | https://cursor.com/docs/cli/installation |
 | Aider | `aider` | `curl -LsSf https://aider.chat/install.sh \| sh` | https://aider.chat/docs/install.html |
 | Goose | `goose` | `curl -fsSL https://github.com/block/goose/releases/download/stable/download_cli.sh \| bash` | https://github.com/block/goose/blob/main/download_cli.sh |
+| GitHub Copilot CLI | `copilot` | `curl -fsSL https://gh.io/copilot-install \| bash` | https://docs.github.com/en/copilot/how-tos/copilot-cli/set-up-copilot-cli/install-copilot-cli |
+| Kiro CLI | `kiro-cli` | `curl -fsSL https://cli.kiro.dev/install \| bash` | https://kiro.dev/docs/cli/headless |
+| Cody CLI | `cody` | `npm install -g @sourcegraph/cody` | https://sourcegraph.com/docs/cody/clients/install-cli |
 
 ## Important caveat: Perplexity does not have a coding-agent CLI
 
@@ -40,7 +43,8 @@ agent in the future, this entry should be revisited.
 ## Confirmed-installed reference points (used to build the registry)
 
 On the machine this was built on, `claude`, `codex`, `opencode`, `agy`,
-`cursor-agent`, `aider`, and `goose` were already installed. Their real,
+`cursor-agent`, `aider`, `goose`, `copilot`, and `kiro-cli` were already
+installed (`cody` was not — see "Not installed" below). Their real,
 observed installation methods (as opposed to the fresh-install bootstrap
 commands above) are recorded in `registry.rs`'s `InstallMethod` field for
 each agent:
@@ -52,11 +56,33 @@ each agent:
 - **Cursor CLI (`cursor-agent`)**: a standalone binary at `~/.local/bin/cursor-agent`; the separate `cursor` shim on this machine just re-execs it.
 - **Aider**: installed via `aider-install` (a `uv`-managed isolated environment).
 - **Goose**: a standalone binary at `~/.local/bin/goose`, installed by Block's own `download_cli.sh`.
+- **GitHub Copilot CLI**: a standalone 177MB binary at `~/.local/bin/copilot` — confirmed not an npm-wrapped script (also officially supported: `npm install -g @github/copilot`), consistent with the `curl | bash` install script rather than the npm path.
+- **Kiro CLI**: a standalone binary at `~/.local/bin/kiro-cli`.
 
-None of the seven were installed via a shared/generic package manager (no
-npm-global entries for any of them) — this is why `single setup` runs each
-vendor's own install script rather than assuming `npm install -g` works
-universally.
+None of these nine were installed via a shared/generic package manager
+(no npm-global entries for any of them) — this is why `single setup` runs
+each vendor's own install script rather than assuming `npm install -g`
+works universally.
+
+## Not installed: Cody (verified from docs only) and Windsurf (not added)
+
+`cody` was not installed on the reference machine, so unlike every other
+entry in this file, its command syntax (`cody auth login --web`, `cody
+chat -m "..."`) comes from Sourcegraph's own current docs (fetched
+directly), not from running the CLI — `single-core::registry` marks it
+`unverified: true` for this reason, and it has no MCP support wired up
+since none is documented. Sourcegraph itself also documents Cody CLI as
+"Experimental" for Enterprise accounts.
+
+**Windsurf was investigated and deliberately not added.** As of this
+writing there is no standalone Windsurf agent CLI comparable to the other
+entries in this registry: Windsurf's own install script
+(`https://cli.devin.ai/install.sh`) now installs **Devin's** CLI, since
+Windsurf was acquired and rebranded into "Devin Desktop"; the other
+`windsurf-cli` projects found are unofficial community tools that just
+open files/directories in the Windsurf editor, not AI coding agents. This
+is the same honesty standard applied to Perplexity above — a real gap
+gets documented, not papered over with a guessed or unofficial tool.
 
 ## Version-check caveat
 

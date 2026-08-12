@@ -603,6 +603,37 @@ stable|nightly] [--check] [--yes]`, mirroring the real `claude update`/
     (correctly shaped JSON/YAML), and `single agent login aider`
     correctly reported "unsupported" instead of guessing a flow.
 
+## Growth Phase 4: Copilot, Kiro, Cody — and why Windsurf isn't here
+
+- **GitHub Copilot CLI** joined as a full built-in agent (11 total): MCP
+  sync into `~/.copilot/mcp-config.json` (format confirmed by actually
+  running `copilot mcp add` against a throwaway `$HOME` and inspecting
+  what it wrote, since no config file existed there beforehand to read
+  off directly), `copilot -p ... --allow-all-tools` for non-interactive
+  runs (the flag is documented as *required* for `-p` to work at all, not
+  an optional permission bypass), `copilot login` for `single agent
+  login copilot`, and `copilot plugin install <source>` (same
+  `plugin@marketplace` convention as claude/codex/agy/cursor).
+- **Kiro CLI** (`kiro-cli`) also turned out to be installed on the
+  reference machine, so its `chat`/`mcp`/`login` subcommands and flags
+  are confirmed via direct `--help` execution, not docs alone. Its real
+  `mcp add` command requires being logged in to actually run, though, so
+  its on-disk config format couldn't be inspected without authenticating
+  a real account just to check a file shape — `configure_mcp` stays
+  honestly unsupported rather than guessed.
+- **Cody** (Sourcegraph) was **not** installed on the reference machine —
+  the only entry in the registry verified from vendor docs alone
+  (`cody auth login --web`, `cody chat -m ...`, sourced directly from
+  sourcegraph.com, not run locally). Marked `unverified: true` for this
+  reason; no MCP support since Sourcegraph doesn't document any.
+- **Windsurf was investigated and deliberately excluded.** There is no
+  standalone Windsurf agent CLI to add: Windsurf's own install script now
+  installs Devin's CLI (Windsurf was acquired and folded into "Devin
+  Desktop"), and the other `windsurf-cli` projects found are unofficial
+  file-opener tools, not AI agents. See `docs/install-methods.md`'s "Not
+  installed" section for the full reasoning — same honesty standard as
+  the Perplexity caveat above, not a guessed substitute.
+
 ## Not in Phase 1-6
 
 Per the original spec's own §50 "Development Strategy" (build vertically,

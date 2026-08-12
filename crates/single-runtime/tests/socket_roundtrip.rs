@@ -55,13 +55,13 @@ async fn status_and_agent_list_round_trip_over_the_socket() {
     let Response::Ok { data: ResponseData::Status(status) } = status_response else {
         panic!("expected Ok(Status), got something else");
     };
-    assert_eq!(status.agents_known, 8);
+    assert_eq!(status.agents_known, 11);
 
     let agents_response = send(&socket_path, &Request::AgentList);
     let Response::Ok { data: ResponseData::Agents(agents) } = agents_response else {
         panic!("expected Ok(Agents)");
     };
-    assert_eq!(agents.len(), 8);
+    assert_eq!(agents.len(), 11);
     // perplexity's only real CLI (`pplx`) is a Search API client, not a
     // coding agent — see docs/install-methods.md. Flagged via `notes`
     // rather than `unverified`, since the install method itself IS verified.

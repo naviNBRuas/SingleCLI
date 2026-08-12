@@ -126,7 +126,10 @@ mod tests {
         let (_dir, ctx) = test_context();
         let plan = run(&ctx, true);
         let names: Vec<_> = plan.actions.iter().map(|a| a.agent.as_str()).collect();
-        assert_eq!(names, ["claude", "codex", "opencode", "agy", "perplexity", "cursor", "aider", "goose"]);
+        assert_eq!(
+            names,
+            ["claude", "codex", "opencode", "agy", "perplexity", "cursor", "aider", "goose", "copilot", "kiro", "cody"]
+        );
     }
 
     #[test]
