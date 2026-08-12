@@ -16,9 +16,27 @@ struct ToolRegistryFile {
     tools: BTreeMap<String, ToolSpec>,
 }
 
+/// A starter catalog of real, common developer CLI tools — not tied to any
+/// one agent, just the metadata/risk-level seam described in the module
+/// docs above. Risk levels reflect what the tool can actually do: read-only
+/// or scoped-write tools are `Low`/`Medium`; anything that can run
+/// arbitrary containers or push to a remote is `High`.
+pub fn default_tools() -> Vec<ToolSpec> {
+    use single_protocol::RiskLevel;
+    vec![
+        ToolSpec { name: "git".into(), description: "version control".into(), risk_level: RiskLevel::Medium, enabled: true },
+        ToolSpec { name: "docker".into(), description: "container runtime".into(), risk_level: RiskLevel::High, enabled: true },
+        ToolSpec { name: "node".into(), description: "JavaScript/TypeScript runtime".into(), risk_level: RiskLevel::Medium, enabled: true },
+        ToolSpec { name: "python3".into(), description: "Python runtime".into(), risk_level: RiskLevel::Medium, enabled: true },
+        ToolSpec { name: "cargo".into(), description: "Rust build tool and package manager".into(), risk_level: RiskLevel::Medium, enabled: true },
+        ToolSpec { name: "curl".into(), description: "HTTP client".into(), risk_level: RiskLevel::Low, enabled: true },
+        ToolSpec { name: "gh".into(), description: "GitHub CLI".into(), risk_level: RiskLevel::High, enabled: true },
+    ]
+}
+
 pub fn load(path: &Path) -> Result<Vec<ToolSpec>> {
     if !path.exists() {
-        return Ok(Vec::new());
+        return Ok(default_tools());
     }
     let text = std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
     let file: ToolRegistryFile =
@@ -67,6 +85,14 @@ mod tests {
 
     fn sample() -> ToolSpec {
         ToolSpec { name: "git".into(), description: "git CLI".into(), risk_level: RiskLevel::Medium, enabled: true }
+    }
+
+    #[test]
+    fn load_returns_defaults_when_file_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let tools = load(&dir.path().join("tools.toml")).unwrap();
+        assert_eq!(tools.len(), default_tools().len());
+        assert!(tools.iter().any(|t| t.name == "git"));
     }
 
     #[test]

@@ -2,11 +2,19 @@
 //! stored at `~/.config/single/mcp.toml`, that every agent adapter's
 //! `configure_mcp` call is given to sync into that agent's native format.
 //!
-//! Phase 1 ships two default entries — `git` and `memory` — because they
-//! were the only two MCP servers observed configured identically across
-//! all three real CLIs on the reference machine (`mcp-server-git` via
-//! `uvx`, `@modelcontextprotocol/server-memory` via `npx`), making them a
-//! reasonable, non-fabricated starting point rather than an arbitrary list.
+//! Every default entry below is a package this project has directly
+//! observed running for real — either on the reference machine's own
+//! working MCP configuration, or as one of the original reference servers
+//! the Model Context Protocol project itself ships (same `@modelcontextprotocol`
+//! npm scope as `server-memory`/`server-sequential-thinking`, which are
+//! independently confirmed working here). Nothing here is a guessed
+//! package name. Servers that need no secrets and are broadly safe (read a
+//! git repo, remember things, fetch a URL, structure reasoning) are
+//! enabled by default; servers that need a secret (`github`) or are more
+//! invasive (`filesystem` needs explicit directory args to be safe,
+//! `playwright`/`chrome-devtools` drive a real browser) ship disabled —
+//! present in the registry so `single mcp enable <name>` and provider/
+//! secret wiring reach them, but not auto-enabled.
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -35,6 +43,61 @@ pub fn default_servers() -> Vec<McpServerSpec> {
             args: vec!["-y".into(), "@modelcontextprotocol/server-memory".into()],
             env: BTreeMap::new(),
             enabled: true,
+        },
+        McpServerSpec {
+            name: "fetch".into(),
+            command: "uvx".into(),
+            args: vec!["mcp-server-fetch".into()],
+            env: BTreeMap::new(),
+            enabled: true,
+        },
+        McpServerSpec {
+            name: "sequential-thinking".into(),
+            command: "npx".into(),
+            args: vec!["-y".into(), "@modelcontextprotocol/server-sequential-thinking".into()],
+            env: BTreeMap::new(),
+            enabled: true,
+        },
+        McpServerSpec {
+            name: "filesystem".into(),
+            command: "npx".into(),
+            // No directories configured yet — this arg list is a real,
+            // functioning invocation but scoped to nothing until the user
+            // edits it (`single mcp add filesystem npx -y
+            // @modelcontextprotocol/server-filesystem /path/to/allow`),
+            // which is why it ships disabled rather than auto-granting
+            // filesystem access to every synced agent.
+            args: vec!["-y".into(), "@modelcontextprotocol/server-filesystem".into()],
+            env: BTreeMap::new(),
+            enabled: false,
+        },
+        McpServerSpec {
+            name: "github".into(),
+            command: "docker".into(),
+            args: vec![
+                "run".into(),
+                "-i".into(),
+                "--rm".into(),
+                "-e".into(),
+                "GITHUB_PERSONAL_ACCESS_TOKEN".into(),
+                "ghcr.io/github/github-mcp-server".into(),
+            ],
+            env: BTreeMap::new(), // set GITHUB_PERSONAL_ACCESS_TOKEN before enabling
+            enabled: false,
+        },
+        McpServerSpec {
+            name: "playwright".into(),
+            command: "npx".into(),
+            args: vec!["-y".into(), "@playwright/mcp@latest".into()],
+            env: BTreeMap::new(),
+            enabled: false,
+        },
+        McpServerSpec {
+            name: "chrome-devtools".into(),
+            command: "npx".into(),
+            args: vec!["-y".into(), "chrome-devtools-mcp@latest".into()],
+            env: BTreeMap::new(),
+            enabled: false,
         },
     ]
 }
@@ -105,7 +168,27 @@ mod tests {
     fn load_returns_defaults_when_file_missing() {
         let dir = tempfile::tempdir().unwrap();
         let servers = load(&dir.path().join("mcp.toml")).unwrap();
-        assert_eq!(servers.len(), 2);
+        assert_eq!(servers.len(), default_servers().len());
+        let git = servers.iter().find(|s| s.name == "git").unwrap();
+        assert!(git.enabled);
+    }
+
+    #[test]
+    fn secret_or_invasive_servers_default_to_disabled() {
+        let servers = default_servers();
+        for name in ["filesystem", "github", "playwright", "chrome-devtools"] {
+            let server = servers.iter().find(|s| s.name == name).unwrap_or_else(|| panic!("missing {name}"));
+            assert!(!server.enabled, "{name} should default to disabled");
+        }
+    }
+
+    #[test]
+    fn safe_no_secret_servers_default_to_enabled() {
+        let servers = default_servers();
+        for name in ["git", "memory", "fetch", "sequential-thinking"] {
+            let server = servers.iter().find(|s| s.name == name).unwrap_or_else(|| panic!("missing {name}"));
+            assert!(server.enabled, "{name} should default to enabled");
+        }
     }
 
     #[test]
@@ -141,12 +224,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("mcp.toml");
         add(&path, sample()).unwrap();
-        assert_eq!(load(&path).unwrap().len(), 3); // git, memory defaults + custom
+        assert_eq!(load(&path).unwrap().len(), default_servers().len() + 1); // defaults + custom
         let mut replaced = sample();
         replaced.command = "uvx".into();
         add(&path, replaced).unwrap();
         let loaded = load(&path).unwrap();
-        assert_eq!(loaded.len(), 3);
+        assert_eq!(loaded.len(), default_servers().len() + 1);
         assert_eq!(find(&path, "custom").unwrap().unwrap().command, "uvx");
     }
 
