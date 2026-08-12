@@ -18,6 +18,9 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Linux targets are musl (fully static), matching release.yml — see that
+  # file's comment for why (a glibc build failed to even start on a real
+  # Debian 12 test machine).
   build:
     strategy:
       fail-fast: false
@@ -25,16 +28,19 @@ jobs:
         include:
           - target: linux-x86_64
             os: ubuntu-latest
-            rust_target: x86_64-unknown-linux-gnu
+            rust_target: x86_64-unknown-linux-musl
           - target: linux-arm64
             os: ubuntu-24.04-arm
-            rust_target: aarch64-unknown-linux-gnu
+            rust_target: aarch64-unknown-linux-musl
           - target: macos-arm64
             os: macos-latest
             rust_target: aarch64-apple-darwin
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+      - name: Install musl tools
+        if: contains(matrix.rust_target, 'musl')
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq musl-tools
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.rust_target }}

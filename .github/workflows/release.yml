@@ -15,6 +15,13 @@ jobs:
   # has a real history of sitting queued for a long time on GitHub's
   # free-tier Intel Mac runners (a platform-capacity issue, not something
   # this workflow can speed up).
+  #
+  # Linux targets are musl (fully static), not glibc: a glibc build on
+  # ubuntu-latest links against a newer glibc than many real target
+  # machines ship (confirmed for real — the first release, built glibc,
+  # failed to even start on a stock Debian 12 container with
+  # `GLIBC_2.39' not found, since Debian 12 ships 2.36). musl sidesteps
+  # this by not depending on the host's glibc at all.
   build:
     strategy:
       fail-fast: false
@@ -22,16 +29,19 @@ jobs:
         include:
           - target: linux-x86_64
             os: ubuntu-latest
-            rust_target: x86_64-unknown-linux-gnu
+            rust_target: x86_64-unknown-linux-musl
           - target: linux-arm64
             os: ubuntu-24.04-arm
-            rust_target: aarch64-unknown-linux-gnu
+            rust_target: aarch64-unknown-linux-musl
           - target: macos-arm64
             os: macos-latest
             rust_target: aarch64-apple-darwin
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+      - name: Install musl tools
+        if: contains(matrix.rust_target, 'musl')
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq musl-tools
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.rust_target }}

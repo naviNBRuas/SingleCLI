@@ -79,3 +79,25 @@ evaluate alternatives rather than blindly follow that suggestion.
   still gets fully working `single doctor`/`single agent list`/etc. Only
   the TUI insists on a real running daemon, since it's the client that
   actually wants live IPC semantics.
+
+## Amendment: Linux release binaries are musl, not glibc
+
+The first published release (v0.1.1) built its `linux-x86_64` binary on
+GitHub's `ubuntu-latest` runner using the default
+`x86_64-unknown-linux-gnu` target. Tested for real on a fresh Debian 12
+container (`docker run debian:12`, the most common "just installed
+Debian" baseline) rather than assumed: the binary refused to even start —
+`GLIBC_2.39' not found` — because `ubuntu-latest` (Ubuntu 24.04) ships a
+newer glibc than Debian 12's 2.36, and a dynamically-linked glibc binary
+only runs on a system with an equal-or-newer glibc than it was built
+against.
+
+Fix: `release.yml`/`nightly.yml` now build Linux targets as
+`x86_64-unknown-linux-musl`/`aarch64-unknown-linux-musl` (fully static,
+no glibc dependency at all — `ldd` reports "statically linked"), via
+`musl-tools` installed on the same GitHub-hosted runners rather than a
+separate cross-compilation toolchain. Verified the fix by copying the
+musl-built binary into the same Debian 12 container and confirming
+`single --version`/`single doctor` ran correctly. `reqwest` was already
+configured with `rustls-tls` (no native OpenSSL) specifically so it
+wouldn't reintroduce a similar dynamic-linking fragility on musl.
