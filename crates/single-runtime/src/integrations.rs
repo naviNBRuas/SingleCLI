@@ -42,10 +42,5 @@ pub fn uninstall_all(ctx: &Context, dry_run: bool) -> Result<IntegrationResult> 
 }
 
 pub fn home_dir() -> Result<std::path::PathBuf> {
-    if let Ok(dir) = std::env::var("SINGLE_HOME_DIR") {
-        return Ok(std::path::PathBuf::from(dir));
-    }
-    directories::BaseDirs::new()
-        .map(|b| b.home_dir().to_path_buf())
-        .ok_or_else(|| anyhow::anyhow!("could not determine home directory"))
+    single_core::paths::real_home_dir()
 }

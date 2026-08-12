@@ -1642,6 +1642,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "single-agent-sdk",
  "single-core",
  "single-protocol",
  "single-runtime",

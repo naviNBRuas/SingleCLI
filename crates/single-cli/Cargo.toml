@@ -18,6 +18,7 @@ tokio.workspace = true
 directories.workspace = true
 reqwest.workspace = true
 tempfile = "3"
+single-agent-sdk = { path = "../single-agent-sdk" }
 single-core = { path = "../single-core" }
 single-protocol = { path = "../single-protocol" }
 single-runtime = { path = "../single-runtime" }

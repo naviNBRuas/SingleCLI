@@ -123,3 +123,18 @@ impl SingleDirs {
 pub fn project_config_path(project_root: &std::path::Path) -> PathBuf {
     project_root.join(".single").join("config.yaml")
 }
+
+/// The real, ambient `$HOME` — used **only** as a one-time bootstrap
+/// source for `agent_home::ensure_bootstrapped`, and by anything that
+/// needs to spawn an agent's real interactive login (which has to run
+/// against a real filesystem location the OS/browser flow can round-trip
+/// to). Nothing else in SingleCLI should read or write through this path
+/// directly — see `agent_home`'s module doc for why.
+pub fn real_home_dir() -> Result<PathBuf> {
+    if let Ok(dir) = std::env::var("SINGLE_HOME_DIR") {
+        return Ok(PathBuf::from(dir));
+    }
+    directories::BaseDirs::new()
+        .map(|b| b.home_dir().to_path_buf())
+        .context("could not determine home directory")
+}

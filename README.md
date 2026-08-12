@@ -57,6 +57,8 @@ Binaries land in `target/release/`: `single` (the CLI/TUI) and
 ```bash
 single doctor          # what's installed, what SingleCLI can manage
 single agent list      # the agent registry, live detection status
+single agent login claude   # log in to claude's SingleCLI-managed home (real terminal, real OAuth)
+single agent login codex    # same for codex, opencode, or perplexity
 single mcp list         # the unified MCP registry
 single setup --yes       # install missing agent CLIs + sync config
 single install-integrations --yes   # sync MCP config into every agent, with backups
@@ -180,6 +182,13 @@ Every list/inspect command supports `--json` for scripting.
   a quick-add flow for MCP/LSP/Plugins/Tools, remove/toggle/sync
   keybindings, and an in-TUI task-creation flow (description → workspace
   path → pick one or more agents).
+- **Isolated agent homes + `single agent login`** — every agent runs
+  against a SingleCLI-managed home under `~/.config/single/homes/<agent>/`
+  (bootstrapped from the real one exactly once), never the real, ambient
+  `~/.claude`/`~/.codex`/etc. after that. `single agent login <name>` runs
+  that agent's own real interactive login command (`claude auth login`,
+  `codex login`, `opencode auth login`, `pplx auth login`) attached to
+  your terminal so credentials land in the isolated home directly.
 
 ## What's not (yet)
 

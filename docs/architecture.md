@@ -544,10 +544,29 @@ stable|nightly] [--check] [--yes]`, mirroring the real `claude update`/
   home; adding `--account work` swaps in that named account's own
   isolated home instead. Neither ever reads from or writes to the real
   `$HOME` after its own first bootstrap.
-- **Custom agents and `agy`/`perplexity`** have no confirmed real config
+- **Custom agents and `agy`** have no confirmed real config
   path (`agent_home::real_paths_for` returns an empty list for them), so
   their isolated home simply starts empty — SingleCLI has nothing to seed
   it with, and says so rather than guessing a location.
+- **`single agent login <name>`** — since agents now run against isolated
+  homes rather than the real one, there needs to be a way to actually log
+  in *to* that isolated home. This runs the agent's own real interactive
+  login command (`claude auth login`, `codex login`, `opencode auth
+  login`, `pplx auth login` — each confirmed via that CLI's own `--help`)
+  attached directly to the user's terminal (inherited stdin/stdout/stderr,
+  no timeout — `single-agent-sdk::run::run_interactive_with_home`, not the
+  captured/bounded `run_command` every other adapter method uses), with
+  `$HOME` overridden to the agent's isolated home so the resulting
+  credentials land there. Runs entirely in `single-cli`, bypassing the
+  daemon socket (same reasoning as `single update`): the daemon may have
+  no TTY at all, and login needs the real one. `agy` has no confirmed
+  login subcommand, so `AgentAdapter::login` stays the trait's default
+  "unsupported" for it rather than guessing one. Verified for real:
+  `single agent login claude` correctly bootstrapped the isolated home
+  from the reference machine's real `~/.claude` and spawned `claude auth
+  login` attached to the terminal (observed via a bounded-timeout run
+  with stdin closed, to confirm the command launches without completing
+  a live OAuth flow in an unattended check).
 
 ## Not in Phase 1-6
 

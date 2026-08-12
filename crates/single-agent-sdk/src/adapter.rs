@@ -74,6 +74,18 @@ pub trait AgentAdapter {
     fn install_plugin(&self, _target: &str, _home: &Path, _timeout: Duration) -> Result<RunOutcome> {
         anyhow::bail!("{} has no verified plugin-install command wired up", self.command())
     }
+
+    /// Runs this agent's own real interactive login command attached to
+    /// the user's terminal, with `$HOME` overridden to `home` (its
+    /// SingleCLI-managed isolated home — `single_core::agent_home`) so
+    /// the resulting credentials land there, not in the real ambient
+    /// `$HOME`. Interactive by design: OAuth logins need a browser
+    /// round-trip or a device code the user reads and confirms, so this
+    /// can't be captured/timeout-bounded like `run_prompt`. Default:
+    /// unsupported (no verified login command for this agent).
+    fn login(&self, _home: &Path) -> Result<()> {
+        anyhow::bail!("{} has no verified interactive login command wired up", self.command())
+    }
 }
 
 pub(crate) fn run_with_prompt_flag(command: &str, cwd: &Path, prompt: &str, home: Option<&Path>, timeout: Duration) -> Result<RunOutcome> {

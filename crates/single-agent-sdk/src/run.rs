@@ -11,6 +11,28 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+/// Runs `command` attached to the real terminal (inherited stdin/stdout/
+/// stderr) with `$HOME` overridden to `home`, and blocks until it exits.
+/// No timeout — this is for interactive flows (login prompts, browser
+/// OAuth round-trips) that a human is actively driving, unlike
+/// `run_command`'s captured-output, timeout-bounded, non-interactive
+/// shape. Used only by `AgentAdapter::login`.
+pub fn run_interactive_with_home(command: &str, args: &[String], home: &Path) -> Result<()> {
+    let status = Command::new(command)
+        .args(args)
+        .current_dir(home)
+        .env("HOME", home)
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status()
+        .with_context(|| format!("spawning {command}"))?;
+    if !status.success() {
+        anyhow::bail!("{command} exited with {status}");
+    }
+    Ok(())
+}
+
 pub fn run_command(command: &str, args: &[String], cwd: &Path, timeout: Duration) -> Result<RunOutcome> {
     run_command_with_home(command, args, cwd, None, timeout)
 }

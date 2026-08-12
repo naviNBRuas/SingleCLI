@@ -1,7 +1,7 @@
 use crate::adapter::{run_with_prompt_flag, AgentAdapter};
 use crate::backup::backup_before_write;
 use crate::formats;
-use crate::run::run_command_with_home;
+use crate::run::{run_command_with_home, run_interactive_with_home};
 use anyhow::Result;
 use single_protocol::{IntegrationWrite, McpServerSpec, RunOutcome};
 use std::path::Path;
@@ -47,6 +47,12 @@ impl AgentAdapter for ClaudeAdapter {
     /// plugin i`).
     fn install_plugin(&self, target: &str, home: &Path, timeout: Duration) -> Result<RunOutcome> {
         run_command_with_home("claude", &["plugin".to_string(), "install".to_string(), target.to_string()], home, Some(home), timeout)
+    }
+
+    /// `claude auth login` — confirmed real via `claude auth --help` on
+    /// the reference machine ("Sign in to your Anthropic account").
+    fn login(&self, home: &Path) -> Result<()> {
+        run_interactive_with_home("claude", &["auth".to_string(), "login".to_string()], home)
     }
 }
 
@@ -96,6 +102,13 @@ impl AgentAdapter for CodexAdapter {
     /// sync operation.
     fn install_plugin(&self, target: &str, home: &Path, timeout: Duration) -> Result<RunOutcome> {
         run_command_with_home("codex", &["plugin".to_string(), "add".to_string(), target.to_string()], home, Some(home), timeout)
+    }
+
+    /// `codex login` — confirmed real via `codex --help` on the
+    /// reference machine ("Manage login"; defaults to an interactive
+    /// browser OAuth flow).
+    fn login(&self, home: &Path) -> Result<()> {
+        run_interactive_with_home("codex", &["login".to_string()], home)
     }
 }
 
@@ -165,6 +178,13 @@ impl AgentAdapter for OpenCodeAdapter {
     fn install_plugin(&self, target: &str, home: &Path, timeout: Duration) -> Result<RunOutcome> {
         run_command_with_home("opencode", &["plugin".to_string(), target.to_string()], home, Some(home), timeout)
     }
+
+    /// `opencode auth login` (aliased `opencode providers login`) —
+    /// confirmed real via `opencode auth --help` on the reference
+    /// machine.
+    fn login(&self, home: &Path) -> Result<()> {
+        run_interactive_with_home("opencode", &["auth".to_string(), "login".to_string()], home)
+    }
 }
 
 impl AgentAdapter for AgyAdapter {
@@ -212,6 +232,13 @@ impl AgentAdapter for PerplexityAdapter {
             home,
             "pplx is a Search API client, not an MCP-capable coding agent; nothing to remove",
         ))
+    }
+
+    /// `pplx auth login` — confirmed real via `pplx auth --help` on the
+    /// reference machine ("Store a Perplexity API key for the public CLI
+    /// (interactive; macOS/Linux only)").
+    fn login(&self, home: &Path) -> Result<()> {
+        run_interactive_with_home("pplx", &["auth".to_string(), "login".to_string()], home)
     }
 }
 

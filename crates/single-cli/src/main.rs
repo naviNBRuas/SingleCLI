@@ -158,6 +158,13 @@ enum AgentCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Interactively log in to this agent's SingleCLI-managed home (never
+    /// the real, ambient one — see `docs/architecture.md`'s "Isolation"
+    /// section). Runs the agent's own real login command attached to
+    /// your terminal (browser OAuth or a prompt, whichever that agent
+    /// uses); bootstraps the isolated home first if this is the first
+    /// time it's used.
+    Login { name: String },
 }
 
 #[derive(Subcommand)]
@@ -609,6 +616,16 @@ fn main() -> anyhow::Result<()> {
         return run_update(&channel, check, yes);
     }
 
+    // Interactive login needs the user's real terminal (browser OAuth
+    // round-trips, device codes, password prompts) attached directly —
+    // routing it through the daemon over the socket would mean the
+    // daemon's stdio, not the user's, which may not even be a TTY. Runs
+    // entirely locally: no socket round-trip needed to resolve the
+    // isolated home path either (single_core::agent_home is pure logic).
+    if let Command::Agent { action: AgentCommand::Login { name } } = &command {
+        return run_agent_login(&dirs, name);
+    }
+
     match command {
         Command::Status => {
             let response = client::send(&socket_path, Request::Status)?;
@@ -641,6 +658,7 @@ fn main() -> anyhow::Result<()> {
                 let response = client::send(&socket_path, Request::AgentInstall { name, dry_run: !yes })?;
                 render::print(response, json);
             }
+            AgentCommand::Login { .. } => unreachable!("Command::Agent{{Login}} is intercepted before this match"),
         },
         Command::Mcp { action } => match action {
             McpCommand::List { json } => {
@@ -1056,5 +1074,20 @@ fn run_update(channel: &str, check_only: bool, yes: bool) -> anyhow::Result<()> 
     println!("downloading and installing...");
     let install_dir = update::apply(&release)?;
     println!("updated in {}", install_dir.display());
+    Ok(())
+}
+
+fn run_agent_login(dirs: &SingleDirs, agent: &str) -> anyhow::Result<()> {
+    let Some(adapter) = single_agent_sdk::adapters::for_agent_with_custom(agent, &dirs.agents_dir()) else {
+        anyhow::bail!("unknown agent: {agent}");
+    };
+    if !adapter.discover().detected {
+        anyhow::bail!("{agent} is not installed; run `single agent install {agent} --yes` first");
+    }
+    let real_home = single_core::paths::real_home_dir()?;
+    let home = single_core::agent_home::ensure_bootstrapped(&dirs.homes_dir(), &real_home, agent)?;
+    println!("logging in to {agent} (isolated home: {})...", home.display());
+    adapter.login(&home)?;
+    println!("done. run `single doctor` or `single agent inspect {agent}` to confirm.");
     Ok(())
 }
