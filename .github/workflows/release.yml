@@ -10,6 +10,11 @@ permissions:
   contents: write
 
 jobs:
+  # Fast, reliably-available runners. The release publishes as soon as
+  # these three are done rather than waiting on macos-x86_64 below, which
+  # has a real history of sitting queued for a long time on GitHub's
+  # free-tier Intel Mac runners (a platform-capacity issue, not something
+  # this workflow can speed up).
   build:
     strategy:
       fail-fast: false
@@ -24,22 +29,15 @@ jobs:
           - target: macos-arm64
             os: macos-latest
             rust_target: aarch64-apple-darwin
-          - target: macos-x86_64
-            os: macos-13
-            rust_target: x86_64-apple-darwin
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.rust_target }}
-
       - uses: Swatinem/rust-cache@v2
-
       - name: Build
         run: cargo build --release --workspace --target ${{ matrix.rust_target }}
-
       - name: Package
         shell: bash
         run: |
@@ -49,11 +47,38 @@ jobs:
           cp target/${{ matrix.rust_target }}/release/single "$out/"
           cp target/${{ matrix.rust_target }}/release/single-runtimed "$out/"
           tar -czf "$out.tar.gz" "$out"
-
       - uses: actions/upload-artifact@v4
         with:
           name: singlecli-${{ matrix.target }}
           path: singlecli-${{ matrix.target }}.tar.gz
+
+  # Best-effort: same build, on the slow/scarce runner. Not in `build`'s
+  # matrix and not something `release` waits on, so a long Intel-Mac queue
+  # never delays the other three platforms going live.
+  build-macos-intel:
+    runs-on: macos-13
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --release --workspace --target x86_64-apple-darwin
+      - name: Package
+        shell: bash
+        run: |
+          set -euo pipefail
+          out="singlecli-macos-x86_64"
+          mkdir -p "$out"
+          cp target/x86_64-apple-darwin/release/single "$out/"
+          cp target/x86_64-apple-darwin/release/single-runtimed "$out/"
+          tar -czf "$out.tar.gz" "$out"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: singlecli-macos-x86_64
+          path: singlecli-macos-x86_64.tar.gz
 
   release:
     needs: build
@@ -62,10 +87,32 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
+          pattern: singlecli-linux-*
           merge-multiple: true
-
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          pattern: singlecli-macos-arm64
+          merge-multiple: true
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
           files: artifacts/*.tar.gz
           generate_release_notes: true
+
+  # Runs whenever the slow Intel-Mac build finishes (independent of how
+  # long that took relative to `release` above) and attaches its asset to
+  # the release that's already live by then.
+  attach-macos-intel:
+    needs: [release, build-macos-intel]
+    if: ${{ !cancelled() && needs.build-macos-intel.result == 'success' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: singlecli-macos-x86_64
+          path: artifacts
+      - name: Attach asset to existing release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*.tar.gz
