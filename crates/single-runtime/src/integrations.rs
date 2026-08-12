@@ -9,25 +9,30 @@ use single_protocol::IntegrationResult;
 
 pub fn install_all(ctx: &Context, dry_run: bool) -> Result<IntegrationResult> {
     let home = home_dir()?;
-    let servers = single_core::mcp::load(&ctx.dirs.mcp_registry_file())?;
+    let mcp_servers = single_core::mcp::load(&ctx.dirs.mcp_registry_file())?;
+    let lsp_servers = single_core::lsp::load(&ctx.dirs.lsp_registry_file())?;
 
     let mut writes = Vec::new();
     for agent in &ctx.registry {
         let Some(adapter) = for_agent_with_custom(&agent.name, &ctx.dirs.agents_dir()) else { continue };
-        writes.push(adapter.configure_mcp(&home, &servers, dry_run)?);
+        writes.push(adapter.configure_mcp(&home, &mcp_servers, dry_run)?);
+        writes.push(adapter.configure_lsp(&home, &lsp_servers, dry_run)?);
     }
     Ok(IntegrationResult { dry_run, writes })
 }
 
 pub fn uninstall_all(ctx: &Context, dry_run: bool) -> Result<IntegrationResult> {
     let home = home_dir()?;
-    let servers = single_core::mcp::load(&ctx.dirs.mcp_registry_file())?;
-    let names: Vec<String> = servers.iter().map(|s| s.name.clone()).collect();
+    let mcp_servers = single_core::mcp::load(&ctx.dirs.mcp_registry_file())?;
+    let mcp_names: Vec<String> = mcp_servers.iter().map(|s| s.name.clone()).collect();
+    let lsp_servers = single_core::lsp::load(&ctx.dirs.lsp_registry_file())?;
+    let lsp_names: Vec<String> = lsp_servers.iter().map(|s| s.name.clone()).collect();
 
     let mut writes = Vec::new();
     for agent in &ctx.registry {
         let Some(adapter) = for_agent_with_custom(&agent.name, &ctx.dirs.agents_dir()) else { continue };
-        writes.push(adapter.remove_mcp(&home, &names, dry_run)?);
+        writes.push(adapter.remove_mcp(&home, &mcp_names, dry_run)?);
+        writes.push(adapter.remove_lsp(&home, &lsp_names, dry_run)?);
     }
     Ok(IntegrationResult { dry_run, writes })
 }

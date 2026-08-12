@@ -47,6 +47,9 @@ pub enum Request {
     SkillInstall { name: String, source_path: String },
     SkillRemove { name: String },
     SkillInspect { name: String },
+    /// Copies a skill into Claude Code's real skill directory
+    /// (`~/.claude/skills/<name>/`) — see `single_core::skills::sync_to_claude`.
+    SkillSyncClaude { name: String },
     MemoryStore {
         scope: Option<MemoryScope>,
         source: Option<MemorySource>,
@@ -138,6 +141,7 @@ pub enum ResponseData {
     SecretValue(Option<String>),
     Skills(Vec<String>),
     SkillContents(Vec<String>),
+    SkillSynced { path: String },
     MemoryId(i64),
     MemoryEntry(MemoryEntry),
     MemoryEntries(Vec<MemoryEntry>),

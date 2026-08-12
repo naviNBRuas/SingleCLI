@@ -268,6 +268,9 @@ enum SkillCommand {
     Install { name: String, source_path: String },
     Remove { name: String },
     Inspect { name: String },
+    /// Copies a skill into Claude Code's real skill directory
+    /// (~/.claude/skills/<name>/) — backs up any existing same-named directory first.
+    SyncClaude { name: String },
 }
 
 #[derive(Subcommand)]
@@ -762,6 +765,10 @@ fn main() -> anyhow::Result<()> {
             }
             SkillCommand::Inspect { name } => {
                 let response = client::send(&socket_path, Request::SkillInspect { name })?;
+                render::print(response, false);
+            }
+            SkillCommand::SyncClaude { name } => {
+                let response = client::send(&socket_path, Request::SkillSyncClaude { name })?;
                 render::print(response, false);
             }
         },

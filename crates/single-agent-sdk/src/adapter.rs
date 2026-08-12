@@ -1,6 +1,6 @@
 use crate::discover::{discover, Discovery};
 use anyhow::Result;
-use single_protocol::{IntegrationWrite, McpServerSpec, RunOutcome};
+use single_protocol::{IntegrationWrite, LspServerSpec, McpServerSpec, RunOutcome};
 use std::path::Path;
 use std::time::Duration;
 
@@ -34,6 +34,22 @@ pub trait AgentAdapter {
     /// `single uninstall-integrations`.
     fn remove_mcp(&self, home: &Path, names: &[String], dry_run: bool) -> Result<IntegrationWrite>;
 
+    /// Same shape as `configure_mcp`, for the LSP registry. Default:
+    /// unsupported — only `opencode`'s `opencode.jsonc` has a directly
+    /// observed native config surface for arbitrary LSP servers (see
+    /// `single-core::lsp` module docs); every other agent's LSP story is
+    /// either a different mechanism entirely (Claude's plugin-based
+    /// `*-lsp` marketplace entries) or unconfirmed, so this returns an
+    /// honest "not applied" result rather than guessing a file format.
+    fn configure_lsp(&self, home: &Path, _servers: &[LspServerSpec], _dry_run: bool) -> Result<IntegrationWrite> {
+        Ok(unsupported_lsp(self.command(), home))
+    }
+
+    /// Inverse of `configure_lsp`, used by `single uninstall-integrations`.
+    fn remove_lsp(&self, home: &Path, _names: &[String], _dry_run: bool) -> Result<IntegrationWrite> {
+        Ok(unsupported_lsp(self.command(), home))
+    }
+
     /// Runs `prompt` non-interactively with `cwd` as the working directory,
     /// killing the process and setting `timed_out: true` if it runs past
     /// `timeout`. Default: unsupported (used by agents with no verified
@@ -58,4 +74,14 @@ pub trait AgentAdapter {
 
 pub(crate) fn run_with_prompt_flag(command: &str, cwd: &Path, prompt: &str, home: Option<&Path>, timeout: Duration) -> Result<RunOutcome> {
     crate::run::run_command_with_home(command, &["-p".to_string(), prompt.to_string()], cwd, home, timeout)
+}
+
+fn unsupported_lsp(agent: &str, home: &Path) -> IntegrationWrite {
+    IntegrationWrite {
+        agent: agent.to_string(),
+        config_path: home.display().to_string(),
+        backup_path: None,
+        applied: false,
+        detail: format!("{agent} has no verified LSP config sync (only opencode's opencode.jsonc lsp key is confirmed)"),
+    }
 }

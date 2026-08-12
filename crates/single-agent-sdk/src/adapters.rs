@@ -122,6 +122,27 @@ impl AgentAdapter for OpenCodeAdapter {
         }
     }
 
+    /// Writes into `opencode.jsonc`'s `lsp` key — the one confirmed real
+    /// LSP config surface among the built-in agents (see
+    /// `single-core::lsp` and `formats::opencode::apply_lsp` docs).
+    fn configure_lsp(&self, home: &Path, servers: &[single_protocol::LspServerSpec], dry_run: bool) -> Result<IntegrationWrite> {
+        let path = home.join(".config").join("opencode").join("opencode.jsonc");
+        let updated = formats::opencode::apply_lsp(&path, servers)?;
+        let rendered = serde_json::to_string_pretty(&updated)?;
+        write_with_backup("opencode", &path, &rendered, dry_run)
+    }
+
+    fn remove_lsp(&self, home: &Path, names: &[String], dry_run: bool) -> Result<IntegrationWrite> {
+        let path = home.join(".config").join("opencode").join("opencode.jsonc");
+        match formats::opencode::remove_lsp(&path, names)? {
+            Some(updated) => {
+                let rendered = serde_json::to_string_pretty(&updated)?;
+                write_with_backup("opencode", &path, &rendered, dry_run)
+            }
+            None => Ok(unsupported_write("opencode", home, "no config file present; nothing to remove")),
+        }
+    }
+
     /// `opencode run "<prompt>" --dir <cwd>` — confirmed non-interactive
     /// mode and `--dir` flag via `opencode run --help` on the reference
     /// machine.

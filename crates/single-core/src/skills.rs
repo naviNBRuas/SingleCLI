@@ -72,6 +72,29 @@ pub fn inspect(skills_dir: &Path, name: &str) -> Result<Option<Vec<String>>> {
     Ok(Some(entries))
 }
 
+/// Copies a SingleCLI-managed skill into Claude Code's real skill
+/// directory (`~/.claude/skills/<name>/SKILL.md`) — confirmed real via
+/// `claude plugin init --help` output on the reference machine, which
+/// shows new skills scaffolded at exactly that path. If a directory of
+/// the same name already exists there, it's renamed aside with a
+/// timestamp first (same backup-before-overwrite discipline as every
+/// other config write in this project) rather than merged or clobbered.
+pub fn sync_to_claude(skills_dir: &Path, claude_skills_dir: &Path, name: &str) -> Result<PathBuf> {
+    let source = skills_dir.join(name);
+    if !source.is_dir() {
+        bail!("no such skill: {name}");
+    }
+    std::fs::create_dir_all(claude_skills_dir)?;
+    let dest = claude_skills_dir.join(name);
+    if dest.exists() {
+        let timestamp = chrono::Utc::now().format("%Y%m%dT%H%M%SZ");
+        let backup = claude_skills_dir.join(format!("{name}.bak-{timestamp}"));
+        std::fs::rename(&dest, &backup)?;
+    }
+    copy_dir_recursive(&source, &dest)?;
+    Ok(dest)
+}
+
 fn copy_dir_recursive(source: &Path, dest: &Path) -> Result<()> {
     std::fs::create_dir_all(dest)?;
     for entry in std::fs::read_dir(source)? {
@@ -134,6 +157,31 @@ mod tests {
         // must error, not silently remove it or report "not found".
         assert!(remove(&skills_dir, "../outside").is_err());
         assert!(root.path().join("outside").exists());
+    }
+
+    #[test]
+    fn sync_to_claude_copies_skill_and_backs_up_existing() {
+        let root = tempfile::tempdir().unwrap();
+        let skills_dir = root.path().join("skills");
+        let claude_skills_dir = root.path().join("claude-skills");
+        let source = root.path().join("source-skill");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::write(source.join("SKILL.md"), "# v1").unwrap();
+        install(&skills_dir, "greeting", &source).unwrap();
+
+        let dest = sync_to_claude(&skills_dir, &claude_skills_dir, "greeting").unwrap();
+        assert_eq!(std::fs::read_to_string(dest.join("SKILL.md")).unwrap(), "# v1");
+
+        // A second sync after the skill changes must back up the old copy, not clobber silently.
+        std::fs::write(skills_dir.join("greeting/SKILL.md"), "# v2").unwrap();
+        sync_to_claude(&skills_dir, &claude_skills_dir, "greeting").unwrap();
+        assert_eq!(std::fs::read_to_string(claude_skills_dir.join("greeting/SKILL.md")).unwrap(), "# v2");
+        let backups: Vec<_> = std::fs::read_dir(&claude_skills_dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().starts_with("greeting.bak-"))
+            .collect();
+        assert_eq!(backups.len(), 1);
     }
 
     #[test]

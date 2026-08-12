@@ -159,6 +159,7 @@ fn print_data(data: ResponseData) {
                 println!("{entry}");
             }
         }
+        ResponseData::SkillSynced { path } => println!("synced to {path}"),
         ResponseData::MemoryId(id) => println!("stored as #{id}"),
         ResponseData::MemoryEntry(entry) => print_memory_entry(&entry),
         ResponseData::MemoryEntries(entries) => {

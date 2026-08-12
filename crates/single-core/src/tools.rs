@@ -20,7 +20,9 @@ struct ToolRegistryFile {
 /// one agent, just the metadata/risk-level seam described in the module
 /// docs above. Risk levels reflect what the tool can actually do: read-only
 /// or scoped-write tools are `Low`/`Medium`; anything that can run
-/// arbitrary containers or push to a remote is `High`.
+/// arbitrary containers, reach a remote cluster/cloud account, or push to
+/// a remote is `High`. Every entry below was confirmed present (`command
+/// -v`) on the reference machine before being added — not a guessed list.
 pub fn default_tools() -> Vec<ToolSpec> {
     use single_protocol::RiskLevel;
     vec![
@@ -31,6 +33,25 @@ pub fn default_tools() -> Vec<ToolSpec> {
         ToolSpec { name: "cargo".into(), description: "Rust build tool and package manager".into(), risk_level: RiskLevel::Medium, enabled: true },
         ToolSpec { name: "curl".into(), description: "HTTP client".into(), risk_level: RiskLevel::Low, enabled: true },
         ToolSpec { name: "gh".into(), description: "GitHub CLI".into(), risk_level: RiskLevel::High, enabled: true },
+        ToolSpec { name: "rg".into(), description: "ripgrep — fast recursive text search".into(), risk_level: RiskLevel::Low, enabled: true },
+        ToolSpec { name: "fd".into(), description: "fast, user-friendly file finder".into(), risk_level: RiskLevel::Low, enabled: true },
+        ToolSpec { name: "jq".into(), description: "command-line JSON processor".into(), risk_level: RiskLevel::Low, enabled: true },
+        ToolSpec { name: "make".into(), description: "build automation tool".into(), risk_level: RiskLevel::Medium, enabled: true },
+        ToolSpec { name: "gcc".into(), description: "C/C++ compiler".into(), risk_level: RiskLevel::Medium, enabled: true },
+        ToolSpec { name: "go".into(), description: "Go build tool and compiler".into(), risk_level: RiskLevel::Medium, enabled: true },
+        ToolSpec { name: "rustc".into(), description: "Rust compiler".into(), risk_level: RiskLevel::Medium, enabled: true },
+        ToolSpec { name: "npm".into(), description: "Node.js package manager".into(), risk_level: RiskLevel::Medium, enabled: true },
+        ToolSpec { name: "pnpm".into(), description: "fast, disk-efficient Node.js package manager".into(), risk_level: RiskLevel::Medium, enabled: true },
+        ToolSpec { name: "yarn".into(), description: "Node.js package manager".into(), risk_level: RiskLevel::Medium, enabled: true },
+        ToolSpec { name: "ssh".into(), description: "secure remote shell / tunnel client".into(), risk_level: RiskLevel::High, enabled: true },
+        ToolSpec { name: "kubectl".into(), description: "Kubernetes cluster CLI".into(), risk_level: RiskLevel::High, enabled: true },
+        ToolSpec { name: "helm".into(), description: "Kubernetes package manager".into(), risk_level: RiskLevel::High, enabled: true },
+        ToolSpec { name: "ansible".into(), description: "configuration management / remote automation".into(), risk_level: RiskLevel::High, enabled: true },
+        ToolSpec { name: "aws".into(), description: "AWS cloud CLI".into(), risk_level: RiskLevel::High, enabled: true },
+        ToolSpec { name: "gcloud".into(), description: "Google Cloud CLI".into(), risk_level: RiskLevel::High, enabled: true },
+        ToolSpec { name: "az".into(), description: "Azure CLI".into(), risk_level: RiskLevel::High, enabled: true },
+        ToolSpec { name: "tmux".into(), description: "terminal multiplexer".into(), risk_level: RiskLevel::Low, enabled: true },
+        ToolSpec { name: "vim".into(), description: "text editor".into(), risk_level: RiskLevel::Low, enabled: true },
     ]
 }
 

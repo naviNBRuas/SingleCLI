@@ -177,6 +177,12 @@ fn dispatch(ctx: &Context, request: Request) -> anyhow::Result<ResponseData> {
                 .ok_or_else(|| anyhow::anyhow!("no such skill: {name}"))?;
             Ok(ResponseData::SkillContents(contents))
         }
+        Request::SkillSyncClaude { name } => {
+            let home = integrations::home_dir()?;
+            let claude_skills_dir = home.join(".claude").join("skills");
+            let dest = single_core::skills::sync_to_claude(&ctx.dirs.skills_dir(), &claude_skills_dir, &name)?;
+            Ok(ResponseData::SkillSynced { path: dest.display().to_string() })
+        }
         Request::MemoryStore { scope, source, project, agent, task, title, content, confidence, expires_in_seconds } => {
             let conn = memory_db(ctx)?;
             let id = memory::store(&conn, memory::NewMemory {
