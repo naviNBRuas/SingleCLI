@@ -12,6 +12,9 @@ pub struct CodexAdapter;
 pub struct OpenCodeAdapter;
 pub struct AgyAdapter;
 pub struct PerplexityAdapter;
+pub struct CursorAdapter;
+pub struct AiderAdapter;
+pub struct GooseAdapter;
 
 impl AgentAdapter for ClaudeAdapter {
     fn command(&self) -> &str {
@@ -242,6 +245,117 @@ impl AgentAdapter for PerplexityAdapter {
     }
 }
 
+impl AgentAdapter for CursorAdapter {
+    fn command(&self) -> &str {
+        "cursor-agent"
+    }
+
+    fn configure_mcp(&self, home: &Path, servers: &[McpServerSpec], dry_run: bool) -> Result<IntegrationWrite> {
+        let path = home.join(".cursor").join("mcp.json");
+        let updated = formats::cursor::apply(&path, servers)?;
+        let rendered = serde_json::to_string_pretty(&updated)?;
+        write_with_backup("cursor", &path, &rendered, dry_run)
+    }
+
+    fn remove_mcp(&self, home: &Path, names: &[String], dry_run: bool) -> Result<IntegrationWrite> {
+        let path = home.join(".cursor").join("mcp.json");
+        match formats::cursor::remove(&path, names)? {
+            Some(updated) => {
+                let rendered = serde_json::to_string_pretty(&updated)?;
+                write_with_backup("cursor", &path, &rendered, dry_run)
+            }
+            None => Ok(unsupported_write("cursor", home, "no config file present; nothing to remove")),
+        }
+    }
+
+    /// `cursor-agent -p "<prompt>"` — confirmed non-interactive print mode
+    /// via `cursor-agent --help` on the reference machine.
+    fn run_prompt(&self, cwd: &Path, prompt: &str, home: Option<&Path>, timeout: Duration) -> Result<RunOutcome> {
+        run_command_with_home("cursor-agent", &["-p".to_string(), prompt.to_string()], cwd, home, timeout)
+    }
+
+    /// `cursor-agent login` — confirmed real via `cursor-agent --help` on
+    /// the reference machine ("Authenticate with Cursor. Set
+    /// NO_OPEN_BROWSER to disable browser opening.").
+    fn login(&self, home: &Path) -> Result<()> {
+        run_interactive_with_home("cursor-agent", &["login".to_string()], home)
+    }
+}
+
+impl AgentAdapter for AiderAdapter {
+    fn command(&self) -> &str {
+        "aider"
+    }
+
+    /// Aider has no confirmed on-disk MCP config location (`aider --help`
+    /// shows no `mcp` subcommand or flag) — honest no-op, not a guess.
+    fn configure_mcp(&self, home: &Path, _servers: &[McpServerSpec], _dry_run: bool) -> Result<IntegrationWrite> {
+        Ok(unsupported_write("aider", home, "aider has no confirmed MCP config surface"))
+    }
+
+    fn remove_mcp(&self, home: &Path, _names: &[String], _dry_run: bool) -> Result<IntegrationWrite> {
+        Ok(unsupported_write("aider", home, "aider has no confirmed MCP config surface"))
+    }
+
+    /// `aider --message "<prompt>" --yes-always` — confirmed non-interactive
+    /// mode via `aider --help` on the reference machine (`--yes-always`
+    /// skips the confirmation prompts `--message` alone would still hit).
+    fn run_prompt(&self, cwd: &Path, prompt: &str, home: Option<&Path>, timeout: Duration) -> Result<RunOutcome> {
+        run_command_with_home("aider", &["--message".to_string(), prompt.to_string(), "--yes-always".to_string()], cwd, home, timeout)
+    }
+
+    // No `login`: aider authenticates via API-key flags/env vars
+    // (`--api-key`, `--set-env`, `.env` files), not an interactive OAuth
+    // command — there is nothing to attach a terminal session to.
+}
+
+impl AgentAdapter for GooseAdapter {
+    fn command(&self) -> &str {
+        "goose"
+    }
+
+    fn configure_mcp(&self, home: &Path, servers: &[McpServerSpec], dry_run: bool) -> Result<IntegrationWrite> {
+        let path = home.join(".config").join("goose").join("config.yaml");
+        let updated = formats::goose::apply(&path, servers)?;
+        let rendered = serde_yaml::to_string(&updated)?;
+        write_with_backup("goose", &path, &rendered, dry_run)
+    }
+
+    fn remove_mcp(&self, home: &Path, names: &[String], dry_run: bool) -> Result<IntegrationWrite> {
+        let path = home.join(".config").join("goose").join("config.yaml");
+        match formats::goose::remove(&path, names)? {
+            Some(updated) => {
+                let rendered = serde_yaml::to_string(&updated)?;
+                write_with_backup("goose", &path, &rendered, dry_run)
+            }
+            None => Ok(unsupported_write("goose", home, "no config file present; nothing to remove")),
+        }
+    }
+
+    /// `goose run --text "<prompt>" --no-session --quiet` — confirmed
+    /// non-interactive mode via `goose run --help` on the reference
+    /// machine (`--no-session` skips creating a session file, `--quiet`
+    /// prints only the model's response).
+    fn run_prompt(&self, cwd: &Path, prompt: &str, home: Option<&Path>, timeout: Duration) -> Result<RunOutcome> {
+        run_command_with_home(
+            "goose",
+            &["run".to_string(), "--text".to_string(), prompt.to_string(), "--no-session".to_string(), "--quiet".to_string()],
+            cwd,
+            home,
+            timeout,
+        )
+    }
+
+    /// `goose configure` — confirmed real via `goose configure --help` on
+    /// the reference machine. Not a narrow OAuth "login" like the other
+    /// agents' — it's goose's one interactive entry point for setting up
+    /// a provider and its API key/credentials, which is the closest real
+    /// equivalent goose has.
+    fn login(&self, home: &Path) -> Result<()> {
+        run_interactive_with_home("goose", &["configure".to_string()], home)
+    }
+}
+
 fn unsupported_write(agent: &str, home: &Path, detail: &str) -> IntegrationWrite {
     IntegrationWrite {
         agent: agent.to_string(),
@@ -285,6 +399,9 @@ pub fn for_agent(name: &str) -> Option<Box<dyn AgentAdapter>> {
         "opencode" => Some(Box::new(OpenCodeAdapter)),
         "agy" => Some(Box::new(AgyAdapter)),
         "perplexity" => Some(Box::new(PerplexityAdapter)),
+        "cursor" => Some(Box::new(CursorAdapter)),
+        "aider" => Some(Box::new(AiderAdapter)),
+        "goose" => Some(Box::new(GooseAdapter)),
         _ => None,
     }
 }

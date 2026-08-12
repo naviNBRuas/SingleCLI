@@ -1,15 +1,16 @@
 # SingleCLI
 
 A unified control plane for heterogeneous AI coding-agent CLIs — Claude
-Code, Codex, OpenCode, Antigravity (`agy`), Perplexity's `pplx`, and any
-new agent CLI you describe in a TOML file. Configure MCP servers,
-provider keys, and accounts once in SingleCLI; every supported agent gets
-the same configuration synced into its own native format.
+Code, Codex, OpenCode, Antigravity (`agy`), Cursor CLI, Aider, Goose,
+Perplexity's `pplx`, and any new agent CLI you describe in a TOML file.
+Configure MCP servers, provider keys, and accounts once in SingleCLI;
+every supported agent gets the same configuration synced into its own
+native format.
 
-> **Status: Phases 1-4 done, Phases 5-6 partial, plus two rounds of
+> **Status: Phases 1-4 done, Phases 5-6 partial, plus three rounds of
 > growth work (plugins, multi-account concurrency, LSP/skills sync,
-> preset catalogs, a fuller TUI).** See "What's implemented" below and
-> `docs/architecture.md` for the full picture, including what's
+> preset catalogs, a fuller TUI, three more built-in agents).** See
+> "What's implemented" below and `docs/architecture.md` for the full picture, including what's
 > deliberately *not* here yet.
 
 ## Why
@@ -187,8 +188,16 @@ Every list/inspect command supports `--json` for scripting.
   (bootstrapped from the real one exactly once), never the real, ambient
   `~/.claude`/`~/.codex`/etc. after that. `single agent login <name>` runs
   that agent's own real interactive login command (`claude auth login`,
-  `codex login`, `opencode auth login`, `pplx auth login`) attached to
-  your terminal so credentials land in the isolated home directly.
+  `codex login`, `opencode auth login`, `pplx auth login`,
+  `cursor-agent login`, `goose configure`) attached to your terminal so
+  credentials land in the isolated home directly.
+- **Cursor CLI, Aider, and Goose** — three more built-in agents (8 total).
+  Cursor gets full parity with claude/codex/opencode (MCP sync into
+  `~/.cursor/mcp.json`, non-interactive runs, login); Goose gets MCP sync
+  into its YAML config (`~/.config/goose/config.yaml`) plus non-interactive
+  runs and its `configure` wizard wired as login; Aider gets
+  non-interactive runs only — it has no MCP support and authenticates via
+  API-key flags/env vars, not an interactive login.
 
 ## What's not (yet)
 

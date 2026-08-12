@@ -165,6 +165,83 @@ pub fn builtin_registry() -> Vec<AgentDefinition> {
                     .into(),
             ),
         },
+        AgentDefinition {
+            name: "cursor".into(),
+            adapter: "cursor".into(),
+            // The real binary is `cursor-agent` (the `cursor` shim on this
+            // machine just re-execs it) — kept distinct from `name` the
+            // same way `perplexity`/`pplx` are above.
+            command: "cursor-agent".into(),
+            install_method: InstallMethod::StandaloneBinary {
+                detail: "Standalone binary installed to ~/.local/bin/cursor-agent by Cursor's own install script".into(),
+            },
+            bootstrap_install: Some(BootstrapInstall {
+                command: "curl https://cursor.com/install -fsS | bash".into(),
+                source: "https://cursor.com/docs/cli/installation".into(),
+            }),
+            unverified: false,
+            capabilities: CapabilityFlags {
+                streaming: true, // --output-format stream-json observed in --help
+                mcp: true,       // observed real ~/.cursor/mcp.json (mcpServers map) on the reference machine
+                lsp: false,
+                tools: true,
+                sessions: true, // --resume/--continue/ls observed in --help
+                structured_output: true, // --output-format json|stream-json observed in --help
+            },
+            config_paths: vec![".cursor/mcp.json".into()],
+            notes: None,
+        },
+        AgentDefinition {
+            name: "aider".into(),
+            adapter: "aider".into(),
+            command: "aider".into(),
+            install_method: InstallMethod::StandaloneBinary {
+                detail: "Installed via aider-install (uv-managed isolated environment) or the vendor's own install.sh".into(),
+            },
+            bootstrap_install: Some(BootstrapInstall {
+                command: "curl -LsSf https://aider.chat/install.sh | sh".into(),
+                source: "https://aider.chat/docs/install.html".into(),
+            }),
+            unverified: false,
+            capabilities: CapabilityFlags {
+                streaming: false,
+                mcp: false, // no mcp subcommand/flag found in `aider --help`; unconfirmed
+                lsp: false,
+                tools: true,
+                sessions: false,
+                structured_output: false,
+            },
+            config_paths: vec![".aider.conf.yml".into()],
+            notes: Some(
+                "Authenticates via API-key flags/env vars (--api-key, --set-env, .env files), \
+                 not an interactive OAuth login — `single agent login aider` is unsupported \
+                 rather than guessing a flow that doesn't exist."
+                    .into(),
+            ),
+        },
+        AgentDefinition {
+            name: "goose".into(),
+            adapter: "goose".into(),
+            command: "goose".into(),
+            install_method: InstallMethod::StandaloneBinary {
+                detail: "Standalone binary installed to $GOOSE_BIN_DIR (default ~/.local/bin) by Block's own download_cli.sh".into(),
+            },
+            bootstrap_install: Some(BootstrapInstall {
+                command: "curl -fsSL https://github.com/block/goose/releases/download/stable/download_cli.sh | bash".into(),
+                source: "https://github.com/block/goose/blob/main/download_cli.sh".into(),
+            }),
+            unverified: false,
+            capabilities: CapabilityFlags {
+                streaming: true, // --output-format stream-json observed in `goose run --help`
+                mcp: true,       // observed real ~/.config/goose/config.yaml (extensions map) on the reference machine
+                lsp: false,
+                tools: true,
+                sessions: true, // --resume/--session-id observed in `goose run --help`
+                structured_output: true, // --output-format json|stream-json observed in --help
+            },
+            config_paths: vec![".config/goose/config.yaml".into()],
+            notes: None,
+        },
     ]
 }
 
@@ -173,11 +250,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn builtin_registry_has_five_agents() {
+    fn builtin_registry_has_eight_agents() {
         let reg = builtin_registry();
-        assert_eq!(reg.len(), 5);
+        assert_eq!(reg.len(), 8);
         let names: Vec<_> = reg.iter().map(|a| a.name.as_str()).collect();
-        assert_eq!(names, ["claude", "codex", "opencode", "agy", "perplexity"]);
+        assert_eq!(names, ["claude", "codex", "opencode", "agy", "perplexity", "cursor", "aider", "goose"]);
     }
 
     #[test]

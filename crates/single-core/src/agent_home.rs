@@ -33,6 +33,9 @@ fn real_paths_for(agent: &str) -> &'static [&'static str] {
         "claude" => &[".claude.json", ".claude"],
         "codex" => &[".codex"],
         "opencode" => &[".config/opencode"],
+        "cursor" => &[".cursor"],
+        "goose" => &[".config/goose"],
+        "aider" => &[".aider.conf.yml"],
         _ => &[],
     }
 }

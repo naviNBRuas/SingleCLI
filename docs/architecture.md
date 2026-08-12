@@ -568,6 +568,41 @@ stable|nightly] [--check] [--yes]`, mirroring the real `claude update`/
   with stdin closed, to confirm the command launches without completing
   a live OAuth flow in an unattended check).
 
+## Growth Phase 3: three more built-in agents
+
+- **Cursor CLI (`cursor-agent`)**, **Aider**, and **Goose** joined the
+  built-in registry (8 agents total, up from 5), each verified the same
+  way as the original five: real config file inspection on the reference
+  machine (not vendor docs alone), `--help` output for every flag used,
+  and a real install command fetched from the vendor's own current docs.
+  - **Cursor**: full parity with claude/codex/opencode — MCP sync into
+    `~/.cursor/mcp.json`'s real `mcpServers` map (`formats::cursor`, same
+    shape as Claude's but with **no** `"type"` field, since no real entry
+    on the reference machine has one), `cursor-agent -p` for
+    non-interactive runs, `cursor-agent login` for `single agent login`.
+    No plugin install — `cursor-agent plugin` only exposes marketplace
+    management (add/list/remove/update a git-hosted marketplace), no
+    "install a named plugin" command to wire up.
+  - **Goose**: MCP sync into `~/.config/goose/config.yaml`'s real
+    `extensions` map — the first **YAML** config format this project
+    writes (`formats::goose`, via `serde_yaml`; every other format is
+    JSON/JSONC/TOML). `goose run --text ... --no-session --quiet` for
+    non-interactive runs. `goose configure` wired as `login`, even though
+    it's a general provider/credentials setup wizard rather than a narrow
+    OAuth flow — it's the closest real entry point goose has.
+  - **Aider**: intentionally thin. No MCP (`aider --help` shows no `mcp`
+    subcommand or flag — honest gap, not guessed), no `login` (aider
+    authenticates via `--api-key`/`--set-env`/`.env` files, not an
+    interactive command there's a terminal session to attach to).
+    `aider --message "<prompt>" --yes-always` for non-interactive runs.
+  - All three get the same isolated-home treatment as the original five
+    (`agent_home::real_paths_for` now also bootstraps `.cursor`,
+    `.config/goose`, and `.aider.conf.yml`) — verified end-to-end:
+    `single doctor` detected all three, `single install-integrations`
+    wrote real MCP config into cursor's and goose's isolated homes
+    (correctly shaped JSON/YAML), and `single agent login aider`
+    correctly reported "unsupported" instead of guessing a flow.
+
 ## Not in Phase 1-6
 
 Per the original spec's own §50 "Development Strategy" (build vertically,
