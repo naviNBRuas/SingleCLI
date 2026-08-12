@@ -102,6 +102,47 @@ pub fn default_servers() -> Vec<McpServerSpec> {
     ]
 }
 
+/// A named starter config for a real MCP server not yet in the user's
+/// registry — the growth mechanism for "add more mcps": each entry's npm
+/// package was confirmed to exist and resolve a real published version via
+/// `npm view <package> version` against the live registry at the time it
+/// was added (not guessed), same discipline as `default_servers()`. All
+/// ship disabled: each either needs a secret (`brave-search`, `slack`,
+/// `postgres` — connection string) or drives something invasive
+/// (`puppeteer` — a real browser, like `playwright` above), so opting in
+/// via `single mcp add-preset <name>` is a deliberate choice, not
+/// something SingleCLI turns on for you.
+pub struct McpPreset {
+    pub name: &'static str,
+    pub command: &'static str,
+    pub args: &'static [&'static str],
+}
+
+pub fn presets() -> Vec<McpPreset> {
+    vec![
+        McpPreset { name: "brave-search", command: "npx", args: &["-y", "@modelcontextprotocol/server-brave-search"] },
+        McpPreset { name: "slack", command: "npx", args: &["-y", "@modelcontextprotocol/server-slack"] },
+        McpPreset { name: "puppeteer", command: "npx", args: &["-y", "@modelcontextprotocol/server-puppeteer"] },
+        McpPreset { name: "postgres", command: "npx", args: &["-y", "@modelcontextprotocol/server-postgres"] },
+    ]
+}
+
+pub fn preset(name: &str) -> Option<McpPreset> {
+    presets().into_iter().find(|p| p.name == name)
+}
+
+impl McpPreset {
+    pub fn to_spec(&self) -> McpServerSpec {
+        McpServerSpec {
+            name: self.name.to_string(),
+            command: self.command.to_string(),
+            args: self.args.iter().map(|s| s.to_string()).collect(),
+            env: BTreeMap::new(),
+            enabled: false,
+        }
+    }
+}
+
 pub fn load(path: &Path) -> Result<Vec<McpServerSpec>> {
     if !path.exists() {
         return Ok(default_servers());
@@ -241,6 +282,18 @@ mod tests {
         assert!(remove(&path, "custom").unwrap());
         assert!(!remove(&path, "custom").unwrap());
         assert!(find(&path, "custom").unwrap().is_none());
+    }
+
+    #[test]
+    fn presets_are_disabled_by_default_and_resolve_by_name() {
+        let names: Vec<_> = presets().iter().map(|p| p.name).collect();
+        for expected in ["brave-search", "slack", "puppeteer", "postgres"] {
+            assert!(names.contains(&expected), "missing preset {expected}");
+        }
+        assert!(preset("nonexistent").is_none());
+        let spec = preset("postgres").unwrap().to_spec();
+        assert_eq!(spec.command, "npx");
+        assert!(!spec.enabled);
     }
 
     #[test]

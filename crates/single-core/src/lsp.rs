@@ -60,6 +60,54 @@ pub fn default_servers() -> Vec<LspServerSpec> {
     ]
 }
 
+/// A named starter config for a real language server, not yet in the
+/// user's registry. This is the growth mechanism for task "dynamic lsp":
+/// `default_servers()` above ships pre-populated (so a fresh install has
+/// something useful immediately); `presets()` is the larger catalog a user
+/// opts into one at a time via `single lsp add-preset <name>` without
+/// SingleCLI needing a code change for every language they touch. Every
+/// entry's command/flags were confirmed for real on the reference machine
+/// (binary present, `--help` output showing the exact stdio flag) — same
+/// verification discipline as `default_servers()`, not a guessed list.
+pub struct LspPreset {
+    pub name: &'static str,
+    pub command: &'static str,
+    pub args: &'static [&'static str],
+    pub extensions: &'static [&'static str],
+}
+
+pub fn presets() -> Vec<LspPreset> {
+    vec![
+        LspPreset { name: "rust-analyzer", command: "rust-analyzer", args: &[], extensions: &[".rs"] },
+        LspPreset { name: "pyright", command: "pyright-langserver", args: &["--stdio"], extensions: &[".py"] },
+        LspPreset { name: "typescript", command: "typescript-language-server", args: &["--stdio"], extensions: &[".ts", ".tsx", ".js", ".jsx"] },
+        LspPreset { name: "gopls", command: "gopls", args: &[], extensions: &[".go"] },
+        LspPreset { name: "dockerfile", command: "docker-langserver", args: &["--stdio"], extensions: &["Dockerfile"] },
+        // Confirmed real via `--help` on the reference machine, in addition to the five above:
+        LspPreset { name: "clangd", command: "clangd", args: &[], extensions: &[".c", ".h", ".cpp", ".hpp", ".cc"] },
+        LspPreset { name: "bash", command: "bash-language-server", args: &["start"], extensions: &[".sh", ".bash"] },
+        LspPreset { name: "yaml", command: "yaml-language-server", args: &["--stdio"], extensions: &[".yaml", ".yml"] },
+        LspPreset { name: "terraform", command: "terraform-ls", args: &["serve"], extensions: &[".tf", ".tfvars"] },
+        LspPreset { name: "json", command: "vscode-json-language-server", args: &["--stdio"], extensions: &[".json"] },
+    ]
+}
+
+pub fn preset(name: &str) -> Option<LspPreset> {
+    presets().into_iter().find(|p| p.name == name)
+}
+
+impl LspPreset {
+    pub fn to_spec(&self) -> LspServerSpec {
+        LspServerSpec {
+            name: self.name.to_string(),
+            command: self.command.to_string(),
+            args: self.args.iter().map(|s| s.to_string()).collect(),
+            extensions: self.extensions.iter().map(|s| s.to_string()).collect(),
+            enabled: true,
+        }
+    }
+}
+
 pub fn load(path: &Path) -> Result<Vec<LspServerSpec>> {
     if !path.exists() {
         return Ok(default_servers());
@@ -143,5 +191,17 @@ mod tests {
         add(&path, sample()).unwrap();
         assert!(remove(&path, "rust").unwrap());
         assert!(!remove(&path, "rust").unwrap());
+    }
+
+    #[test]
+    fn presets_include_defaults_plus_extras_and_resolve_by_name() {
+        let names: Vec<_> = presets().iter().map(|p| p.name).collect();
+        for expected in ["rust-analyzer", "pyright", "typescript", "gopls", "dockerfile", "clangd", "bash", "yaml", "terraform", "json"] {
+            assert!(names.contains(&expected), "missing preset {expected}");
+        }
+        assert!(preset("nonexistent").is_none());
+        let spec = preset("clangd").unwrap().to_spec();
+        assert_eq!(spec.command, "clangd");
+        assert!(spec.enabled);
     }
 }

@@ -23,10 +23,14 @@ pub enum Request {
     McpEnable { name: String },
     McpDisable { name: String },
     McpInspect { name: String },
+    McpPresetList,
+    McpAddPreset { name: String },
     LspList,
     LspAdd { server: LspServerSpec },
     LspRemove { name: String },
     LspInspect { name: String },
+    LspPresetList,
+    LspAddPreset { name: String },
     ToolList,
     ToolAdd { tool: ToolSpec },
     ToolInspect { name: String },
@@ -124,8 +128,10 @@ pub enum ResponseData {
     Agent(AgentInfo),
     McpServers(Vec<McpServerInfo>),
     McpServer(McpServerSpec),
+    McpPresets(Vec<McpPresetInfo>),
     LspServers(Vec<LspServerSpec>),
     LspServer(LspServerSpec),
+    LspPresets(Vec<LspPresetInfo>),
     Tools(Vec<ToolSpec>),
     Tool(ToolSpec),
     SecretNames(Vec<String>),
@@ -539,6 +545,21 @@ pub struct ProviderPresetInfo {
     pub name: String,
     pub env_var_name: String,
     pub base_url: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McpPresetInfo {
+    pub name: String,
+    pub command: String,
+    pub args: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LspPresetInfo {
+    pub name: String,
+    pub command: String,
+    pub args: Vec<String>,
+    pub extensions: Vec<String>,
 }
 
 /// A plugin registered across agents (spec section 29/41). `target` is

@@ -91,6 +91,11 @@ fn print_data(data: ResponseData) {
                 println!("  env:     {}", server.env.keys().cloned().collect::<Vec<_>>().join(", "));
             }
         }
+        ResponseData::McpPresets(presets) => {
+            for p in presets {
+                println!("{:<16} {} {}", p.name, p.command, p.args.join(" "));
+            }
+        }
         ResponseData::LspServers(servers) => {
             if servers.is_empty() {
                 println!("(no lsp servers registered)");
@@ -98,6 +103,11 @@ fn print_data(data: ResponseData) {
             for server in servers {
                 let flag = if server.enabled { "enabled" } else { "disabled" };
                 println!("{:<12} {:<30} {} [{flag}]", server.name, server.command, server.extensions.join(","));
+            }
+        }
+        ResponseData::LspPresets(presets) => {
+            for p in presets {
+                println!("{:<14} {:<28} {}", p.name, format!("{} {}", p.command, p.args.join(" ")), p.extensions.join(","));
             }
         }
         ResponseData::LspServer(server) => {

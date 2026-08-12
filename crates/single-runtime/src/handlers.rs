@@ -68,6 +68,19 @@ fn dispatch(ctx: &Context, request: Request) -> anyhow::Result<ResponseData> {
                 .ok_or_else(|| anyhow::anyhow!("no such mcp server: {name}"))?;
             Ok(ResponseData::McpServer(server))
         }
+        Request::McpPresetList => {
+            let presets = single_core::mcp::presets()
+                .into_iter()
+                .map(|p| single_protocol::McpPresetInfo { name: p.name.to_string(), command: p.command.to_string(), args: p.args.iter().map(|s| s.to_string()).collect() })
+                .collect();
+            Ok(ResponseData::McpPresets(presets))
+        }
+        Request::McpAddPreset { name } => {
+            let preset = single_core::mcp::preset(&name)
+                .ok_or_else(|| anyhow::anyhow!("no such preset: {name} (see `single mcp presets`)"))?;
+            single_core::mcp::add(&ctx.dirs.mcp_registry_file(), preset.to_spec())?;
+            Ok(ResponseData::Empty)
+        }
         Request::LspList => {
             Ok(ResponseData::LspServers(single_core::lsp::load(&ctx.dirs.lsp_registry_file())?))
         }
@@ -85,6 +98,24 @@ fn dispatch(ctx: &Context, request: Request) -> anyhow::Result<ResponseData> {
             let server = single_core::lsp::find(&ctx.dirs.lsp_registry_file(), &name)?
                 .ok_or_else(|| anyhow::anyhow!("no such lsp server: {name}"))?;
             Ok(ResponseData::LspServer(server))
+        }
+        Request::LspPresetList => {
+            let presets = single_core::lsp::presets()
+                .into_iter()
+                .map(|p| single_protocol::LspPresetInfo {
+                    name: p.name.to_string(),
+                    command: p.command.to_string(),
+                    args: p.args.iter().map(|s| s.to_string()).collect(),
+                    extensions: p.extensions.iter().map(|s| s.to_string()).collect(),
+                })
+                .collect();
+            Ok(ResponseData::LspPresets(presets))
+        }
+        Request::LspAddPreset { name } => {
+            let preset = single_core::lsp::preset(&name)
+                .ok_or_else(|| anyhow::anyhow!("no such preset: {name} (see `single lsp presets`)"))?;
+            single_core::lsp::add(&ctx.dirs.lsp_registry_file(), preset.to_spec())?;
+            Ok(ResponseData::Empty)
         }
         Request::ToolList => {
             Ok(ResponseData::Tools(single_core::tools::load(&ctx.dirs.tools_registry_file())?))

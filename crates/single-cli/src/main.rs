@@ -187,6 +187,10 @@ enum McpCommand {
         #[arg(long)]
         json: bool,
     },
+    /// List built-in MCP server presets (brave-search, slack, puppeteer, postgres).
+    Presets,
+    /// Register an MCP server from a built-in preset (ships disabled — most need a secret).
+    AddPreset { name: String },
 }
 
 #[derive(Subcommand)]
@@ -212,6 +216,10 @@ enum LspCommand {
         #[arg(long)]
         json: bool,
     },
+    /// List built-in LSP presets (rust-analyzer, pyright, typescript, gopls, dockerfile, clangd, bash, yaml, terraform, json).
+    Presets,
+    /// Register an LSP server from a built-in preset.
+    AddPreset { name: String },
 }
 
 #[derive(Subcommand)]
@@ -657,6 +665,14 @@ fn main() -> anyhow::Result<()> {
                 let response = client::send(&socket_path, Request::McpInspect { name })?;
                 render::print(response, json);
             }
+            McpCommand::Presets => {
+                let response = client::send(&socket_path, Request::McpPresetList)?;
+                render::print(response, false);
+            }
+            McpCommand::AddPreset { name } => {
+                let response = client::send(&socket_path, Request::McpAddPreset { name })?;
+                render::print(response, false);
+            }
         },
         Command::Lsp { action } => match action {
             LspCommand::List { json } => {
@@ -675,6 +691,14 @@ fn main() -> anyhow::Result<()> {
             LspCommand::Inspect { name, json } => {
                 let response = client::send(&socket_path, Request::LspInspect { name })?;
                 render::print(response, json);
+            }
+            LspCommand::Presets => {
+                let response = client::send(&socket_path, Request::LspPresetList)?;
+                render::print(response, false);
+            }
+            LspCommand::AddPreset { name } => {
+                let response = client::send(&socket_path, Request::LspAddPreset { name })?;
+                render::print(response, false);
             }
         },
         Command::Tool { action } => match action {
