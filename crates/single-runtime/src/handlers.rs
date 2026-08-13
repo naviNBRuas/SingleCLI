@@ -1,5 +1,6 @@
 use crate::context::Context;
 use crate::{bootstrap, doctor, integrations, memory};
+use anyhow::Context as _;
 use single_agent_sdk::adapters::for_agent_with_custom;
 use single_core::registry::AgentDefinition;
 use single_protocol::{
@@ -198,14 +199,56 @@ fn dispatch(ctx: &Context, request: Request) -> anyhow::Result<ResponseData> {
         Request::MemoryStore { scope, source, project, agent, task, title, content, confidence, expires_in_seconds } => {
             let conn = memory_db(ctx)?;
             let id = memory::store(&conn, memory::NewMemory {
-                scope, source, project, agent, task, title, content, confidence, expires_in_seconds,
+                scope,
+                source,
+                project: project.clone(),
+                agent,
+                task,
+                title: title.clone(),
+                content: content.clone(),
+                confidence,
+                expires_in_seconds,
             })?;
+            // Best-effort: index for semantic search if both an embeddings
+            // key and SINGLE_QDRANT_URL are configured. Never fails the
+            // write itself — see embeddings.rs's module docs.
+            if let Some(url) = crate::qdrant_backend::resolve_url() {
+                if let Ok(vector) = crate::embeddings::embed(&format!("{title}\n{content}")) {
+                    let payload = serde_json::json!({ "memory_id": id, "project": project });
+                    let _ = crate::qdrant_backend::upsert_point(&url, "single_memory", id as u64, &vector, payload);
+                }
+            }
             Ok(ResponseData::MemoryId(id))
         }
         Request::MemorySearch { query, scope, project } => {
             let conn = memory_db(ctx)?;
             let entries = memory::search(&conn, &query, scope, project.as_deref())?;
             Ok(ResponseData::MemoryEntries(entries))
+        }
+        Request::MemorySearchSemantic { query, scope, project, limit } => {
+            let conn = memory_db(ctx)?;
+            let semantic: anyhow::Result<Vec<single_protocol::MemoryEntry>> = (|| {
+                let url = crate::qdrant_backend::resolve_url().context("SINGLE_QDRANT_URL is not set")?;
+                let vector = crate::embeddings::embed(&query)?;
+                let hits = crate::qdrant_backend::search(&url, "single_memory", &vector, limit)?;
+                let mut entries = Vec::new();
+                for hit in hits {
+                    let Some(memory_id) = hit.payload.get("memory_id").and_then(|v| v.as_i64()) else { continue };
+                    if let Some(entry) = memory::get(&conn, memory_id)? {
+                        if project.is_none() || entry.project == project {
+                            entries.push(entry);
+                        }
+                    }
+                }
+                Ok(entries)
+            })();
+            match semantic {
+                Ok(entries) => Ok(ResponseData::MemoryEntries(entries)),
+                Err(e) => {
+                    eprintln!("note: semantic memory search unavailable ({e:#}) — falling back to substring search");
+                    Ok(ResponseData::MemoryEntries(memory::search(&conn, &query, scope, project.as_deref())?))
+                }
+            }
         }
         Request::MemoryGet { id } => {
             let conn = memory_db(ctx)?;
@@ -238,6 +281,21 @@ fn dispatch(ctx: &Context, request: Request) -> anyhow::Result<ResponseData> {
                 anyhow::bail!("no unread note with id {id}");
             }
             Ok(ResponseData::Empty)
+        }
+        Request::DocumentIngest { path, project, title } => {
+            let conn = documents_db(ctx)?;
+            let doc = crate::documents::ingest(&conn, &ctx.dirs.documents_dir(), std::path::Path::new(&path), project, title)?;
+            Ok(ResponseData::Document(to_document_info(doc)))
+        }
+        Request::DocumentList { project } => {
+            let conn = documents_db(ctx)?;
+            let docs = crate::documents::list(&conn, project.as_deref())?.into_iter().map(to_document_info).collect();
+            Ok(ResponseData::Documents(docs))
+        }
+        Request::DocumentGet { id } => {
+            let conn = documents_db(ctx)?;
+            let doc = crate::documents::get(&conn, id)?.ok_or_else(|| anyhow::anyhow!("no document with id {id}"))?;
+            Ok(ResponseData::Document(to_document_info(doc)))
         }
         Request::ContextShow { cwd } => {
             Ok(ResponseData::Context(single_core::project_context::resolve(std::path::Path::new(&cwd))))
@@ -535,6 +593,25 @@ fn notes_db(ctx: &Context) -> anyhow::Result<rusqlite::Connection> {
     let conn = crate::state::open(&ctx.dirs.db_path())?;
     crate::notes::ensure_schema(&conn)?;
     Ok(conn)
+}
+
+fn documents_db(ctx: &Context) -> anyhow::Result<rusqlite::Connection> {
+    let conn = crate::state::open(&ctx.dirs.db_path())?;
+    crate::documents::ensure_schema(&conn)?;
+    memory::ensure_schema(&conn)?;
+    Ok(conn)
+}
+
+fn to_document_info(doc: crate::documents::DocumentInfo) -> single_protocol::DocumentInfo {
+    single_protocol::DocumentInfo {
+        id: doc.id,
+        title: doc.title,
+        project: doc.project,
+        source_path: doc.source_path,
+        extracted_chars: doc.extracted_chars,
+        memory_id: doc.memory_id,
+        ingested_at: doc.ingested_at,
+    }
 }
 
 fn redis_url() -> anyhow::Result<String> {

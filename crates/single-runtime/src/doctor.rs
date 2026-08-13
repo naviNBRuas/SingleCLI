@@ -105,5 +105,18 @@ pub fn run(ctx: &Context) -> DoctorReport {
         }
     }
 
+    for (binary, purpose) in [
+        ("pdftotext", "PDF text extraction for `single doc ingest` (poppler-utils)"),
+        ("pdftoppm", "scanned-PDF rasterization for `single doc ingest` (poppler-utils)"),
+        ("tesseract", "OCR for scanned PDFs/images for `single doc ingest`"),
+    ] {
+        let present = std::process::Command::new("which").arg(binary).output().map(|o| o.status.success()).unwrap_or(false);
+        checks.push(DoctorCheck {
+            name: format!("tool: {binary}"),
+            status: if present { CheckStatus::Ok } else { CheckStatus::Skipped },
+            detail: if present { "found".into() } else { format!("not installed — needed for {purpose}") },
+        });
+    }
+
     DoctorReport { checks }
 }

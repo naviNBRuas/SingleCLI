@@ -70,6 +70,11 @@ enum Command {
         #[command(subcommand)]
         action: NoteCommand,
     },
+    /// Ingest a document (PDF/image/text) into the shared memory store — see `single-runtime::documents`.
+    Doc {
+        #[command(subcommand)]
+        action: DocCommand,
+    },
     /// Show resolved project context (git state, project docs) for a directory.
     Context {
         /// Defaults to the current directory.
@@ -322,6 +327,13 @@ enum MemoryCommand {
         scope: Option<MemoryScopeArg>,
         #[arg(long)]
         project: Option<String>,
+        /// Embed the query and search by meaning instead of substring —
+        /// requires an embeddings key + SINGLE_QDRANT_URL (falls back to
+        /// substring search with a warning otherwise).
+        #[arg(long)]
+        semantic: bool,
+        #[arg(long, default_value = "10")]
+        limit: u64,
         #[arg(long)]
         json: bool,
     },
@@ -352,8 +364,10 @@ enum MemoryCommand {
         action: CacheCommand,
     },
     /// Vector store for RAG (Qdrant-backed). Requires SINGLE_QDRANT_URL.
-    /// Stores/searches pre-computed vectors — turning text into a vector
-    /// (embedding) isn't wired to a live provider yet, see docs/architecture.md.
+    /// Stores/searches pre-computed vectors directly — for text, use
+    /// `single memory search --semantic` instead, which embeds the query
+    /// for you (needs an embeddings key too, see `single secret set
+    /// embeddings:api_key`).
     Vector {
         #[command(subcommand)]
         action: VectorCommand,
@@ -386,6 +400,29 @@ enum NoteCommand {
         json: bool,
     },
     MarkRead { id: i64 },
+}
+
+#[derive(Subcommand)]
+enum DocCommand {
+    /// Extract text from a PDF/image/text file (OCR fallback for scanned PDFs) and store it as memory.
+    Ingest {
+        path: String,
+        #[arg(long)]
+        project: Option<String>,
+        #[arg(long)]
+        title: Option<String>,
+    },
+    List {
+        #[arg(long)]
+        project: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    Show {
+        id: i64,
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -864,12 +901,13 @@ fn main() -> anyhow::Result<()> {
                 })?;
                 render::print(response, false);
             }
-            MemoryCommand::Search { query, scope, project, json } => {
-                let response = client::send(&socket_path, Request::MemorySearch {
-                    query,
-                    scope: scope.map(Into::into),
-                    project,
-                })?;
+            MemoryCommand::Search { query, scope, project, semantic, limit, json } => {
+                let request = if semantic {
+                    Request::MemorySearchSemantic { query, scope: scope.map(Into::into), project, limit }
+                } else {
+                    Request::MemorySearch { query, scope: scope.map(Into::into), project }
+                };
+                let response = client::send(&socket_path, request)?;
                 render::print(response, json);
             }
             MemoryCommand::Get { id, json } => {
@@ -968,6 +1006,21 @@ fn main() -> anyhow::Result<()> {
             NoteCommand::MarkRead { id } => {
                 let response = client::send(&socket_path, Request::NoteMarkRead { id })?;
                 render::print(response, false);
+            }
+        },
+        Command::Doc { action } => match action {
+            DocCommand::Ingest { path, project, title } => {
+                let path = std::fs::canonicalize(&path).map(|p| p.display().to_string()).unwrap_or(path);
+                let response = client::send(&socket_path, Request::DocumentIngest { path, project, title })?;
+                render::print(response, false);
+            }
+            DocCommand::List { project, json } => {
+                let response = client::send(&socket_path, Request::DocumentList { project })?;
+                render::print(response, json);
+            }
+            DocCommand::Show { id, json } => {
+                let response = client::send(&socket_path, Request::DocumentGet { id })?;
+                render::print(response, json);
             }
         },
         Command::Context { cwd, json } => {

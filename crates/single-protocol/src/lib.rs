@@ -66,6 +66,12 @@ pub enum Request {
         expires_in_seconds: Option<i64>,
     },
     MemorySearch { query: String, scope: Option<MemoryScope>, project: Option<String> },
+    /// Embeds `query` and searches the vector store for the nearest
+    /// stored memory entries — real semantic search, not `LIKE` matching
+    /// (see `single-runtime::embeddings`/`qdrant_backend`). Falls back to
+    /// `MemorySearch`'s substring matching when no embeddings key and/or
+    /// `SINGLE_QDRANT_URL` are configured, rather than erroring.
+    MemorySearchSemantic { query: String, scope: Option<MemoryScope>, project: Option<String>, limit: u64 },
     MemoryGet { id: i64 },
     MemoryDelete { id: i64 },
     MemoryList { scope: Option<MemoryScope> },
@@ -79,6 +85,12 @@ pub enum Request {
     /// NULL` without marking anything read — see `NoteMarkRead`.
     NoteInbox { project: Option<String>, to_agent: String, unread_only: bool },
     NoteMarkRead { id: i64 },
+    /// Extracts text from a PDF/image/plain-text file (OCR fallback for
+    /// scanned PDFs) and stores it as a searchable memory entry — see
+    /// `single-runtime::documents`.
+    DocumentIngest { path: String, project: Option<String>, title: Option<String> },
+    DocumentList { project: Option<String> },
+    DocumentGet { id: i64 },
     ContextShow { cwd: String },
     TaskRun {
         description: String,
@@ -183,6 +195,8 @@ pub enum ResponseData {
     MemoryEntries(Vec<MemoryEntry>),
     NoteId(i64),
     Notes(Vec<AgentNote>),
+    Document(DocumentInfo),
+    Documents(Vec<DocumentInfo>),
     Context(ProjectContext),
     Task(TaskRecord),
     AccountProfile(AccountProfileInfo),
@@ -484,6 +498,20 @@ pub struct AgentNote {
     pub content: String,
     pub created_at: String,
     pub read_at: Option<String>,
+}
+
+/// An ingested document — see `single-runtime::documents`. The extracted
+/// text itself lives in the shared memory store (`memory_id` points at
+/// it); this only tracks the original file and OCR provenance.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DocumentInfo {
+    pub id: i64,
+    pub title: String,
+    pub project: Option<String>,
+    pub source_path: String,
+    pub extracted_chars: i64,
+    pub memory_id: i64,
+    pub ingested_at: String,
 }
 
 /// Task lifecycle status (spec section 17's TaskCreated/TaskStarted/

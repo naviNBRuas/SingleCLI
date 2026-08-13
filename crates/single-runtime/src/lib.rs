@@ -1,6 +1,8 @@
 pub mod bootstrap;
 pub mod context;
 pub mod doctor;
+pub mod documents;
+pub mod embeddings;
 pub mod handlers;
 pub mod integrations;
 pub mod knowledge_graph;

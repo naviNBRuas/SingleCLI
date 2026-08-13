@@ -193,6 +193,15 @@ fn print_data(data: ResponseData) {
                 println!("        {}", note.content);
             }
         }
+        ResponseData::Document(doc) => print_document(&doc),
+        ResponseData::Documents(docs) => {
+            if docs.is_empty() {
+                println!("(no documents)");
+            }
+            for doc in docs {
+                println!("#{:<5} {:<10} {:<30} {} chars  {}", doc.id, doc.project.as_deref().unwrap_or("-"), doc.title, doc.extracted_chars, doc.ingested_at);
+            }
+        }
         ResponseData::Context(ctx) => {
             println!("cwd:       {}", ctx.cwd);
             println!("repo root: {}", ctx.repo_root.as_deref().unwrap_or("(not a git repo)"));
@@ -407,6 +416,15 @@ fn print_memory_entry(entry: &single_protocol::MemoryEntry) {
     if let Some(expires) = &entry.expires_at {
         println!("  expires:    {expires}");
     }
+}
+
+fn print_document(doc: &single_protocol::DocumentInfo) {
+    println!("#{}", doc.id);
+    println!("  title:      {}", doc.title);
+    println!("  project:    {}", doc.project.as_deref().unwrap_or("-"));
+    println!("  source:     {}", doc.source_path);
+    println!("  extracted:  {} chars (memory #{})", doc.extracted_chars, doc.memory_id);
+    println!("  ingested:   {}", doc.ingested_at);
 }
 
 fn print_task(task: &single_protocol::TaskRecord) {

@@ -127,6 +127,14 @@ impl SingleDirs {
         self.artifacts_dir().join(format!("task-{id}.live.txt"))
     }
 
+    /// Where ingested documents' original files live, one subdirectory per
+    /// document id (see `single-runtime::documents`). The OCR'd/extracted
+    /// text itself is stored as an ordinary memory entry, not here — this
+    /// only holds the source file plus enough to track provenance.
+    pub fn documents_dir(&self) -> PathBuf {
+        self.state_dir().join("documents")
+    }
+
     /// Creates the subset of the directory tree Phase 1 needs. Never touches
     /// anything outside `self.root`.
     pub fn ensure_created(&self) -> Result<()> {
