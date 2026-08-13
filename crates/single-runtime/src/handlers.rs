@@ -184,6 +184,17 @@ fn dispatch(ctx: &Context, request: Request) -> anyhow::Result<ResponseData> {
             let dest = single_core::skills::sync_to_claude(&ctx.dirs.skills_dir(), &claude_skills_dir, &name)?;
             Ok(ResponseData::SkillSynced { path: dest.display().to_string() })
         }
+        Request::SkillStarterList => {
+            let starters = single_core::skills::starter_set()
+                .into_iter()
+                .map(|s| single_protocol::SkillStarterInfo { name: s.name.to_string(), description: s.description.to_string() })
+                .collect();
+            Ok(ResponseData::SkillStarters(starters))
+        }
+        Request::SkillInstallStarter { name } => {
+            single_core::skills::install_starter(&ctx.dirs.skills_dir(), &name)?;
+            Ok(ResponseData::Empty)
+        }
         Request::MemoryStore { scope, source, project, agent, task, title, content, confidence, expires_in_seconds } => {
             let conn = memory_db(ctx)?;
             let id = memory::store(&conn, memory::NewMemory {
@@ -212,10 +223,26 @@ fn dispatch(ctx: &Context, request: Request) -> anyhow::Result<ResponseData> {
             let conn = memory_db(ctx)?;
             Ok(ResponseData::MemoryEntries(memory::list(&conn, scope)?))
         }
+        Request::NoteLeave { project, from_agent, to_agent, topic, content } => {
+            let conn = notes_db(ctx)?;
+            let id = crate::notes::leave(&conn, project, &from_agent, to_agent.as_deref(), &topic, &content)?;
+            Ok(ResponseData::NoteId(id))
+        }
+        Request::NoteInbox { project, to_agent, unread_only } => {
+            let conn = notes_db(ctx)?;
+            Ok(ResponseData::Notes(crate::notes::inbox(&conn, project.as_deref(), &to_agent, unread_only)?))
+        }
+        Request::NoteMarkRead { id } => {
+            let conn = notes_db(ctx)?;
+            if !crate::notes::mark_read(&conn, id)? {
+                anyhow::bail!("no unread note with id {id}");
+            }
+            Ok(ResponseData::Empty)
+        }
         Request::ContextShow { cwd } => {
             Ok(ResponseData::Context(single_core::project_context::resolve(std::path::Path::new(&cwd))))
         }
-        Request::TaskRun { description, agent, cwd, use_worktree, account, real_home, timeout_secs } => {
+        Request::TaskRun { description, agent, cwd, use_worktree, account, real_home, no_memory_context, timeout_secs } => {
             let conn = task_db(ctx)?;
             let record = crate::task::run(&conn, ctx, crate::task::RunTaskOptions {
                 description: &description,
@@ -224,6 +251,7 @@ fn dispatch(ctx: &Context, request: Request) -> anyhow::Result<ResponseData> {
                 use_worktree,
                 account: account.as_deref(),
                 real_home,
+                no_memory_context,
                 timeout: std::time::Duration::from_secs(timeout_secs),
             })?;
             Ok(ResponseData::Task(record))
@@ -500,6 +528,12 @@ fn memory_db(ctx: &Context) -> anyhow::Result<rusqlite::Connection> {
 fn task_db(ctx: &Context) -> anyhow::Result<rusqlite::Connection> {
     let conn = crate::state::open(&ctx.dirs.db_path())?;
     crate::task::ensure_schema(&conn)?;
+    Ok(conn)
+}
+
+fn notes_db(ctx: &Context) -> anyhow::Result<rusqlite::Connection> {
+    let conn = crate::state::open(&ctx.dirs.db_path())?;
+    crate::notes::ensure_schema(&conn)?;
     Ok(conn)
 }
 

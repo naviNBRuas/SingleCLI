@@ -50,6 +50,10 @@ pub enum Request {
     /// Copies a skill into Claude Code's real skill directory
     /// (`~/.claude/skills/<name>/`) — see `single_core::skills::sync_to_claude`.
     SkillSyncClaude { name: String },
+    /// Lists the curated starter skills bundled with SingleCLI itself —
+    /// see `single_core::skills::starter_set`.
+    SkillStarterList,
+    SkillInstallStarter { name: String },
     MemoryStore {
         scope: Option<MemoryScope>,
         source: Option<MemorySource>,
@@ -65,6 +69,16 @@ pub enum Request {
     MemoryGet { id: i64 },
     MemoryDelete { id: i64 },
     MemoryList { scope: Option<MemoryScope> },
+    /// Leaves a note for another agent (or, with `to_agent: None`, any
+    /// agent) working the same project — a minimal inbox, not a live
+    /// stream: the recipient picks it up the next time it runs a task in
+    /// that project (see `single-runtime::task::run`'s prompt preamble).
+    NoteLeave { project: Option<String>, from_agent: String, to_agent: Option<String>, topic: String, content: String },
+    /// `to_agent` also matches notes left with `to_agent: None` (broadcast
+    /// to the project). `unread_only` additionally filters to `read_at IS
+    /// NULL` without marking anything read — see `NoteMarkRead`.
+    NoteInbox { project: Option<String>, to_agent: String, unread_only: bool },
+    NoteMarkRead { id: i64 },
     ContextShow { cwd: String },
     TaskRun {
         description: String,
@@ -80,6 +94,12 @@ pub enum Request {
         /// agent full access to your real credentials and files, an
         /// explicit choice, not the default posture.
         real_home: bool,
+        /// Skips injecting a relevant-memory + unread-notes preamble
+        /// ahead of the prompt (on by default — see `task::run`'s
+        /// context-injection step). Off by default: memory context helps
+        /// more often than it costs, but this stays available for prompts
+        /// that need to be sent exactly as given.
+        no_memory_context: bool,
         timeout_secs: u64,
     },
     TaskList,
@@ -155,11 +175,14 @@ pub enum ResponseData {
     SecretNames(Vec<String>),
     SecretValue(Option<String>),
     Skills(Vec<String>),
+    SkillStarters(Vec<SkillStarterInfo>),
     SkillContents(Vec<String>),
     SkillSynced { path: String },
     MemoryId(i64),
     MemoryEntry(MemoryEntry),
     MemoryEntries(Vec<MemoryEntry>),
+    NoteId(i64),
+    Notes(Vec<AgentNote>),
     Context(ProjectContext),
     Task(TaskRecord),
     AccountProfile(AccountProfileInfo),
@@ -447,6 +470,22 @@ pub struct MemoryEntry {
     pub expires_at: Option<String>,
 }
 
+/// A note one agent leaves for another (or for whoever picks up the
+/// project next) — a minimal inbox, not a live event stream. See
+/// `Request::NoteLeave`/`NoteInbox`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentNote {
+    pub id: i64,
+    pub project: Option<String>,
+    pub from_agent: String,
+    /// `None` = left for any agent working this project, not one in particular.
+    pub to_agent: Option<String>,
+    pub topic: String,
+    pub content: String,
+    pub created_at: String,
+    pub read_at: Option<String>,
+}
+
 /// Task lifecycle status (spec section 17's TaskCreated/TaskStarted/
 /// TaskCompleted/TaskFailed events, collapsed into a single current-state
 /// field — Phase 4 doesn't yet persist the full event sequence as
@@ -604,6 +643,12 @@ pub struct LspPresetInfo {
     pub command: String,
     pub args: Vec<String>,
     pub extensions: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkillStarterInfo {
+    pub name: String,
+    pub description: String,
 }
 
 /// A plugin registered across agents (spec section 29/41). `target` is

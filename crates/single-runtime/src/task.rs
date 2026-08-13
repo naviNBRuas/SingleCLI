@@ -145,7 +145,82 @@ pub struct RunTaskOptions<'a> {
     /// and files, which is exactly what the isolated-home default exists
     /// to avoid in the ordinary case.
     pub real_home: bool,
+    /// Skips the relevant-memory + unread-notes prompt preamble (on by
+    /// default — see `build_context_preamble`).
+    pub no_memory_context: bool,
     pub timeout: Duration,
+}
+
+/// Cap on the injected memory/notes preamble so it can't dwarf the actual
+/// prompt — same discipline as `orchestrate::MAX_HANDOFF_CHARS`.
+const MAX_CONTEXT_CHARS: usize = 4000;
+/// How many past memory entries get pulled into the preamble, at most.
+const MAX_CONTEXT_MEMORIES: usize = 5;
+
+/// Builds the prompt actually sent to the agent: relevant memory + any
+/// unread notes addressed to it in this project, prepended ahead of
+/// `description`. Best-effort and additive — a lookup failure here must
+/// never block the task itself, so errors are swallowed and just result in
+/// a smaller (or absent) preamble. Delivered notes are marked read as part
+/// of this call so the same note isn't re-delivered on the next run.
+/// Works for every agent, including ones with no MCP support, since it
+/// needs no cooperation from the agent CLI itself — the D2 MCP gateway's
+/// `memory_search`/`notes_read` tools are the complementary on-demand path
+/// for agents that pull context mid-session instead.
+fn build_context_preamble(conn: &Connection, description: &str, agent: &str, project: Option<&str>) -> String {
+    let mut sections = String::new();
+
+    let mut memories = Vec::new();
+    for keyword in significant_keywords(description) {
+        if let Ok(hits) = memory::search(conn, &keyword, None, project) {
+            for hit in hits {
+                if !memories.iter().any(|m: &single_protocol::MemoryEntry| m.id == hit.id) {
+                    memories.push(hit);
+                }
+            }
+        }
+    }
+    memories.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    memories.truncate(MAX_CONTEXT_MEMORIES);
+    if !memories.is_empty() {
+        sections.push_str("--- Relevant memory (from past sessions) ---\n");
+        for m in &memories {
+            sections.push_str(&format!("- [{}] {}: {}\n", m.created_at, m.title, crate::orchestrate::truncate(&m.content, 400)));
+        }
+        sections.push_str("--- end memory ---\n\n");
+    }
+
+    if let Ok(notes) = crate::notes::inbox(conn, project, agent, true) {
+        if !notes.is_empty() {
+            sections.push_str("--- Notes left by other agents ---\n");
+            for n in &notes {
+                sections.push_str(&format!("- from {} [{}]: {}\n", n.from_agent, n.topic, crate::orchestrate::truncate(&n.content, 400)));
+                let _ = crate::notes::mark_read(conn, n.id);
+            }
+            sections.push_str("--- end notes ---\n\n");
+        }
+    }
+
+    if sections.is_empty() {
+        return description.to_string();
+    }
+    format!("{}Task: {description}", crate::orchestrate::truncate(&sections, MAX_CONTEXT_CHARS))
+}
+
+/// Pulls a few distinctive words out of a task description to drive the
+/// (substring, not semantic — see `memory` module docs) memory search: too
+/// short/common a word matches everything and defeats the point of
+/// "relevant". Capped at 3 so `build_context_preamble` doesn't fan out
+/// into an unbounded number of searches.
+fn significant_keywords(description: &str) -> Vec<String> {
+    description
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| w.chars().count() >= 4)
+        .map(|w| w.to_lowercase())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .take(3)
+        .collect()
 }
 
 /// Runs a task to completion synchronously: creates the record, optionally
@@ -171,7 +246,7 @@ pub fn run(conn: &Connection, ctx: &Context, opts: RunTaskOptions) -> Result<Tas
         let Some(repo_root) = repo_ctx.repo_root else {
             finish(conn, id, TaskStatus::Failed, None, None, None, false, Some("not a git repository; --worktree requires one"))?;
             crate::state::record_event(conn, "task.failed", &format!("#{id} not a git repository"))?;
-            remember_failure(conn, id, opts.agent, opts.description, "not a git repository; --worktree requires one");
+            remember_failure(conn, id, opts.agent, None, opts.description, "not a git repository; --worktree requires one");
             return get(conn, id)?.context("task disappeared after being created");
         };
         let worktree_path = ctx.dirs.state_dir().join("worktrees").join(format!("task-{id}"));
@@ -179,13 +254,19 @@ pub fn run(conn: &Connection, ctx: &Context, opts: RunTaskOptions) -> Result<Tas
         if let Err(e) = single_core::worktree::add(Path::new(&repo_root), &worktree_path, &branch) {
             finish(conn, id, TaskStatus::Failed, None, None, None, false, Some(&format!("worktree setup failed: {e:#}")))?;
             crate::state::record_event(conn, "task.failed", &format!("#{id} worktree setup failed: {e:#}"))?;
-            remember_failure(conn, id, opts.agent, opts.description, &format!("worktree setup failed: {e:#}"));
+            remember_failure(conn, id, opts.agent, Some(repo_root.clone()), opts.description, &format!("worktree setup failed: {e:#}"));
             return get(conn, id)?.context("task disappeared after being created");
         }
         worktree_path
     } else {
         opts.cwd.to_path_buf()
     };
+
+    // Resolved once and reused by every `remember_failure` call below so a
+    // task's failures land in the same project scope its later memory
+    // searches will be filtered by (`single memory search --project ...`,
+    // and the memory/notes preamble task runs inject going forward).
+    let project = single_core::project_context::resolve(&run_cwd).repo_root;
 
     set_status(conn, id, TaskStatus::Running)?;
     crate::state::record_event(conn, "task.started", &format!("#{id} cwd={}", run_cwd.display()))?;
@@ -213,15 +294,21 @@ pub fn run(conn: &Connection, ctx: &Context, opts: RunTaskOptions) -> Result<Tas
             Err(detail) => {
                 finish(conn, id, TaskStatus::Failed, None, None, None, false, Some(&detail))?;
                 crate::state::record_event(conn, "task.failed", &format!("#{id} {detail}"))?;
-                remember_failure(conn, id, opts.agent, opts.description, &detail);
+                remember_failure(conn, id, opts.agent, project.clone(), opts.description, &detail);
                 return get(conn, id)?.context("task disappeared after being created");
             }
         }
     };
 
+    let prompt = if opts.no_memory_context {
+        opts.description.to_string()
+    } else {
+        build_context_preamble(conn, opts.description, opts.agent, project.as_deref())
+    };
+
     std::fs::create_dir_all(ctx.dirs.artifacts_dir())?;
     let live_output_path = ctx.dirs.task_live_output_path(id);
-    let outcome = adapter.run_prompt(&run_cwd, opts.description, home.as_deref(), Some(&live_output_path), opts.timeout);
+    let outcome = adapter.run_prompt(&run_cwd, &prompt, home.as_deref(), Some(&live_output_path), opts.timeout);
     let _ = std::fs::remove_file(&live_output_path); // superseded by the final artifact below; best-effort cleanup
 
     let worktree_path_str = opts.use_worktree.then(|| run_cwd.display().to_string());
@@ -245,13 +332,13 @@ pub fn run(conn: &Connection, ctx: &Context, opts: RunTaskOptions) -> Result<Tas
             )?;
             crate::state::record_event(conn, if outcome.success { "task.completed" } else { "task.failed" }, &format!("#{id} {summary}"))?;
             if !outcome.success {
-                remember_failure(conn, id, opts.agent, opts.description, &summary);
+                remember_failure(conn, id, opts.agent, project.clone(), opts.description, &summary);
             }
         }
         Err(e) => {
             finish(conn, id, TaskStatus::Failed, worktree_path_str.as_deref(), None, None, false, Some(&format!("{e:#}")))?;
             crate::state::record_event(conn, "task.failed", &format!("#{id} {e:#}"))?;
-            remember_failure(conn, id, opts.agent, opts.description, &format!("{e:#}"));
+            remember_failure(conn, id, opts.agent, project.clone(), opts.description, &format!("{e:#}"));
         }
     }
 
@@ -265,11 +352,12 @@ pub fn run(conn: &Connection, ctx: &Context, opts: RunTaskOptions) -> Result<Tas
 /// past failures for whoever — human or agent — looks next. Best-effort:
 /// a memory-write failure must never mask the real task failure it's
 /// trying to record, so errors here are swallowed, not propagated.
-fn remember_failure(conn: &Connection, id: i64, agent: &str, description: &str, detail: &str) {
+fn remember_failure(conn: &Connection, id: i64, agent: &str, project: Option<String>, description: &str, detail: &str) {
     let _ = memory::ensure_schema(conn);
     let _ = memory::store(conn, memory::NewMemory {
         scope: Some(MemoryScope::Project),
         source: Some(MemorySource::ToolOutput),
+        project,
         agent: Some(agent.to_string()),
         task: Some(id.to_string()),
         title: format!("task #{id} failed ({agent})"),
@@ -301,7 +389,46 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         ensure_schema(&conn).unwrap();
         crate::state::ensure_events_schema(&conn).unwrap();
+        memory::ensure_schema(&conn).unwrap();
+        crate::notes::ensure_schema(&conn).unwrap();
         conn
+    }
+
+    #[test]
+    fn context_preamble_includes_relevant_memory_and_marks_notes_read() {
+        let conn = test_conn();
+        memory::store(&conn, memory::NewMemory {
+            scope: Some(MemoryScope::Project),
+            project: Some("proj".into()),
+            title: "auth bug".into(),
+            content: "root cause was a token refresh race".into(),
+            ..Default::default()
+        })
+        .unwrap();
+        let note_id = crate::notes::leave(&conn, Some("proj".into()), "claude", Some("codex"), "heads up", "watch the flaky test").unwrap();
+
+        let prompt = build_context_preamble(&conn, "fix the token refresh bug", "codex", Some("proj"));
+        assert!(prompt.contains("root cause was a token refresh race"));
+        assert!(prompt.contains("watch the flaky test"));
+        assert!(prompt.ends_with("Task: fix the token refresh bug"));
+
+        let note = crate::notes::get(&conn, note_id).unwrap().unwrap();
+        assert!(note.read_at.is_some(), "a note delivered in the preamble should be marked read");
+    }
+
+    #[test]
+    fn context_preamble_is_plain_description_when_nothing_relevant_exists() {
+        let conn = test_conn();
+        let prompt = build_context_preamble(&conn, "some totally unrelated task", "codex", None);
+        assert_eq!(prompt, "some totally unrelated task");
+    }
+
+    #[test]
+    fn significant_keywords_filters_short_words_and_dedupes() {
+        let words = significant_keywords("fix the auth auth bug in login flow");
+        assert!(words.contains(&"auth".to_string()));
+        assert!(words.contains(&"login".to_string()));
+        assert!(!words.iter().any(|w| w == "the" || w == "fix" || w == "bug"));
     }
 
     #[test]
@@ -342,7 +469,7 @@ mod tests {
         if !single_agent_sdk::adapters::for_agent("claude").unwrap().discover().detected {
             return;
         }
-        let opts = RunTaskOptions { description: "x", agent: "claude", cwd: dir.path(), use_worktree: true, account: None, real_home: false, timeout: Duration::from_secs(1) };
+        let opts = RunTaskOptions { description: "x", agent: "claude", cwd: dir.path(), use_worktree: true, account: None, real_home: false, no_memory_context: false, timeout: Duration::from_secs(1) };
         let task = run(&conn, &ctx, opts).unwrap();
         assert_eq!(task.status, TaskStatus::Failed);
         assert!(task.summary.unwrap().contains("not a git repository"));
@@ -356,6 +483,41 @@ mod tests {
     }
 
     fn task_run_result(conn: &Connection, ctx: &Context, cwd: &Path, agent: &str) -> Result<TaskRecord> {
-        run(conn, ctx, RunTaskOptions { description: "x", agent, cwd, use_worktree: false, account: None, real_home: false, timeout: Duration::from_secs(1) })
+        run(conn, ctx, RunTaskOptions { description: "x", agent, cwd, use_worktree: false, account: None, real_home: false, no_memory_context: false, timeout: Duration::from_secs(1) })
+    }
+
+    #[test]
+    fn remember_failure_records_the_resolved_project_when_one_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("SINGLE_CONFIG_DIR", dir.path());
+        let conn = test_conn();
+        let dirs = single_core::SingleDirs::from_root(dir.path().to_path_buf());
+        dirs.ensure_created().unwrap();
+        let ctx = Context { dirs, resolved: single_core::ResolvedConfig::default(), registry: single_core::builtin_registry() };
+
+        if !single_agent_sdk::adapters::for_agent("claude").unwrap().discover().detected {
+            return;
+        }
+        // Run with cwd inside this crate's own (real) git repo, and a
+        // nonexistent account so home materialization fails before any
+        // subprocess spawns — exercises remember_failure's project
+        // threading without needing a real agent invocation.
+        let this_repo = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let opts = RunTaskOptions {
+            description: "x",
+            agent: "claude",
+            cwd: &this_repo,
+            use_worktree: false,
+            account: Some("definitely-not-a-real-account"),
+            real_home: false,
+            no_memory_context: false,
+            timeout: Duration::from_secs(1),
+        };
+        let task = run(&conn, &ctx, opts).unwrap();
+        assert_eq!(task.status, TaskStatus::Failed);
+
+        let memories = memory::search(&conn, "definitely-not-a-real-account", None, None).unwrap();
+        assert_eq!(memories.len(), 1);
+        assert!(memories[0].project.is_some(), "expected the resolved repo root to be recorded as the memory's project");
     }
 }

@@ -95,6 +95,68 @@ pub fn sync_to_claude(skills_dir: &Path, claude_skills_dir: &Path, name: &str) -
     Ok(dest)
 }
 
+/// A small curated starter set — real, original write-ups of well-known
+/// practices (not a redistribution of any other project's skill content,
+/// to sidestep any licensing question), embedded at compile time so a
+/// fresh install has something useful immediately without a network fetch
+/// (spec section 14's marketplace/network fetch is still later-phase work,
+/// same as `install`'s doc comment above says).
+pub struct StarterSkill {
+    pub name: &'static str,
+    pub description: &'static str,
+    content: &'static str,
+}
+
+pub fn starter_set() -> Vec<StarterSkill> {
+    vec![
+        StarterSkill {
+            name: "tdd-workflow",
+            description: "Red-green-refactor: write the failing test before the implementation.",
+            content: include_str!("../skills-starter/tdd-workflow/SKILL.md"),
+        },
+        StarterSkill {
+            name: "systematic-debugging",
+            description: "Find the root cause before writing a fix, instead of patching the first symptom found.",
+            content: include_str!("../skills-starter/systematic-debugging/SKILL.md"),
+        },
+        StarterSkill {
+            name: "git-commit-conventions",
+            description: "Commit messages that explain why, not just what — for the reader six months from now.",
+            content: include_str!("../skills-starter/git-commit-conventions/SKILL.md"),
+        },
+        StarterSkill {
+            name: "code-review-checklist",
+            description: "Review for correctness, edge cases, and blast radius — not style.",
+            content: include_str!("../skills-starter/code-review-checklist/SKILL.md"),
+        },
+        StarterSkill {
+            name: "security-review-basics",
+            description: "A first-pass checklist for input handling, auth, secrets, and injection risk.",
+            content: include_str!("../skills-starter/security-review-basics/SKILL.md"),
+        },
+    ]
+}
+
+pub fn starter(name: &str) -> Option<StarterSkill> {
+    starter_set().into_iter().find(|s| s.name == name)
+}
+
+/// Installs a starter skill by name into `skills_dir/<name>/SKILL.md` —
+/// same refuse-to-overwrite behavior as `install`, since this goes through
+/// the same directory layout.
+pub fn install_starter(skills_dir: &Path, name: &str) -> Result<PathBuf> {
+    let Some(starter) = starter(name) else {
+        bail!("no starter skill named '{name}'");
+    };
+    let dest_dir = skills_dir.join(name);
+    if dest_dir.exists() {
+        bail!("skill '{name}' already exists at {}; remove it first", dest_dir.display());
+    }
+    std::fs::create_dir_all(&dest_dir)?;
+    std::fs::write(dest_dir.join("SKILL.md"), starter.content)?;
+    Ok(dest_dir)
+}
+
 fn copy_dir_recursive(source: &Path, dest: &Path) -> Result<()> {
     std::fs::create_dir_all(dest)?;
     for entry in std::fs::read_dir(source)? {
@@ -182,6 +244,28 @@ mod tests {
             .filter(|e| e.file_name().to_string_lossy().starts_with("greeting.bak-"))
             .collect();
         assert_eq!(backups.len(), 1);
+    }
+
+    #[test]
+    fn starter_set_has_real_nonempty_content_and_installs_cleanly() {
+        let names: Vec<_> = starter_set().iter().map(|s| s.name).collect();
+        for expected in ["tdd-workflow", "systematic-debugging", "git-commit-conventions", "code-review-checklist", "security-review-basics"]
+        {
+            assert!(names.contains(&expected), "missing starter skill {expected}");
+        }
+        for s in starter_set() {
+            assert!(!s.content.trim().is_empty(), "{} has empty content", s.name);
+            assert!(!s.description.is_empty(), "{} has no description", s.name);
+        }
+        assert!(starter("nonexistent").is_none());
+
+        let root = tempfile::tempdir().unwrap();
+        let skills_dir = root.path().join("skills");
+        let dest = install_starter(&skills_dir, "tdd-workflow").unwrap();
+        let content = std::fs::read_to_string(dest.join("SKILL.md")).unwrap();
+        assert!(content.contains("TDD Workflow"));
+
+        assert!(install_starter(&skills_dir, "tdd-workflow").is_err(), "should refuse to overwrite");
     }
 
     #[test]

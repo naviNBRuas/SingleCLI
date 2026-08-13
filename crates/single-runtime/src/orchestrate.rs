@@ -67,6 +67,7 @@ pub fn run(conn: &Connection, ctx: &Context, opts: OrchestrateOptions) -> Result
             use_worktree: false,
             account: None,
             real_home: opts.real_home,
+            no_memory_context: false,
             timeout: opts.timeout,
         })?;
 
@@ -120,7 +121,7 @@ fn build_prompt(goal: &str, previous: Option<&(String, String)>) -> String {
     }
 }
 
-fn truncate(s: &str, max_chars: usize) -> String {
+pub(crate) fn truncate(s: &str, max_chars: usize) -> String {
     if s.chars().count() <= max_chars {
         return s.to_string();
     }

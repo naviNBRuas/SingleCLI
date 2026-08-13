@@ -64,6 +64,12 @@ enum Command {
         #[command(subcommand)]
         action: MemoryCommand,
     },
+    /// Leave/read notes between agents working the same project — a
+    /// minimal inbox, not a live stream (see `single-runtime::notes`).
+    Note {
+        #[command(subcommand)]
+        action: NoteCommand,
+    },
     /// Show resolved project context (git state, project docs) for a directory.
     Context {
         /// Defaults to the current directory.
@@ -281,6 +287,10 @@ enum SkillCommand {
     /// Copies a skill into Claude Code's real skill directory
     /// (~/.claude/skills/<name>/) — backs up any existing same-named directory first.
     SyncClaude { name: String },
+    /// List the curated starter skills bundled with SingleCLI.
+    Starters,
+    /// Install a bundled starter skill by name (see `single skill starters`).
+    InstallStarter { name: String },
 }
 
 #[derive(Subcommand)]
@@ -348,6 +358,34 @@ enum MemoryCommand {
         #[command(subcommand)]
         action: VectorCommand,
     },
+}
+
+#[derive(Subcommand)]
+enum NoteCommand {
+    /// Leave a note for another agent (or, with no --to, any agent) working this project.
+    Leave {
+        content: String,
+        #[arg(long)]
+        from: String,
+        #[arg(long)]
+        to: Option<String>,
+        #[arg(long, default_value = "general")]
+        topic: String,
+        #[arg(long)]
+        project: Option<String>,
+    },
+    /// Read notes addressed to an agent (including broadcast notes) for a project.
+    Inbox {
+        #[arg(long)]
+        to: String,
+        #[arg(long)]
+        project: Option<String>,
+        #[arg(long)]
+        unread_only: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    MarkRead { id: i64 },
 }
 
 #[derive(Subcommand)]
@@ -586,6 +624,10 @@ enum TaskCommand {
         /// and files; only use this when that's exactly what you want.
         #[arg(long)]
         real_home: bool,
+        /// Skip prepending relevant memory + unread agent notes to the prompt
+        /// (on by default — see `single-runtime::task::build_context_preamble`).
+        #[arg(long)]
+        no_memory_context: bool,
         #[arg(long, default_value = "300")]
         timeout_secs: u64,
         #[arg(long)]
@@ -798,6 +840,14 @@ fn main() -> anyhow::Result<()> {
                 let response = client::send(&socket_path, Request::SkillSyncClaude { name })?;
                 render::print(response, false);
             }
+            SkillCommand::Starters => {
+                let response = client::send(&socket_path, Request::SkillStarterList)?;
+                render::print(response, false);
+            }
+            SkillCommand::InstallStarter { name } => {
+                let response = client::send(&socket_path, Request::SkillInstallStarter { name })?;
+                render::print(response, false);
+            }
         },
         Command::Memory { action } => match action {
             MemoryCommand::Store { title, content, scope, source, project, agent, task, confidence, expires_in } => {
@@ -906,6 +956,20 @@ fn main() -> anyhow::Result<()> {
                 }
             },
         },
+        Command::Note { action } => match action {
+            NoteCommand::Leave { content, from, to, topic, project } => {
+                let response = client::send(&socket_path, Request::NoteLeave { project, from_agent: from, to_agent: to, topic, content })?;
+                render::print(response, false);
+            }
+            NoteCommand::Inbox { to, project, unread_only, json } => {
+                let response = client::send(&socket_path, Request::NoteInbox { project, to_agent: to, unread_only })?;
+                render::print(response, json);
+            }
+            NoteCommand::MarkRead { id } => {
+                let response = client::send(&socket_path, Request::NoteMarkRead { id })?;
+                render::print(response, false);
+            }
+        },
         Command::Context { cwd, json } => {
             let cwd = cwd.unwrap_or_else(|| ".".to_string());
             let cwd = std::fs::canonicalize(&cwd).map(|p| p.display().to_string()).unwrap_or(cwd);
@@ -913,7 +977,7 @@ fn main() -> anyhow::Result<()> {
             render::print(response, json);
         }
         Command::Task { action } => match action {
-            TaskCommand::Run { description, agent, cwd, worktree, account, real_home, timeout_secs, json } => {
+            TaskCommand::Run { description, agent, cwd, worktree, account, real_home, no_memory_context, timeout_secs, json } => {
                 let cwd = cwd.unwrap_or_else(|| ".".to_string());
                 let cwd = std::fs::canonicalize(&cwd).map(|p| p.display().to_string()).unwrap_or(cwd);
                 if real_home {
@@ -926,6 +990,7 @@ fn main() -> anyhow::Result<()> {
                     use_worktree: worktree,
                     account,
                     real_home,
+                    no_memory_context,
                     timeout_secs,
                 })?;
                 render::print(response, json);

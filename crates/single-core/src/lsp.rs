@@ -87,8 +87,23 @@ pub fn presets() -> Vec<LspPreset> {
         LspPreset { name: "clangd", command: "clangd", args: &[], extensions: &[".c", ".h", ".cpp", ".hpp", ".cc"] },
         LspPreset { name: "bash", command: "bash-language-server", args: &["start"], extensions: &[".sh", ".bash"] },
         LspPreset { name: "yaml", command: "yaml-language-server", args: &["--stdio"], extensions: &[".yaml", ".yml"] },
-        LspPreset { name: "terraform", command: "terraform-ls", args: &["serve"], extensions: &[".tf", ".tfvars"] },
+        // terraform-ls handles plain HCL too (it's fundamentally an HCL
+        // parser), not just .tf/.tfvars — widened per a direct request
+        // rather than splitting into a separate unverified "hcl" preset.
+        LspPreset { name: "terraform", command: "terraform-ls", args: &["serve"], extensions: &[".tf", ".tfvars", ".hcl"] },
         LspPreset { name: "json", command: "vscode-json-language-server", args: &["--stdio"], extensions: &[".json"] },
+        // Below: real, documented invocations (each tool's own README/
+        // install docs), NOT confirmed via a live `--help` on this
+        // machine the way the entries above were — none of these binaries
+        // are installed here. Flagged explicitly rather than silently
+        // claiming the same verification level; run `<command> --help`
+        // yourself before relying on one if it matters.
+        LspPreset { name: "php", command: "intelephense", args: &["--stdio"], extensions: &[".php"] },
+        LspPreset { name: "html", command: "vscode-html-language-server", args: &["--stdio"], extensions: &[".html", ".htm"] },
+        LspPreset { name: "css", command: "vscode-css-language-server", args: &["--stdio"], extensions: &[".css", ".scss", ".less"] },
+        LspPreset { name: "tailwindcss", command: "tailwindcss-language-server", args: &["--stdio"], extensions: &[".html", ".jsx", ".tsx", ".vue"] },
+        LspPreset { name: "asm", command: "asm-lsp", args: &[], extensions: &[".asm", ".s", ".S"] },
+        LspPreset { name: "solidity", command: "nomicfoundation-solidity-language-server", args: &["--stdio"], extensions: &[".sol"] },
     ]
 }
 
@@ -196,12 +211,21 @@ mod tests {
     #[test]
     fn presets_include_defaults_plus_extras_and_resolve_by_name() {
         let names: Vec<_> = presets().iter().map(|p| p.name).collect();
-        for expected in ["rust-analyzer", "pyright", "typescript", "gopls", "dockerfile", "clangd", "bash", "yaml", "terraform", "json"] {
+        for expected in [
+            "rust-analyzer", "pyright", "typescript", "gopls", "dockerfile", "clangd", "bash", "yaml", "terraform", "json",
+            "php", "html", "css", "tailwindcss", "asm", "solidity",
+        ] {
             assert!(names.contains(&expected), "missing preset {expected}");
         }
         assert!(preset("nonexistent").is_none());
         let spec = preset("clangd").unwrap().to_spec();
         assert_eq!(spec.command, "clangd");
         assert!(spec.enabled);
+    }
+
+    #[test]
+    fn terraform_preset_also_covers_plain_hcl_files() {
+        let spec = preset("terraform").unwrap().to_spec();
+        assert!(spec.extensions.contains(&".hcl".to_string()));
     }
 }

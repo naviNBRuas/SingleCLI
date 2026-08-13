@@ -160,6 +160,11 @@ fn print_data(data: ResponseData) {
             }
         }
         ResponseData::SkillSynced { path } => println!("synced to {path}"),
+        ResponseData::SkillStarters(starters) => {
+            for s in starters {
+                println!("{:<24} {}", s.name, s.description);
+            }
+        }
         ResponseData::MemoryId(id) => println!("stored as #{id}"),
         ResponseData::MemoryEntry(entry) => print_memory_entry(&entry),
         ResponseData::MemoryEntries(entries) => {
@@ -174,6 +179,18 @@ fn print_data(data: ResponseData) {
                     entry.created_at,
                     entry.title
                 );
+            }
+        }
+        ResponseData::NoteId(id) => println!("left as note #{id}"),
+        ResponseData::Notes(notes) => {
+            if notes.is_empty() {
+                println!("(no notes)");
+            }
+            for note in notes {
+                let read = if note.read_at.is_some() { " (read)" } else { "" };
+                let to = note.to_agent.as_deref().unwrap_or("*");
+                println!("#{:<5} {} -> {:<10} [{}]{read}  {}", note.id, note.from_agent, to, note.topic, note.created_at);
+                println!("        {}", note.content);
             }
         }
         ResponseData::Context(ctx) => {
