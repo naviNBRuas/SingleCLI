@@ -5,7 +5,7 @@ mod update;
 
 use clap::{Parser, Subcommand};
 use single_core::SingleDirs;
-use single_protocol::{LspServerSpec, McpServerSpec, Request, RiskLevel, ToolSpec};
+use single_protocol::{LspServerSpec, McpServerSpec, Request, Response, RiskLevel, ToolSpec};
 use std::collections::BTreeMap;
 
 #[derive(Parser)]
@@ -632,7 +632,7 @@ fn main() -> anyhow::Result<()> {
     // entirely locally: no socket round-trip needed to resolve the
     // isolated home path either (single_core::agent_home is pure logic).
     if let Command::Agent { action: AgentCommand::Login { name } } = &command {
-        return run_agent_login(&dirs, name);
+        return run_agent_login(&dirs, &socket_path, name);
     }
 
     match command {
@@ -1093,7 +1093,7 @@ fn run_update(channel: &str, check_only: bool, yes: bool) -> anyhow::Result<()> 
     Ok(())
 }
 
-fn run_agent_login(dirs: &SingleDirs, agent: &str) -> anyhow::Result<()> {
+fn run_agent_login(dirs: &SingleDirs, socket_path: &std::path::Path, agent: &str) -> anyhow::Result<()> {
     let Some(adapter) = single_agent_sdk::adapters::for_agent_with_custom(agent, &dirs.agents_dir()) else {
         anyhow::bail!("unknown agent: {agent}");
     };
@@ -1104,6 +1104,44 @@ fn run_agent_login(dirs: &SingleDirs, agent: &str) -> anyhow::Result<()> {
     let home = single_core::agent_home::ensure_bootstrapped(&dirs.homes_dir(), &real_home, agent)?;
     println!("logging in to {agent} (isolated home: {})...", home.display());
     adapter.login(&home)?;
-    println!("done. run `single doctor` or `single agent inspect {agent}` to confirm.");
+    println!("done.");
+
+    auto_capture_after_login(dirs, socket_path, &home, agent);
+
+    println!("run `single doctor` or `single agent inspect {agent}` to confirm.");
     Ok(())
+}
+
+/// After a successful `single agent login`, registers this login as a
+/// named account automatically — otherwise it only appears in `single
+/// account list`/the TUI Accounts tab after a separate manual `single
+/// account capture` call, which is easy to forget and was the source of
+/// "I logged in but don't see an account" confusion. Best-effort: login
+/// itself already succeeded, so a capture failure here (e.g. an agent with
+/// no account-switching support, like opencode) is only a warning.
+fn auto_capture_after_login(dirs: &SingleDirs, socket_path: &std::path::Path, home: &std::path::Path, agent: &str) {
+    let label = single_core::account::derive_label(home, agent);
+    let existing = single_core::account::list(&dirs.accounts_dir(), Some(agent)).unwrap_or_default();
+
+    let base_name = label.clone().unwrap_or_else(|| {
+        let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+        format!("auto-{secs}")
+    });
+    let slug: String =
+        base_name.chars().map(|c| if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') { c } else { '-' }).collect();
+    let mut name = slug.clone();
+    let mut suffix = 2;
+    while existing.iter().any(|p| p.name == name) {
+        name = format!("{slug}-{suffix}");
+        suffix += 1;
+    }
+
+    match client::send(socket_path, Request::AccountCapture { agent: agent.to_string(), name: name.clone(), label: label.clone() }) {
+        Ok(Response::Ok { .. }) => println!("captured as: {}", label.unwrap_or(name)),
+        Ok(Response::Error { message }) => {
+            eprintln!("note: login succeeded, but auto-capturing an account failed: {message}");
+            eprintln!("      run `single account capture {agent} <name>` manually if you want this login saved as an account.");
+        }
+        Err(e) => eprintln!("note: login succeeded, but auto-capturing an account failed: {e:#}"),
+    }
 }

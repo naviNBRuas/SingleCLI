@@ -124,6 +124,7 @@ pub fn placeholder_agent_info(def: &CustomAgentFile) -> AgentInfo {
         capabilities: agent_def.capabilities,
         config_paths: agent_def.config_paths,
         notes: agent_def.notes,
+        authenticated: single_protocol::AuthState::Unsupported,
     }
 }
 

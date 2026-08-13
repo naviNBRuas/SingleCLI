@@ -236,6 +236,30 @@ pub struct AgentInfo {
     /// Free-text caveat surfaced in `doctor`/`agent inspect`, e.g. when an
     /// entry doesn't fit the coding-agent model cleanly (see `perplexity`).
     pub notes: Option<String>,
+    /// Auto-detected presence of *some* live login for this agent, checked
+    /// across both SingleCLI's isolated home and the real ambient home. See
+    /// `AuthState` docs for how this differs from `AccountProfileInfo::status`.
+    #[serde(default)]
+    pub authenticated: AuthState,
+}
+
+/// Whether *some* live login is currently present for an agent, auto-
+/// detected by checking for the agent's credential file(s) — no notion of
+/// *which* account, just "is anything logged in right now". Distinct from
+/// `AccountProfileInfo::status` (`AccountStatus`), which is a manually-set
+/// usability flag on one *named, captured* profile and is never auto-
+/// detected. `authenticated` answers "can I run this agent at all";
+/// `status` answers "is this particular saved account currently usable".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AuthState {
+    #[default]
+    NotAuthenticated,
+    Authenticated,
+    /// Account-switching/credential-detection isn't implemented for this
+    /// agent (e.g. opencode, perplexity) — see `single-core::account`'s
+    /// module docs for why.
+    Unsupported,
 }
 
 /// Describes how an agent CLI is (or would be) installed. Distinct from
@@ -483,7 +507,8 @@ pub struct AccountProfileInfo {
     /// stable API across claude/codex/agy for querying live quota/rate-
     /// limit state, so this is never auto-detected — the user (or a task
     /// failure surfaced elsewhere) sets it, and SingleCLI just remembers
-    /// and displays it.
+    /// and displays it. See `AuthState` (on `AgentInfo`) for the auto-
+    /// detected "is anything logged in" question this does NOT answer.
     #[serde(default)]
     pub status: AccountStatus,
 }

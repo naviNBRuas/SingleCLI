@@ -3,7 +3,7 @@ use crate::{bootstrap, doctor, integrations, memory};
 use single_agent_sdk::adapters::for_agent_with_custom;
 use single_core::registry::AgentDefinition;
 use single_protocol::{
-    AgentInfo, McpServerInfo, Request, Response, ResponseData, RuntimeStatus,
+    AgentInfo, AuthState, McpServerInfo, Request, Response, ResponseData, RuntimeStatus,
 };
 
 pub fn handle(ctx: &Context, request: Request) -> Response {
@@ -250,13 +250,15 @@ fn dispatch(ctx: &Context, request: Request) -> anyhow::Result<ResponseData> {
             Ok(ResponseData::OrchestrateResult(records))
         }
         Request::AccountCapture { agent, name, label } => {
-            // Captures from this agent's SingleCLI-managed home, not the
-            // real ~/.claude etc. — that's the home single actually runs
-            // the agent against (single_core::agent_home docs), bootstrapped
-            // here if this is the first account operation for this agent.
+            // Captures from this agent's SingleCLI-managed home first,
+            // bootstrapped here if this is the first account operation for
+            // this agent — falling back to the real ~/.claude etc. when the
+            // user logged in via the vendor CLI directly instead of `single
+            // agent login` (single_core::account::capture syncs the
+            // isolated home from the real one in that case).
             let real_home = integrations::home_dir()?;
             let home = single_core::agent_home::ensure_bootstrapped(&ctx.dirs.homes_dir(), &real_home, &agent)?;
-            let info = single_core::account::capture(&ctx.dirs.accounts_dir(), &home, &agent, &name, label)?;
+            let info = single_core::account::capture(&ctx.dirs.accounts_dir(), &home, &real_home, &agent, &name, label)?;
             crate::state::open(&ctx.dirs.db_path())
                 .and_then(|conn| crate::state::record_event(&conn, "account.captured", &format!("{agent}/{name}")))
                 .ok();
@@ -536,6 +538,10 @@ fn status(ctx: &Context) -> RuntimeStatus {
 
 fn to_agent_info(def: &AgentDefinition, ctx: &Context) -> AgentInfo {
     let discovery = for_agent_with_custom(&def.name, &ctx.dirs.agents_dir()).map(|a| a.discover());
+    let isolated_home = ctx.dirs.homes_dir().join(&def.name);
+    let authenticated = integrations::home_dir()
+        .map(|real_home| single_core::account::is_authenticated(&isolated_home, &real_home, &def.name))
+        .unwrap_or(AuthState::NotAuthenticated);
     AgentInfo {
         name: def.name.clone(),
         adapter: def.adapter.clone(),
@@ -548,5 +554,6 @@ fn to_agent_info(def: &AgentDefinition, ctx: &Context) -> AgentInfo {
         capabilities: def.capabilities,
         config_paths: def.config_paths.clone(),
         notes: def.notes.clone(),
+        authenticated,
     }
 }

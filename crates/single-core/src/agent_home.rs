@@ -73,8 +73,19 @@ fn copy_dir_recursive(source: &Path, dest: &Path) -> Result<()> {
     std::fs::create_dir_all(dest)?;
     for entry in std::fs::read_dir(source)? {
         let entry = entry?;
+        let file_type = entry.file_type()?;
+        // Symlinks (e.g. a `lib64 -> lib` venv link under a plugin's own
+        // state dir) are skipped rather than followed: `fs::copy` can't
+        // handle a symlink pointing at a directory (errors loudly), and
+        // resolving+copying its target risks pulling in something outside
+        // this agent's real config/state paths entirely — not what
+        // `real_paths_for` promises to bootstrap. Bootstrap is best-effort
+        // config seeding, not a full mirror.
+        if file_type.is_symlink() {
+            continue;
+        }
         let dest_path = dest.join(entry.file_name());
-        if entry.file_type()?.is_dir() {
+        if file_type.is_dir() {
             copy_dir_recursive(&entry.path(), &dest_path)?;
         } else {
             std::fs::copy(entry.path(), &dest_path)?;
@@ -112,5 +123,26 @@ mod tests {
         let isolated = ensure_bootstrapped(homes_root.path(), real_home.path(), "agy").unwrap();
         assert!(isolated.exists());
         assert_eq!(std::fs::read_dir(&isolated).unwrap().count(), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bootstrap_skips_symlinks_instead_of_erroring_on_a_dir_symlink() {
+        // Reproduces a real case: Claude Code's own security-plugin venv
+        // leaves a `lib64 -> lib` symlink under `~/.claude/`, which used to
+        // make `fs::copy` fail outright ("neither a regular file nor a
+        // symlink to a regular file") and abort the whole bootstrap.
+        use std::os::unix::fs::symlink;
+
+        let real_home = tempfile::tempdir().unwrap();
+        std::fs::write(real_home.path().join(".claude.json"), r#"{}"#).unwrap();
+        std::fs::create_dir_all(real_home.path().join(".claude/venv/lib")).unwrap();
+        std::fs::write(real_home.path().join(".claude/.credentials.json"), r#"{"token":"a"}"#).unwrap();
+        symlink(real_home.path().join(".claude/venv/lib"), real_home.path().join(".claude/venv/lib64")).unwrap();
+
+        let homes_root = tempfile::tempdir().unwrap();
+        let isolated = ensure_bootstrapped(homes_root.path(), real_home.path(), "claude").unwrap();
+        assert_eq!(std::fs::read_to_string(isolated.join(".claude/.credentials.json")).unwrap(), r#"{"token":"a"}"#);
+        assert!(!isolated.join(".claude/venv/lib64").exists());
     }
 }

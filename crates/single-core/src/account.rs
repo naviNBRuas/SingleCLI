@@ -40,7 +40,7 @@
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use single_protocol::{AccountProfileInfo, AccountStatus, AccountSwitchResult};
+use single_protocol::{AccountProfileInfo, AccountStatus, AccountSwitchResult, AuthState};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -71,6 +71,71 @@ fn profile_dir(accounts_root: &Path, agent: &str, name: &str) -> PathBuf {
     accounts_root.join(agent).join(name)
 }
 
+/// Whether `agent`'s credential file(s) are present under `home` — the
+/// same presence check `capture` already used, factored out so it can also
+/// answer "is *anything* logged in" (see `is_authenticated`) without the
+/// side effects of an actual capture.
+pub fn has_live_login(home: &Path, agent: &str) -> bool {
+    match agent {
+        "claude" => home.join(".claude/.credentials.json").exists(),
+        "codex" => home.join(".codex/auth.json").exists(),
+        "agy" => {
+            let dir = home.join(".gemini/antigravity-cli");
+            ["jetski_state.pbtxt", "settings.json"].iter().any(|f| dir.join(f).exists())
+        }
+        _ => false,
+    }
+}
+
+/// Picks whichever of `home` (SingleCLI's isolated home) or `real_home`
+/// (the actual ambient `$HOME`) has a live login for `agent`, preferring
+/// `home`. A user who ran the vendor CLI directly instead of `single agent
+/// login` ends up logged in only under `real_home` — this is what lets
+/// `capture` find that login instead of failing.
+fn resolve_live_home<'a>(home: &'a Path, real_home: &'a Path, agent: &str) -> Option<&'a Path> {
+    if has_live_login(home, agent) {
+        Some(home)
+    } else if has_live_login(real_home, agent) {
+        Some(real_home)
+    } else {
+        None
+    }
+}
+
+/// Auto-detected "is anything logged in right now" for `agent`, checked
+/// across both homes. See `AuthState` docs for how this differs from the
+/// manually-set `AccountStatus` on a captured profile.
+pub fn is_authenticated(home: &Path, real_home: &Path, agent: &str) -> AuthState {
+    if support(agent).is_err() {
+        return AuthState::Unsupported;
+    }
+    if resolve_live_home(home, real_home, agent).is_some() {
+        AuthState::Authenticated
+    } else {
+        AuthState::NotAuthenticated
+    }
+}
+
+/// Best-effort human-readable identity for the currently-live login under
+/// `home`, used to auto-label an account right after `single agent login`.
+/// `None` when the agent's credential format has no identity field
+/// (e.g. codex's `auth.json`) or nothing is logged in yet — callers should
+/// fall back to a generated name in that case.
+pub fn derive_label(home: &Path, agent: &str) -> Option<String> {
+    match agent {
+        "claude" => {
+            let fields = extract_json_fields(&home.join(".claude.json"), &["oauthAccount", "userID"]).ok()?;
+            fields
+                .get("oauthAccount")
+                .and_then(|o| o.get("email"))
+                .and_then(|v| v.as_str())
+                .or_else(|| fields.get("userID").and_then(|v| v.as_str()))
+                .map(str::to_string)
+        }
+        _ => None,
+    }
+}
+
 fn write_secure(path: &Path, contents: &[u8]) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
@@ -94,46 +159,45 @@ fn backup(path: &Path) -> Result<Option<PathBuf>> {
 }
 
 /// Captures the agent's currently-live login state into a new named
-/// profile. Fails if the agent isn't currently logged in (best-effort
-/// check: the relevant file(s) must exist).
-pub fn capture(accounts_root: &Path, home: &Path, agent: &str, name: &str, label: Option<String>) -> Result<AccountProfileInfo> {
+/// profile. Checks SingleCLI's isolated `home` first; if nothing is there
+/// (e.g. the user logged in via the vendor CLI directly instead of `single
+/// agent login`), falls back to `real_home` and, on success, also syncs
+/// the just-captured credentials into `home` so future isolated runs pick
+/// them up. Fails only if neither home has a live login.
+pub fn capture(accounts_root: &Path, home: &Path, real_home: &Path, agent: &str, name: &str, label: Option<String>) -> Result<AccountProfileInfo> {
     let unverified_complete = support(agent)?;
     let dir = profile_dir(accounts_root, agent, name);
     fs::create_dir_all(&dir)?;
 
+    let Some(source) = resolve_live_home(home, real_home, agent) else {
+        bail!(
+            "{agent} is not currently logged in (checked isolated home {} and real home {})",
+            home.display(),
+            real_home.display()
+        );
+    };
+    let found_only_in_real_home = source == real_home;
+
     match agent {
         "claude" => {
-            let creds_path = home.join(".claude/.credentials.json");
-            if !creds_path.exists() {
-                bail!("claude is not currently logged in ({} not found)", creds_path.display());
-            }
-            let creds = fs::read(&creds_path)?;
+            let creds = fs::read(source.join(".claude/.credentials.json"))?;
             write_secure(&dir.join("credentials.json"), &creds)?;
 
-            let config_path = home.join(".claude.json");
+            let config_path = source.join(".claude.json");
             let oauth_fields = extract_json_fields(&config_path, &["oauthAccount", "userID"])?;
             write_secure(&dir.join("oauth_account.json"), serde_json::to_string_pretty(&oauth_fields)?.as_bytes())?;
         }
         "codex" => {
-            let auth_path = home.join(".codex/auth.json");
-            if !auth_path.exists() {
-                bail!("codex is not currently logged in ({} not found)", auth_path.display());
-            }
-            let auth = fs::read(&auth_path)?;
+            let auth = fs::read(source.join(".codex/auth.json"))?;
             write_secure(&dir.join("auth.json"), &auth)?;
         }
         "agy" => {
-            let state_dir = home.join(".gemini/antigravity-cli");
-            let mut any_captured = false;
+            let state_dir = source.join(".gemini/antigravity-cli");
             for filename in ["jetski_state.pbtxt", "settings.json"] {
                 let src = state_dir.join(filename);
                 if src.exists() {
                     write_secure(&dir.join(filename), &fs::read(&src)?)?;
-                    any_captured = true;
                 }
-            }
-            if !any_captured {
-                bail!("agy has no recognizable login state at {} (is it logged in?)", state_dir.display());
             }
         }
         _ => unreachable!("support() already rejected unsupported agents"),
@@ -141,6 +205,14 @@ pub fn capture(accounts_root: &Path, home: &Path, agent: &str, name: &str, label
 
     let meta = ProfileMeta { captured_at: chrono::Utc::now().to_rfc3339(), unverified_complete, label, status: AccountStatus::Unknown };
     fs::write(dir.join("meta.json"), serde_json::to_string_pretty(&meta)?)?;
+
+    if found_only_in_real_home {
+        // The isolated home had no credentials of its own (that's why we
+        // fell back) — sync what we just captured into it so subsequent
+        // isolated runs (and `is_authenticated` checks against `home`
+        // alone) see this login too, without disturbing anything else.
+        write_credentials_into(home, &dir, agent)?;
+    }
 
     Ok(AccountProfileInfo {
         agent: agent.to_string(),
@@ -174,35 +246,44 @@ pub fn switch(accounts_root: &Path, home: &Path, agent: &str, name: &str) -> Res
     if !dir.exists() {
         bail!("no profile named '{name}' for agent '{agent}'");
     }
+    let backed_up = write_credentials_into(home, &dir, agent)?;
+    Ok(AccountSwitchResult { agent: agent.to_string(), name: name.to_string(), backed_up })
+}
 
+/// Writes a captured profile's credential files into `target_home` as its
+/// live login state, backing up whatever was already there first. Shared
+/// by `switch` (explicit account swap) and `capture`'s real-home fallback
+/// (syncing the isolated home right after finding a login only in the
+/// real one) so the per-agent file layout only lives in one place.
+fn write_credentials_into(target_home: &Path, profile: &Path, agent: &str) -> Result<Vec<String>> {
     let mut backed_up = Vec::new();
 
     match agent {
         "claude" => {
-            let creds_path = home.join(".claude/.credentials.json");
+            let creds_path = target_home.join(".claude/.credentials.json");
             if let Some(b) = backup(&creds_path)? {
                 backed_up.push(b.display().to_string());
             }
-            write_secure(&creds_path, &fs::read(dir.join("credentials.json"))?)?;
+            write_secure(&creds_path, &fs::read(profile.join("credentials.json"))?)?;
 
-            let config_path = home.join(".claude.json");
+            let config_path = target_home.join(".claude.json");
             if let Some(b) = backup(&config_path)? {
                 backed_up.push(b.display().to_string());
             }
-            let oauth_fields: Value = serde_json::from_slice(&fs::read(dir.join("oauth_account.json"))?)?;
+            let oauth_fields: Value = serde_json::from_slice(&fs::read(profile.join("oauth_account.json"))?)?;
             merge_json_fields(&config_path, &oauth_fields)?;
         }
         "codex" => {
-            let auth_path = home.join(".codex/auth.json");
+            let auth_path = target_home.join(".codex/auth.json");
             if let Some(b) = backup(&auth_path)? {
                 backed_up.push(b.display().to_string());
             }
-            write_secure(&auth_path, &fs::read(dir.join("auth.json"))?)?;
+            write_secure(&auth_path, &fs::read(profile.join("auth.json"))?)?;
         }
         "agy" => {
-            let state_dir = home.join(".gemini/antigravity-cli");
+            let state_dir = target_home.join(".gemini/antigravity-cli");
             for filename in ["jetski_state.pbtxt", "settings.json"] {
-                let snapshot = dir.join(filename);
+                let snapshot = profile.join(filename);
                 if !snapshot.exists() {
                     continue;
                 }
@@ -216,7 +297,7 @@ pub fn switch(accounts_root: &Path, home: &Path, agent: &str, name: &str) -> Res
         _ => unreachable!("support() already rejected unsupported agents"),
     }
 
-    Ok(AccountSwitchResult { agent: agent.to_string(), name: name.to_string(), backed_up })
+    Ok(backed_up)
 }
 
 /// Materializes an isolated `$HOME` for `agent`/`name` at
@@ -391,13 +472,13 @@ mod tests {
         let home = setup_fake_home();
         let accounts_root = tempfile::tempdir().unwrap();
 
-        capture(accounts_root.path(), home.path(), "claude", "work", None).unwrap();
+        capture(accounts_root.path(), home.path(), home.path(), "claude", "work", None).unwrap();
 
         // Simulate logging into a second account: different creds, different oauthAccount,
         // but numStartups (unrelated config) also changes to prove it's untouched by switch.
         fs::write(home.path().join(".claude/.credentials.json"), r#"{"claudeAiOauth":{"token":"secretC"}}"#).unwrap();
         fs::write(home.path().join(".claude.json"), r#"{"numStartups": 99, "oauthAccount": {"email":"b@example.com"}, "userID": "user-b"}"#).unwrap();
-        capture(accounts_root.path(), home.path(), "claude", "personal", None).unwrap();
+        capture(accounts_root.path(), home.path(), home.path(), "claude", "personal", None).unwrap();
 
         let result = switch(accounts_root.path(), home.path(), "claude", "work").unwrap();
         assert_eq!(result.backed_up.len(), 2);
@@ -417,7 +498,7 @@ mod tests {
     fn codex_full_file_swap_round_trips() {
         let home = setup_fake_home();
         let accounts_root = tempfile::tempdir().unwrap();
-        capture(accounts_root.path(), home.path(), "codex", "work", None).unwrap();
+        capture(accounts_root.path(), home.path(), home.path(), "codex", "work", None).unwrap();
 
         fs::write(home.path().join(".codex/auth.json"), r#"{"auth_mode":"apikey","tokens":{"access":"secretD"}}"#).unwrap();
         switch(accounts_root.path(), home.path(), "codex", "work").unwrap();
@@ -430,22 +511,22 @@ mod tests {
     fn capture_fails_when_not_logged_in() {
         let home = tempfile::tempdir().unwrap();
         let accounts_root = tempfile::tempdir().unwrap();
-        assert!(capture(accounts_root.path(), home.path(), "codex", "x", None).is_err());
+        assert!(capture(accounts_root.path(), home.path(), home.path(), "codex", "x", None).is_err());
     }
 
     #[test]
     fn opencode_and_perplexity_are_explicitly_unsupported() {
         let home = setup_fake_home();
         let accounts_root = tempfile::tempdir().unwrap();
-        assert!(capture(accounts_root.path(), home.path(), "opencode", "x", None).is_err());
-        assert!(capture(accounts_root.path(), home.path(), "perplexity", "x", None).is_err());
+        assert!(capture(accounts_root.path(), home.path(), home.path(), "opencode", "x", None).is_err());
+        assert!(capture(accounts_root.path(), home.path(), home.path(), "perplexity", "x", None).is_err());
     }
 
     #[test]
     fn snapshot_files_are_written_with_owner_only_permissions() {
         let home = setup_fake_home();
         let accounts_root = tempfile::tempdir().unwrap();
-        capture(accounts_root.path(), home.path(), "codex", "work", None).unwrap();
+        capture(accounts_root.path(), home.path(), home.path(), "codex", "work", None).unwrap();
         let perms = fs::metadata(accounts_root.path().join("codex/work/auth.json")).unwrap().permissions();
         assert_eq!(perms.mode() & 0o777, 0o600);
     }
@@ -454,10 +535,10 @@ mod tests {
     fn isolated_homes_let_two_accounts_of_the_same_agent_coexist() {
         let home = setup_fake_home();
         let accounts_root = tempfile::tempdir().unwrap();
-        capture(accounts_root.path(), home.path(), "codex", "work", Some("work@example.com".into())).unwrap();
+        capture(accounts_root.path(), home.path(), home.path(), "codex", "work", Some("work@example.com".into())).unwrap();
 
         fs::write(home.path().join(".codex/auth.json"), r#"{"auth_mode":"apikey","tokens":{"access":"secretPersonal"}}"#).unwrap();
-        capture(accounts_root.path(), home.path(), "codex", "personal", Some("me@example.com".into())).unwrap();
+        capture(accounts_root.path(), home.path(), home.path(), "codex", "personal", Some("me@example.com".into())).unwrap();
 
         let work_home = ensure_isolated_home(accounts_root.path(), home.path(), "codex", "work").unwrap();
         let personal_home = ensure_isolated_home(accounts_root.path(), home.path(), "codex", "personal").unwrap();
@@ -477,8 +558,8 @@ mod tests {
     fn list_and_remove_work() {
         let home = setup_fake_home();
         let accounts_root = tempfile::tempdir().unwrap();
-        capture(accounts_root.path(), home.path(), "claude", "work", None).unwrap();
-        capture(accounts_root.path(), home.path(), "codex", "work", None).unwrap();
+        capture(accounts_root.path(), home.path(), home.path(), "claude", "work", None).unwrap();
+        capture(accounts_root.path(), home.path(), home.path(), "codex", "work", None).unwrap();
 
         let all = list(accounts_root.path(), None).unwrap();
         assert_eq!(all.len(), 2);
@@ -488,5 +569,45 @@ mod tests {
         assert!(remove(accounts_root.path(), "claude", "work").unwrap());
         assert!(!remove(accounts_root.path(), "claude", "work").unwrap());
         assert_eq!(list(accounts_root.path(), None).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn capture_falls_back_to_real_home_and_syncs_isolated_home() {
+        // Isolated home exists but has never had claude credentials written
+        // into it (the scenario when a user ran `claude` directly instead
+        // of `single agent login claude`). Real home has a live login.
+        let isolated_home = tempfile::tempdir().unwrap();
+        let real_home = setup_fake_home();
+        let accounts_root = tempfile::tempdir().unwrap();
+
+        assert!(!has_live_login(isolated_home.path(), "claude"));
+        assert!(has_live_login(real_home.path(), "claude"));
+
+        let info = capture(accounts_root.path(), isolated_home.path(), real_home.path(), "claude", "work", None).unwrap();
+        assert_eq!(info.agent, "claude");
+
+        // The isolated home must now also have live credentials, synced as
+        // part of the same capture call.
+        assert!(has_live_login(isolated_home.path(), "claude"));
+        let synced: Value =
+            serde_json::from_str(&fs::read_to_string(isolated_home.path().join(".claude/.credentials.json")).unwrap()).unwrap();
+        assert_eq!(synced["claudeAiOauth"]["token"], "secretA");
+    }
+
+    #[test]
+    fn is_authenticated_checks_both_homes_and_flags_unsupported_agents() {
+        let isolated_home = tempfile::tempdir().unwrap();
+        let real_home = setup_fake_home();
+
+        assert_eq!(is_authenticated(isolated_home.path(), real_home.path(), "codex"), AuthState::Authenticated);
+        assert_eq!(is_authenticated(isolated_home.path(), isolated_home.path(), "codex"), AuthState::NotAuthenticated);
+        assert_eq!(is_authenticated(isolated_home.path(), real_home.path(), "opencode"), AuthState::Unsupported);
+    }
+
+    #[test]
+    fn derive_label_reads_claude_email_but_not_codex() {
+        let home = setup_fake_home();
+        assert_eq!(derive_label(home.path(), "claude").as_deref(), Some("a@example.com"));
+        assert_eq!(derive_label(home.path(), "codex"), None);
     }
 }

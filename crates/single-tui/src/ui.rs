@@ -118,12 +118,18 @@ fn draw_agents(frame: &mut Frame, area: Rect, app: &App) {
             .map(|(_, n)| *n)
             .collect::<Vec<_>>()
             .join(",");
+            let (auth_label, auth_color) = match a.authenticated {
+                single_protocol::AuthState::Authenticated => ("auth", OK),
+                single_protocol::AuthState::NotAuthenticated => ("no auth", MUTED),
+                single_protocol::AuthState::Unsupported => ("-", MUTED),
+            };
             let flag = if a.unverified { "unverified" } else { "" };
             let style = if i == app.selected && app.tab == Tab::Agents { selected_style() } else { Style::default() };
             Row::new(vec![
                 Cell::from(Span::styled(dot, Style::default().fg(color))),
                 Cell::from(a.name.clone()),
                 Cell::from(a.version.clone().unwrap_or_else(|| "-".into())),
+                Cell::from(Span::styled(auth_label, Style::default().fg(auth_color))),
                 Cell::from(caps),
                 Cell::from(flag),
             ])
@@ -133,9 +139,16 @@ fn draw_agents(frame: &mut Frame, area: Rect, app: &App) {
 
     let table = Table::new(
         rows,
-        [Constraint::Length(2), Constraint::Length(12), Constraint::Length(26), Constraint::Min(20), Constraint::Length(12)],
+        [
+            Constraint::Length(2),
+            Constraint::Length(12),
+            Constraint::Length(20),
+            Constraint::Length(9),
+            Constraint::Min(20),
+            Constraint::Length(12),
+        ],
     )
-    .header(Row::new(vec!["", "Agent", "Version", "Capabilities", ""]).style(Style::default().add_modifier(Modifier::BOLD)))
+    .header(Row::new(vec!["", "Agent", "Version", "Auth", "Capabilities", ""]).style(Style::default().add_modifier(Modifier::BOLD)))
     .block(Block::default().borders(Borders::ALL).title(" Agents — [i] install selected, [enter] inspect "));
     frame.render_widget(table, area);
 }
