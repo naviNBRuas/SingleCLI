@@ -148,9 +148,19 @@ pub fn apply(release: &ReleaseInfo) -> Result<PathBuf> {
         }
         let dest = install_dir.join(binary);
         // rename() is atomic but fails across filesystems (tmp dir vs
-        // install dir can be on different mounts); fall back to copy.
+        // install dir can be on different mounts); fall back to copying.
+        // Copying straight onto `dest` would fail with ETXTBSY when it's
+        // the binary currently executing this very update (Linux refuses
+        // to open-for-write a running executable in place) — copy into a
+        // temp file in the *same* directory as `dest` instead, then
+        // rename that onto `dest`. That rename is same-filesystem (so
+        // atomic) and safe even while `dest` is running, since the
+        // running process keeps its already-open inode after the
+        // directory entry is replaced.
         if std::fs::rename(&src, &dest).is_err() {
-            std::fs::copy(&src, &dest).with_context(|| format!("installing updated {binary}"))?;
+            let tmp_dest = install_dir.join(format!("{binary}.update-tmp"));
+            std::fs::copy(&src, &tmp_dest).with_context(|| format!("downloading updated {binary} into place"))?;
+            std::fs::rename(&tmp_dest, &dest).with_context(|| format!("installing updated {binary}"))?;
         }
         #[cfg(unix)]
         {

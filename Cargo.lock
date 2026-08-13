@@ -1619,7 +1619,7 @@ dependencies = [
 
 [[package]]
 name = "single-agent-sdk"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1634,7 +1634,7 @@ dependencies = [
 
 [[package]]
 name = "single-cli"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -1654,7 +1654,7 @@ dependencies = [
 
 [[package]]
 name = "single-core"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1670,7 +1670,7 @@ dependencies = [
 
 [[package]]
 name = "single-protocol"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "serde",
  "serde_json",
@@ -1678,7 +1678,7 @@ dependencies = [
 
 [[package]]
 name = "single-runtime"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1700,7 +1700,7 @@ dependencies = [
 
 [[package]]
 name = "single-tui"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "anyhow",
  "crossterm",
