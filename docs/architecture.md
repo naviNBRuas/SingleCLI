@@ -313,6 +313,16 @@ artifact, a real persisted record.
     `codex`) without any of them clobbering another's live login state —
     the `AgentAdapter::run_prompt`/`single-agent-sdk::run::run_command`
     plumbing takes an optional `$HOME` override for exactly this.
+  - **No real-home fallback.** `is_authenticated`/`capture` used to also
+    check the real, ambient `$HOME` and treat a login found only there as
+    "authenticated" (falling back and syncing it into the isolated home on
+    capture) — a login done via the vendor CLI directly, outside `single
+    agent login`, would silently count. That fallback is gone:
+    `is_authenticated` and `capture` now read only SingleCLI's isolated
+    home; a real-home-only login is invisible until you `single agent
+    login <agent>` again inside the isolated home. `agent_home`'s
+    one-time bootstrap copy (below) was narrowed to match — it no longer
+    seeds credential files.
 
 ## Memory upgrades: knowledge graph, Redis, Qdrant
 
@@ -519,10 +529,14 @@ stable|nightly] [--check] [--yes]`, mirroring the real `claude update`/
   (`~/.claude.json` + `~/.claude/` for claude, `~/.codex/` for codex,
   `~/.config/opencode/` for opencode — the same locations
   `single-agent-sdk::formats` already reads/writes) into the isolated
-  tree. That's the **only** time the real home is touched. Every call
-  after that — even on a different day, a different process — finds the
-  isolated home already there and leaves it alone; changes never flow
-  back from the real home once bootstrapped.
+  tree, then immediately strips out `credential_paths_for(agent)` (claude's
+  `.claude/.credentials.json`, codex's `.codex/auth.json`) so a freshly
+  bootstrapped home starts logged out even if the real home has a live
+  session — see the Auth section's "no real-home fallback" note. That's
+  the **only** time the real home is touched. Every call after that — even
+  on a different day, a different process — finds the isolated home
+  already there and leaves it alone; changes never flow back from the real
+  home once bootstrapped.
 - **What changed.** `single task run`, `single install-integrations`/
   `uninstall-integrations`, `single plugin sync`, `single provider sync`,
   and `single account capture`/`use` used to operate directly against the
@@ -532,8 +546,7 @@ stable|nightly] [--check] [--yes]`, mirroring the real `claude update`/
   install-integrations --yes` against a fake real home containing a
   `.claude.json` with `numStartups: 42`; afterward that file was
   byte-for-byte unchanged, while `~/.config/single/homes/claude/.claude.json`
-  held the newly-synced MCP config and a copy of the bootstrapped
-  credentials.
+  held the newly-synced MCP config, with no credentials copied in.
 - **Relationship to account isolation.** `single-core::account`'s
   per-account isolated homes (`accounts_dir()/<agent>/<name>/home/`, for
   running several accounts of one agent concurrently — see the Auth

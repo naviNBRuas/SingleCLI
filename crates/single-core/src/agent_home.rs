@@ -13,6 +13,16 @@
 //! run after that (`task run`, `install-integrations`, `plugin sync`,
 //! `account capture/use`, ...) reads and writes only inside the isolated
 //! copy; the real `~/.claude`, `~/.codex`, etc. are left alone.
+//!
+//! **Credentials are never seeded.** The bootstrap copy carries over
+//! non-auth config (MCP servers, settings) so a freshly-created isolated
+//! home isn't empty, but `credential_paths_for` lists the specific files
+//! that are stripped back out right after the copy (e.g. claude's
+//! `.claude/.credentials.json`, codex's `.codex/auth.json`). A brand-new
+//! isolated home always starts logged out, even on a machine where the
+//! real home already has a live login — see `single-core::account`'s
+//! module doc for why (`single account capture`/`is_authenticated` only
+//! ever look inside the isolated home too).
 
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
@@ -41,6 +51,20 @@ fn real_paths_for(agent: &str) -> &'static [&'static str] {
     }
 }
 
+/// Credential files (relative to a home dir) that must never survive the
+/// bootstrap copy, even though they live inside a directory `real_paths_for`
+/// otherwise copies wholesale for its non-auth config (MCP servers,
+/// settings). Only claude and codex have a confirmed single-file credential
+/// location inside those paths — see `single-core::account`'s per-agent
+/// doc comments for the same paths used by `has_live_login`/`capture`.
+fn credential_paths_for(agent: &str) -> &'static [&'static str] {
+    match agent {
+        "claude" => &[".claude/.credentials.json"],
+        "codex" => &[".codex/auth.json"],
+        _ => &[],
+    }
+}
+
 /// Ensures `homes_root/<agent>` exists, bootstrapping it from `real_home`
 /// only if it doesn't exist yet. An already-bootstrapped isolated home is
 /// never re-synced from the real one on subsequent calls — once it
@@ -64,6 +88,12 @@ pub fn ensure_bootstrapped(homes_root: &Path, real_home: &Path, agent: &str) -> 
             copy_dir_recursive(&src, &dst)?;
         } else {
             std::fs::copy(&src, &dst)?;
+        }
+    }
+    for rel in credential_paths_for(agent) {
+        let path = dest.join(rel);
+        if path.exists() {
+            std::fs::remove_file(&path).with_context(|| format!("removing seeded credential {}", path.display()))?;
         }
     }
     Ok(dest)
@@ -103,17 +133,38 @@ mod tests {
         let real_home = tempfile::tempdir().unwrap();
         std::fs::write(real_home.path().join(".claude.json"), r#"{"numStartups":1}"#).unwrap();
         std::fs::create_dir_all(real_home.path().join(".claude")).unwrap();
-        std::fs::write(real_home.path().join(".claude/.credentials.json"), r#"{"token":"a"}"#).unwrap();
+        std::fs::write(real_home.path().join(".claude/settings.json"), r#"{"theme":"dark"}"#).unwrap();
 
         let homes_root = tempfile::tempdir().unwrap();
         let isolated = ensure_bootstrapped(homes_root.path(), real_home.path(), "claude").unwrap();
         assert_eq!(std::fs::read_to_string(isolated.join(".claude.json")).unwrap(), r#"{"numStartups":1}"#);
-        assert_eq!(std::fs::read_to_string(isolated.join(".claude/.credentials.json")).unwrap(), r#"{"token":"a"}"#);
+        assert_eq!(std::fs::read_to_string(isolated.join(".claude/settings.json")).unwrap(), r#"{"theme":"dark"}"#);
 
         // Real home changes after bootstrap; the isolated copy must NOT pick it up.
         std::fs::write(real_home.path().join(".claude.json"), r#"{"numStartups":99}"#).unwrap();
         let isolated_again = ensure_bootstrapped(homes_root.path(), real_home.path(), "claude").unwrap();
         assert_eq!(std::fs::read_to_string(isolated_again.join(".claude.json")).unwrap(), r#"{"numStartups":1}"#);
+    }
+
+    #[test]
+    fn bootstrap_seeds_non_auth_config_but_never_credentials() {
+        let real_home = tempfile::tempdir().unwrap();
+        std::fs::write(real_home.path().join(".claude.json"), r#"{"numStartups":1}"#).unwrap();
+        std::fs::create_dir_all(real_home.path().join(".claude")).unwrap();
+        std::fs::write(real_home.path().join(".claude/.credentials.json"), r#"{"token":"a"}"#).unwrap();
+        std::fs::write(real_home.path().join(".claude/settings.json"), r#"{"theme":"dark"}"#).unwrap();
+        std::fs::create_dir_all(real_home.path().join(".codex")).unwrap();
+        std::fs::write(real_home.path().join(".codex/auth.json"), r#"{"tokens":"b"}"#).unwrap();
+        std::fs::write(real_home.path().join(".codex/config.toml"), "profile = \"default\"").unwrap();
+
+        let homes_root = tempfile::tempdir().unwrap();
+        let claude_isolated = ensure_bootstrapped(homes_root.path(), real_home.path(), "claude").unwrap();
+        assert!(!claude_isolated.join(".claude/.credentials.json").exists());
+        assert_eq!(std::fs::read_to_string(claude_isolated.join(".claude/settings.json")).unwrap(), r#"{"theme":"dark"}"#);
+
+        let codex_isolated = ensure_bootstrapped(homes_root.path(), real_home.path(), "codex").unwrap();
+        assert!(!codex_isolated.join(".codex/auth.json").exists());
+        assert_eq!(std::fs::read_to_string(codex_isolated.join(".codex/config.toml")).unwrap(), "profile = \"default\"");
     }
 
     #[test]
@@ -137,12 +188,15 @@ mod tests {
         let real_home = tempfile::tempdir().unwrap();
         std::fs::write(real_home.path().join(".claude.json"), r#"{}"#).unwrap();
         std::fs::create_dir_all(real_home.path().join(".claude/venv/lib")).unwrap();
+        std::fs::write(real_home.path().join(".claude/venv/lib/marker.txt"), "present").unwrap();
         std::fs::write(real_home.path().join(".claude/.credentials.json"), r#"{"token":"a"}"#).unwrap();
         symlink(real_home.path().join(".claude/venv/lib"), real_home.path().join(".claude/venv/lib64")).unwrap();
 
         let homes_root = tempfile::tempdir().unwrap();
         let isolated = ensure_bootstrapped(homes_root.path(), real_home.path(), "claude").unwrap();
-        assert_eq!(std::fs::read_to_string(isolated.join(".claude/.credentials.json")).unwrap(), r#"{"token":"a"}"#);
+        assert_eq!(std::fs::read_to_string(isolated.join(".claude/venv/lib/marker.txt")).unwrap(), "present");
         assert!(!isolated.join(".claude/venv/lib64").exists());
+        // Credentials still get stripped even inside a directory copied wholesale.
+        assert!(!isolated.join(".claude/.credentials.json").exists());
     }
 }

@@ -4,7 +4,6 @@ use single_protocol::{AuthState, CheckStatus, DoctorCheck, DoctorReport};
 
 pub fn run(ctx: &Context) -> DoctorReport {
     let mut checks = Vec::new();
-    let real_home = crate::integrations::home_dir().ok();
 
     checks.push(DoctorCheck {
         name: "config directory".into(),
@@ -65,43 +64,26 @@ pub fn run(ctx: &Context) -> DoctorReport {
         checks.push(DoctorCheck { name: format!("agent: {}", agent.name), status, detail });
 
         if discovery.detected {
-            if let Some(real_home) = &real_home {
-                let isolated_home = ctx.dirs.homes_dir().join(&agent.name);
-                let auth = single_core::account::is_authenticated(&isolated_home, real_home, &agent.name);
-                let check = match auth {
-                    AuthState::Authenticated => DoctorCheck {
-                        name: format!("agent: {} auth", agent.name),
-                        status: CheckStatus::Ok,
-                        detail: "logged in".into(),
-                    },
-                    AuthState::NotAuthenticated => {
-                        let real_only = single_core::account::has_live_login(real_home, &agent.name)
-                            && !single_core::account::has_live_login(&isolated_home, &agent.name);
-                        if real_only {
-                            DoctorCheck {
-                                name: format!("agent: {} auth", agent.name),
-                                status: CheckStatus::Warn,
-                                detail: format!(
-                                    "logged in on this machine's real home but SingleCLI's isolated home has no credentials yet — run `single account capture {a} <name>` to fix, or `single agent login {a}` again",
-                                    a = agent.name
-                                ),
-                            }
-                        } else {
-                            DoctorCheck {
-                                name: format!("agent: {} auth", agent.name),
-                                status: CheckStatus::Skipped,
-                                detail: "not logged in".into(),
-                            }
-                        }
-                    }
-                    AuthState::Unsupported => DoctorCheck {
-                        name: format!("agent: {} auth", agent.name),
-                        status: CheckStatus::Skipped,
-                        detail: "account/auth detection not supported for this agent".into(),
-                    },
-                };
-                checks.push(check);
-            }
+            let isolated_home = ctx.dirs.homes_dir().join(&agent.name);
+            let auth = single_core::account::is_authenticated(&isolated_home, &agent.name);
+            let check = match auth {
+                AuthState::Authenticated => DoctorCheck {
+                    name: format!("agent: {} auth", agent.name),
+                    status: CheckStatus::Ok,
+                    detail: "logged in".into(),
+                },
+                AuthState::NotAuthenticated => DoctorCheck {
+                    name: format!("agent: {} auth", agent.name),
+                    status: CheckStatus::Skipped,
+                    detail: format!("not logged in — run `single agent login {}`", agent.name),
+                },
+                AuthState::Unsupported => DoctorCheck {
+                    name: format!("agent: {} auth", agent.name),
+                    status: CheckStatus::Skipped,
+                    detail: "account/auth detection not supported for this agent".into(),
+                },
+            };
+            checks.push(check);
         }
     }
 

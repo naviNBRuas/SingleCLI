@@ -36,6 +36,15 @@
 //! file is created with `0600` permissions since it can contain live
 //! OAuth tokens. Nothing in this module ever prints or logs token
 //! contents — only profile names and timestamps.
+//!
+//! **No real-home fallback.** `is_authenticated` and `capture` read only
+//! SingleCLI's isolated `home` (`~/.config/single/homes/<agent>/`) — the
+//! real, ambient `$HOME` is never consulted for auth detection or
+//! snapshotting. A login done directly against the vendor CLI, outside
+//! `single agent login`, is invisible to SingleCLI until you log in again
+//! inside the isolated home. `agent_home::ensure_bootstrapped` still
+//! seeds a brand-new isolated home from the real one once, but strips out
+//! credential files while doing so — see that module's doc comment.
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -87,29 +96,19 @@ pub fn has_live_login(home: &Path, agent: &str) -> bool {
     }
 }
 
-/// Picks whichever of `home` (SingleCLI's isolated home) or `real_home`
-/// (the actual ambient `$HOME`) has a live login for `agent`, preferring
-/// `home`. A user who ran the vendor CLI directly instead of `single agent
-/// login` ends up logged in only under `real_home` — this is what lets
-/// `capture` find that login instead of failing.
-fn resolve_live_home<'a>(home: &'a Path, real_home: &'a Path, agent: &str) -> Option<&'a Path> {
-    if has_live_login(home, agent) {
-        Some(home)
-    } else if has_live_login(real_home, agent) {
-        Some(real_home)
-    } else {
-        None
-    }
-}
-
 /// Auto-detected "is anything logged in right now" for `agent`, checked
-/// across both homes. See `AuthState` docs for how this differs from the
-/// manually-set `AccountStatus` on a captured profile.
-pub fn is_authenticated(home: &Path, real_home: &Path, agent: &str) -> AuthState {
+/// **only** against SingleCLI's isolated `home` — the real, ambient
+/// `$HOME` is never consulted here. A login that only exists in the real
+/// home (e.g. the user ran the vendor CLI directly instead of `single
+/// agent login`) is invisible to SingleCLI by design; see `capture`'s doc
+/// comment for the same rule applied to snapshotting. See `AuthState`
+/// docs for how this differs from the manually-set `AccountStatus` on a
+/// captured profile.
+pub fn is_authenticated(home: &Path, agent: &str) -> AuthState {
     if support(agent).is_err() {
         return AuthState::Unsupported;
     }
-    if resolve_live_home(home, real_home, agent).is_some() {
+    if has_live_login(home, agent) {
         AuthState::Authenticated
     } else {
         AuthState::NotAuthenticated
@@ -159,24 +158,22 @@ fn backup(path: &Path) -> Result<Option<PathBuf>> {
 }
 
 /// Captures the agent's currently-live login state into a new named
-/// profile. Checks SingleCLI's isolated `home` first; if nothing is there
-/// (e.g. the user logged in via the vendor CLI directly instead of `single
-/// agent login`), falls back to `real_home` and, on success, also syncs
-/// the just-captured credentials into `home` so future isolated runs pick
-/// them up. Fails only if neither home has a live login.
-pub fn capture(accounts_root: &Path, home: &Path, real_home: &Path, agent: &str, name: &str, label: Option<String>) -> Result<AccountProfileInfo> {
+/// profile. Only ever reads from SingleCLI's isolated `home` — the real,
+/// ambient `$HOME` is never consulted, so a login done outside `single
+/// agent login` (directly against the vendor CLI) is invisible here.
+/// Fails if the isolated home has no live login.
+pub fn capture(accounts_root: &Path, home: &Path, agent: &str, name: &str, label: Option<String>) -> Result<AccountProfileInfo> {
     let unverified_complete = support(agent)?;
     let dir = profile_dir(accounts_root, agent, name);
     fs::create_dir_all(&dir)?;
 
-    let Some(source) = resolve_live_home(home, real_home, agent) else {
+    if !has_live_login(home, agent) {
         bail!(
-            "{agent} is not currently logged in (checked isolated home {} and real home {})",
-            home.display(),
-            real_home.display()
+            "{agent} is not currently logged in inside SingleCLI's isolated home ({}) — run `single agent login {agent}` first",
+            home.display()
         );
-    };
-    let found_only_in_real_home = source == real_home;
+    }
+    let source = home;
 
     match agent {
         "claude" => {
@@ -205,14 +202,6 @@ pub fn capture(accounts_root: &Path, home: &Path, real_home: &Path, agent: &str,
 
     let meta = ProfileMeta { captured_at: chrono::Utc::now().to_rfc3339(), unverified_complete, label, status: AccountStatus::Unknown };
     fs::write(dir.join("meta.json"), serde_json::to_string_pretty(&meta)?)?;
-
-    if found_only_in_real_home {
-        // The isolated home had no credentials of its own (that's why we
-        // fell back) — sync what we just captured into it so subsequent
-        // isolated runs (and `is_authenticated` checks against `home`
-        // alone) see this login too, without disturbing anything else.
-        write_credentials_into(home, &dir, agent)?;
-    }
 
     Ok(AccountProfileInfo {
         agent: agent.to_string(),
@@ -251,10 +240,9 @@ pub fn switch(accounts_root: &Path, home: &Path, agent: &str, name: &str) -> Res
 }
 
 /// Writes a captured profile's credential files into `target_home` as its
-/// live login state, backing up whatever was already there first. Shared
-/// by `switch` (explicit account swap) and `capture`'s real-home fallback
-/// (syncing the isolated home right after finding a login only in the
-/// real one) so the per-agent file layout only lives in one place.
+/// live login state, backing up whatever was already there first. Used by
+/// `switch` (explicit account swap) so the per-agent file layout only
+/// lives in one place.
 fn write_credentials_into(target_home: &Path, profile: &Path, agent: &str) -> Result<Vec<String>> {
     let mut backed_up = Vec::new();
 
@@ -472,13 +460,13 @@ mod tests {
         let home = setup_fake_home();
         let accounts_root = tempfile::tempdir().unwrap();
 
-        capture(accounts_root.path(), home.path(), home.path(), "claude", "work", None).unwrap();
+        capture(accounts_root.path(), home.path(), "claude", "work", None).unwrap();
 
         // Simulate logging into a second account: different creds, different oauthAccount,
         // but numStartups (unrelated config) also changes to prove it's untouched by switch.
         fs::write(home.path().join(".claude/.credentials.json"), r#"{"claudeAiOauth":{"token":"secretC"}}"#).unwrap();
         fs::write(home.path().join(".claude.json"), r#"{"numStartups": 99, "oauthAccount": {"email":"b@example.com"}, "userID": "user-b"}"#).unwrap();
-        capture(accounts_root.path(), home.path(), home.path(), "claude", "personal", None).unwrap();
+        capture(accounts_root.path(), home.path(), "claude", "personal", None).unwrap();
 
         let result = switch(accounts_root.path(), home.path(), "claude", "work").unwrap();
         assert_eq!(result.backed_up.len(), 2);
@@ -498,7 +486,7 @@ mod tests {
     fn codex_full_file_swap_round_trips() {
         let home = setup_fake_home();
         let accounts_root = tempfile::tempdir().unwrap();
-        capture(accounts_root.path(), home.path(), home.path(), "codex", "work", None).unwrap();
+        capture(accounts_root.path(), home.path(), "codex", "work", None).unwrap();
 
         fs::write(home.path().join(".codex/auth.json"), r#"{"auth_mode":"apikey","tokens":{"access":"secretD"}}"#).unwrap();
         switch(accounts_root.path(), home.path(), "codex", "work").unwrap();
@@ -511,22 +499,22 @@ mod tests {
     fn capture_fails_when_not_logged_in() {
         let home = tempfile::tempdir().unwrap();
         let accounts_root = tempfile::tempdir().unwrap();
-        assert!(capture(accounts_root.path(), home.path(), home.path(), "codex", "x", None).is_err());
+        assert!(capture(accounts_root.path(), home.path(), "codex", "x", None).is_err());
     }
 
     #[test]
     fn opencode_and_perplexity_are_explicitly_unsupported() {
         let home = setup_fake_home();
         let accounts_root = tempfile::tempdir().unwrap();
-        assert!(capture(accounts_root.path(), home.path(), home.path(), "opencode", "x", None).is_err());
-        assert!(capture(accounts_root.path(), home.path(), home.path(), "perplexity", "x", None).is_err());
+        assert!(capture(accounts_root.path(), home.path(), "opencode", "x", None).is_err());
+        assert!(capture(accounts_root.path(), home.path(), "perplexity", "x", None).is_err());
     }
 
     #[test]
     fn snapshot_files_are_written_with_owner_only_permissions() {
         let home = setup_fake_home();
         let accounts_root = tempfile::tempdir().unwrap();
-        capture(accounts_root.path(), home.path(), home.path(), "codex", "work", None).unwrap();
+        capture(accounts_root.path(), home.path(), "codex", "work", None).unwrap();
         let perms = fs::metadata(accounts_root.path().join("codex/work/auth.json")).unwrap().permissions();
         assert_eq!(perms.mode() & 0o777, 0o600);
     }
@@ -535,10 +523,10 @@ mod tests {
     fn isolated_homes_let_two_accounts_of_the_same_agent_coexist() {
         let home = setup_fake_home();
         let accounts_root = tempfile::tempdir().unwrap();
-        capture(accounts_root.path(), home.path(), home.path(), "codex", "work", Some("work@example.com".into())).unwrap();
+        capture(accounts_root.path(), home.path(), "codex", "work", Some("work@example.com".into())).unwrap();
 
         fs::write(home.path().join(".codex/auth.json"), r#"{"auth_mode":"apikey","tokens":{"access":"secretPersonal"}}"#).unwrap();
-        capture(accounts_root.path(), home.path(), home.path(), "codex", "personal", Some("me@example.com".into())).unwrap();
+        capture(accounts_root.path(), home.path(), "codex", "personal", Some("me@example.com".into())).unwrap();
 
         let work_home = ensure_isolated_home(accounts_root.path(), home.path(), "codex", "work").unwrap();
         let personal_home = ensure_isolated_home(accounts_root.path(), home.path(), "codex", "personal").unwrap();
@@ -558,8 +546,8 @@ mod tests {
     fn list_and_remove_work() {
         let home = setup_fake_home();
         let accounts_root = tempfile::tempdir().unwrap();
-        capture(accounts_root.path(), home.path(), home.path(), "claude", "work", None).unwrap();
-        capture(accounts_root.path(), home.path(), home.path(), "codex", "work", None).unwrap();
+        capture(accounts_root.path(), home.path(), "claude", "work", None).unwrap();
+        capture(accounts_root.path(), home.path(), "codex", "work", None).unwrap();
 
         let all = list(accounts_root.path(), None).unwrap();
         assert_eq!(all.len(), 2);
@@ -572,10 +560,11 @@ mod tests {
     }
 
     #[test]
-    fn capture_falls_back_to_real_home_and_syncs_isolated_home() {
+    fn capture_ignores_real_home_and_fails_when_isolated_home_has_no_login() {
         // Isolated home exists but has never had claude credentials written
         // into it (the scenario when a user ran `claude` directly instead
-        // of `single agent login claude`). Real home has a live login.
+        // of `single agent login claude`). Real home has a live login, but
+        // that must not matter — SingleCLI never reads the real home here.
         let isolated_home = tempfile::tempdir().unwrap();
         let real_home = setup_fake_home();
         let accounts_root = tempfile::tempdir().unwrap();
@@ -583,25 +572,24 @@ mod tests {
         assert!(!has_live_login(isolated_home.path(), "claude"));
         assert!(has_live_login(real_home.path(), "claude"));
 
-        let info = capture(accounts_root.path(), isolated_home.path(), real_home.path(), "claude", "work", None).unwrap();
-        assert_eq!(info.agent, "claude");
+        let err = capture(accounts_root.path(), isolated_home.path(), "claude", "work", None).unwrap_err();
+        assert!(err.to_string().contains("single agent login claude"));
 
-        // The isolated home must now also have live credentials, synced as
-        // part of the same capture call.
-        assert!(has_live_login(isolated_home.path(), "claude"));
-        let synced: Value =
-            serde_json::from_str(&fs::read_to_string(isolated_home.path().join(".claude/.credentials.json")).unwrap()).unwrap();
-        assert_eq!(synced["claudeAiOauth"]["token"], "secretA");
+        // The isolated home must remain untouched — no sync from real_home.
+        assert!(!has_live_login(isolated_home.path(), "claude"));
     }
 
     #[test]
-    fn is_authenticated_checks_both_homes_and_flags_unsupported_agents() {
+    fn is_authenticated_only_checks_the_isolated_home_and_flags_unsupported_agents() {
         let isolated_home = tempfile::tempdir().unwrap();
         let real_home = setup_fake_home();
 
-        assert_eq!(is_authenticated(isolated_home.path(), real_home.path(), "codex"), AuthState::Authenticated);
-        assert_eq!(is_authenticated(isolated_home.path(), isolated_home.path(), "codex"), AuthState::NotAuthenticated);
-        assert_eq!(is_authenticated(isolated_home.path(), real_home.path(), "opencode"), AuthState::Unsupported);
+        // Live login only in the real home: still NotAuthenticated, since
+        // is_authenticated never looks at real_home.
+        assert_eq!(is_authenticated(isolated_home.path(), "codex"), AuthState::NotAuthenticated);
+        // Live login in the isolated home itself: Authenticated.
+        assert_eq!(is_authenticated(real_home.path(), "codex"), AuthState::Authenticated);
+        assert_eq!(is_authenticated(isolated_home.path(), "opencode"), AuthState::Unsupported);
     }
 
     #[test]
