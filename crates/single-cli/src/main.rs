@@ -151,6 +151,19 @@ enum Command {
         #[arg(long)]
         yes: bool,
     },
+    /// Undocumented: internal helpers other SingleCLI-owned tooling shells out to.
+    #[command(hide = true, subcommand)]
+    Internal(InternalCommand),
+}
+
+#[derive(Subcommand)]
+enum InternalCommand {
+    /// Prints a shell script installing every registry agent's real
+    /// bootstrap_install command — docker/Dockerfile runs this so the
+    /// image build always matches whatever's in
+    /// single_core::registry::builtin_registry() at build time, instead
+    /// of a separately maintained install list going stale.
+    PrintBootstrapScript,
 }
 
 #[derive(Subcommand)]
@@ -179,6 +192,35 @@ enum AgentCommand {
     /// uses); bootstraps the isolated home first if this is the first
     /// time it's used.
     Login { name: String },
+    /// Opt-in Docker execution backend: run this agent's tasks inside a
+    /// persistent container instead of on the host. Host isolation
+    /// ($HOME-swap) stays the default for everyone else.
+    Docker {
+        #[command(subcommand)]
+        action: AgentDockerCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum AgentDockerCommand {
+    /// Enable for an agent (all its accounts) or one specific captured account with --account.
+    Enable {
+        agent: String,
+        #[arg(long)]
+        account: Option<String>,
+    },
+    Disable {
+        agent: String,
+        #[arg(long)]
+        account: Option<String>,
+    },
+    /// Show configured agents/accounts and their live container state. Omit `agent` to list all.
+    Status { agent: Option<String> },
+    Stop {
+        agent: String,
+        #[arg(long)]
+        account: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -730,6 +772,12 @@ fn main() -> anyhow::Result<()> {
         return run_update(&channel, check, yes);
     }
 
+    // Pure local logic — no daemon/socket needed.
+    if let Command::Internal(InternalCommand::PrintBootstrapScript) = command {
+        print_bootstrap_script();
+        return Ok(());
+    }
+
     // Interactive login needs the user's real terminal (browser OAuth
     // round-trips, device codes, password prompts) attached directly —
     // routing it through the daemon over the socket would mean the
@@ -773,6 +821,24 @@ fn main() -> anyhow::Result<()> {
                 render::print(response, json);
             }
             AgentCommand::Login { .. } => unreachable!("Command::Agent{{Login}} is intercepted before this match"),
+            AgentCommand::Docker { action } => match action {
+                AgentDockerCommand::Enable { agent, account } => {
+                    let response = client::send(&socket_path, Request::DockerEnable { agent, account })?;
+                    render::print(response, false);
+                }
+                AgentDockerCommand::Disable { agent, account } => {
+                    let response = client::send(&socket_path, Request::DockerDisable { agent, account })?;
+                    render::print(response, false);
+                }
+                AgentDockerCommand::Status { agent } => {
+                    let response = client::send(&socket_path, Request::DockerStatus { agent })?;
+                    render::print(response, false);
+                }
+                AgentDockerCommand::Stop { agent, account } => {
+                    let response = client::send(&socket_path, Request::DockerStop { agent, account })?;
+                    render::print(response, false);
+                }
+            },
         },
         Command::Mcp { action } => match action {
             McpCommand::List { json } => {
@@ -1226,9 +1292,21 @@ fn main() -> anyhow::Result<()> {
             render::print(response, false);
         }
         Command::Update { .. } => unreachable!("handled before the socket-based dispatch above"),
+        Command::Internal(_) => unreachable!("handled before the socket-based dispatch above"),
     }
 
     Ok(())
+}
+
+/// See `InternalCommand::PrintBootstrapScript`'s doc comment.
+fn print_bootstrap_script() {
+    println!("#!/bin/sh");
+    println!("set -u"); // not -e: one agent's install failing shouldn't abort the rest
+    for agent in single_core::builtin_registry() {
+        let Some(install) = agent.bootstrap_install else { continue };
+        println!("echo '==> installing {}'", agent.name);
+        println!("if ! ( {} ); then echo 'WARN: {} install failed' >&2; fi", install.command, agent.name);
+    }
 }
 
 fn run_update(channel: &str, check_only: bool, yes: bool) -> anyhow::Result<()> {

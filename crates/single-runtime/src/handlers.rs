@@ -379,6 +379,38 @@ fn dispatch(ctx: &Context, request: Request) -> anyhow::Result<ResponseData> {
             single_core::account::set_status(&ctx.dirs.accounts_dir(), &agent, &name, status)?;
             Ok(ResponseData::Empty)
         }
+        Request::DockerEnable { agent, account } => {
+            single_core::docker::set_enabled(&ctx.dirs.docker_registry_file(), &agent, account.as_deref(), true)?;
+            Ok(ResponseData::Empty)
+        }
+        Request::DockerDisable { agent, account } => {
+            single_core::docker::set_enabled(&ctx.dirs.docker_registry_file(), &agent, account.as_deref(), false)?;
+            Ok(ResponseData::Empty)
+        }
+        Request::DockerStatus { agent } => {
+            let settings = single_core::docker::status(&ctx.dirs.docker_registry_file(), agent.as_deref())?;
+            let infos = settings
+                .into_iter()
+                .map(|s| {
+                    let container_name = single_core::docker::container_name(&s.agent, s.account.as_deref());
+                    let running = crate::docker::is_running(&container_name).unwrap_or(None);
+                    single_protocol::DockerContainerInfo { agent: s.agent, account: s.account, container_name, enabled: s.enabled, running }
+                })
+                .collect();
+            Ok(ResponseData::DockerContainerList(infos))
+        }
+        Request::DockerStop { agent, account } => {
+            let container = single_core::docker::container_name(&agent, account.as_deref());
+            crate::docker::stop(&container)?;
+            let enabled = single_core::docker::is_enabled(&ctx.dirs.docker_registry_file(), &agent, account.as_deref())?;
+            Ok(ResponseData::DockerContainerInfo(single_protocol::DockerContainerInfo {
+                agent,
+                account,
+                container_name: container,
+                enabled,
+                running: Some(false),
+            }))
+        }
         Request::ProviderAdd { name, env_var_name, base_url } => {
             let secret_name = format!("provider:{name}");
             single_core::providers::add(&ctx.dirs.providers_registry_file(), single_protocol::ProviderSpec {

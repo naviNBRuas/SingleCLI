@@ -306,9 +306,37 @@ pub fn run(conn: &Connection, ctx: &Context, opts: RunTaskOptions) -> Result<Tas
         build_context_preamble(conn, opts.description, opts.agent, project.as_deref())
     };
 
+    // Opt-in Docker execution (single_core::docker) — only reachable when
+    // the isolated-home path above actually ran (real_home skips both).
+    let docker_container = if let Some(home) = &home {
+        match single_core::docker::is_enabled(&ctx.dirs.docker_registry_file(), opts.agent, opts.account) {
+            Ok(true) => {
+                let container = single_core::docker::container_name(opts.agent, opts.account);
+                match crate::docker::ensure_started(&container, crate::docker::DEFAULT_IMAGE, home, &run_cwd) {
+                    Ok(()) => Some(container),
+                    Err(e) => {
+                        let detail = format!("failed to start docker container for '{}': {e:#}", opts.agent);
+                        finish(conn, id, TaskStatus::Failed, None, None, None, false, Some(&detail))?;
+                        crate::state::record_event(conn, "task.failed", &format!("#{id} {detail}"))?;
+                        remember_failure(conn, id, opts.agent, project.clone(), opts.description, &detail);
+                        return get(conn, id)?.context("task disappeared after being created");
+                    }
+                }
+            }
+            Ok(false) => None,
+            Err(_) => None, // no docker.toml / unreadable — treat as not configured, don't fail the task
+        }
+    } else {
+        None
+    };
+    let backend = match &docker_container {
+        Some(container) => single_agent_sdk::backend::ExecBackend::Docker { container, workdir: &run_cwd },
+        None => single_agent_sdk::backend::ExecBackend::host(home.as_deref()),
+    };
+
     std::fs::create_dir_all(ctx.dirs.artifacts_dir())?;
     let live_output_path = ctx.dirs.task_live_output_path(id);
-    let outcome = adapter.run_prompt(&run_cwd, &prompt, home.as_deref(), Some(&live_output_path), opts.timeout);
+    let outcome = adapter.run_prompt(&run_cwd, &prompt, &backend, Some(&live_output_path), opts.timeout);
     let _ = std::fs::remove_file(&live_output_path); // superseded by the final artifact below; best-effort cleanup
 
     let worktree_path_str = opts.use_worktree.then(|| run_cwd.display().to_string());

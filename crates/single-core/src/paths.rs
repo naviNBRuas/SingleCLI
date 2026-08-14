@@ -65,6 +65,12 @@ impl SingleDirs {
         self.root.join("mcp.toml")
     }
 
+    /// Per-(agent, optional account) opt-in Docker execution settings —
+    /// see `single_core::docker`.
+    pub fn docker_registry_file(&self) -> PathBuf {
+        self.root.join("docker.toml")
+    }
+
     /// Whether `single install-integrations` should sync only the
     /// `single-mcp` dynamic gateway into agents' native MCP config,
     /// instead of every enabled server in `mcp_registry_file()` — see

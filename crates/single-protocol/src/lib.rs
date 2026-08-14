@@ -127,6 +127,15 @@ pub enum Request {
     AccountList { agent: Option<String> },
     AccountRemove { agent: String, name: String },
     AccountSetStatus { agent: String, name: String, status: AccountStatus },
+    /// Opt-in Docker execution backend (see `single_core::docker`) —
+    /// `account: None` means the agent-wide setting, `Some` overrides it
+    /// for one captured account. Takes effect on the next `single task
+    /// run`/orchestrate step for that agent/account, not retroactively.
+    DockerEnable { agent: String, account: Option<String> },
+    DockerDisable { agent: String, account: Option<String> },
+    /// `agent: None` lists every configured agent/account pair.
+    DockerStatus { agent: Option<String> },
+    DockerStop { agent: String, account: Option<String> },
     ProviderAdd { name: String, env_var_name: String, base_url: Option<String> },
     ProviderAddPreset { name: String },
     ProviderPresetList,
@@ -208,6 +217,8 @@ pub enum ResponseData {
     AccountProfile(AccountProfileInfo),
     AccountProfiles(Vec<AccountProfileInfo>),
     AccountSwitched(AccountSwitchResult),
+    DockerContainerInfo(DockerContainerInfo),
+    DockerContainerList(Vec<DockerContainerInfo>),
     Provider(ProviderSpec),
     Providers(Vec<ProviderSpec>),
     ProviderPresets(Vec<ProviderPresetInfo>),
@@ -533,6 +544,21 @@ pub struct DocumentInfo {
     pub extracted_chars: i64,
     pub memory_id: i64,
     pub ingested_at: String,
+}
+
+/// One agent/account's Docker execution setting plus (when known) its
+/// live container state — see `single_core::docker` (settings) and
+/// `single-runtime::docker` (lifecycle).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DockerContainerInfo {
+    pub agent: String,
+    pub account: Option<String>,
+    pub container_name: String,
+    pub enabled: bool,
+    /// `None` when the container doesn't exist yet (e.g. never started,
+    /// or `enabled` but no task has run since) — distinct from `Some(false)`,
+    /// which means it exists but is stopped.
+    pub running: Option<bool>,
 }
 
 /// Task lifecycle status (spec section 17's TaskCreated/TaskStarted/

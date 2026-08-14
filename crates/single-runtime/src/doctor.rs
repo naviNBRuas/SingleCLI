@@ -118,5 +118,35 @@ pub fn run(ctx: &Context) -> DoctorReport {
         });
     }
 
+    let docker_present = crate::docker::docker_available();
+    checks.push(DoctorCheck {
+        name: "tool: docker".into(),
+        status: if docker_present { CheckStatus::Ok } else { CheckStatus::Skipped },
+        detail: if docker_present {
+            "found".into()
+        } else {
+            "not installed — needed only for agents/accounts with `single agent docker enable`".into()
+        },
+    });
+    if docker_present {
+        for setting in single_core::docker::status(&ctx.dirs.docker_registry_file(), None).unwrap_or_default() {
+            if !setting.enabled {
+                continue;
+            }
+            let container = single_core::docker::container_name(&setting.agent, setting.account.as_deref());
+            let label = match &setting.account {
+                Some(a) => format!("{}/{a}", setting.agent),
+                None => setting.agent.clone(),
+            };
+            let (status, detail) = match crate::docker::is_running(&container) {
+                Ok(Some(true)) => (CheckStatus::Ok, format!("container {container} running")),
+                Ok(Some(false)) => (CheckStatus::Warn, format!("container {container} exists but is stopped")),
+                Ok(None) => (CheckStatus::Warn, format!("container {container} not created yet (starts on next task run)")),
+                Err(e) => (CheckStatus::Warn, format!("could not check container {container}: {e:#}")),
+            };
+            checks.push(DoctorCheck { name: format!("docker: {label}"), status, detail });
+        }
+    }
+
     DoctorReport { checks }
 }

@@ -262,6 +262,15 @@ fn print_data(data: ResponseData) {
                 println!("  backup: {backup}");
             }
         }
+        ResponseData::DockerContainerInfo(info) => print_docker_info(&info),
+        ResponseData::DockerContainerList(infos) => {
+            if infos.is_empty() {
+                println!("(no agents/accounts configured for docker — see `single agent docker enable`)");
+            }
+            for info in infos {
+                print_docker_info(&info);
+            }
+        }
         ResponseData::Provider(p) => print_provider(&p),
         ResponseData::Providers(providers) => {
             if providers.is_empty() {
@@ -419,6 +428,25 @@ fn print_memory_entry(entry: &single_protocol::MemoryEntry) {
     if let Some(expires) = &entry.expires_at {
         println!("  expires:    {expires}");
     }
+}
+
+fn print_docker_info(info: &single_protocol::DockerContainerInfo) {
+    let running = match info.running {
+        Some(true) => "running",
+        Some(false) => "stopped",
+        None => "not created",
+    };
+    let label = match &info.account {
+        Some(a) => format!("{}/{a}", info.agent),
+        None => info.agent.clone(),
+    };
+    println!(
+        "{:<20} {:<10} {:<24} [{}]",
+        label,
+        if info.enabled { "enabled" } else { "disabled" },
+        info.container_name,
+        running
+    );
 }
 
 fn print_document(doc: &single_protocol::DocumentInfo) {

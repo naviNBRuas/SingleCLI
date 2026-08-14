@@ -4,6 +4,7 @@
 //! runtime here (this runs inside `single-runtime`'s synchronous request
 //! handlers, matching how `discover()` already blocks synchronously).
 
+use crate::backend::ExecBackend;
 use anyhow::{Context, Result};
 use single_protocol::RunOutcome;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -44,9 +45,12 @@ pub fn run_command(command: &str, args: &[String], cwd: &Path, timeout: Duration
 /// credentials/session state — each account gets its own materialized HOME
 /// directory (see `single-core::account::ensure_isolated_home`), and the
 /// CLI reads/writes its config relative to whatever `$HOME` it sees, same
-/// as any other well-behaved Unix program.
+/// as any other well-behaved Unix program. Always runs on the host — used
+/// by `install_plugin`/`login`, which aren't part of the opt-in Docker
+/// backend (see `backend::ExecBackend`'s doc comment for why that's
+/// scoped to `run_prompt` only).
 pub fn run_command_with_home(command: &str, args: &[String], cwd: &Path, home: Option<&Path>, timeout: Duration) -> Result<RunOutcome> {
-    run_command_live(command, args, cwd, home, None, timeout)
+    run_command_live(command, args, cwd, &ExecBackend::host(home), None, timeout)
 }
 
 /// Same as `run_command_with_home`, but when `live_output_path` is set,
@@ -64,16 +68,32 @@ pub fn run_command_live(
     command: &str,
     args: &[String],
     cwd: &Path,
-    home: Option<&Path>,
+    backend: &ExecBackend,
     live_output_path: Option<&Path>,
     timeout: Duration,
 ) -> Result<RunOutcome> {
     let start = Instant::now();
-    let mut cmd = Command::new(command);
-    cmd.args(args).current_dir(cwd).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
-    if let Some(home) = home {
-        cmd.env("HOME", home);
-    }
+    let mut cmd = match backend {
+        ExecBackend::Host { home } => {
+            let mut cmd = Command::new(command);
+            cmd.args(args).current_dir(cwd);
+            if let Some(home) = home {
+                cmd.env("HOME", home);
+            }
+            cmd
+        }
+        ExecBackend::Docker { container, workdir } => {
+            // No $HOME override, no current_dir: the container's home was
+            // fixed when it was created (the isolated home bind-mounted
+            // in — see single-runtime::docker::ensure_started), and
+            // `docker exec -w` sets the working directory inside the
+            // container, not this host process's cwd.
+            let mut cmd = Command::new("docker");
+            cmd.arg("exec").arg("-w").arg(workdir).arg(container).arg(command).args(args);
+            cmd
+        }
+    };
+    cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = cmd.spawn().with_context(|| format!("spawning {command}"))?;
 
     let tee_file: Option<Arc<Mutex<std::fs::File>>> = live_output_path
@@ -179,7 +199,7 @@ mod tests {
             "sh",
             &["-c".into(), "echo first; sleep 0.3; echo second".into()],
             dir.path(),
-            None,
+            &ExecBackend::host(None),
             Some(&live_path),
             Duration::from_secs(5),
         )

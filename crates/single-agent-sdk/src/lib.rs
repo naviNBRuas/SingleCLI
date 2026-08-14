@@ -1,5 +1,6 @@
 pub mod adapter;
 pub mod adapters;
+pub mod backend;
 pub mod backup;
 pub mod discover;
 pub mod formats;

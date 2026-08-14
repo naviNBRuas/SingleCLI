@@ -1,6 +1,7 @@
 pub mod bootstrap;
 pub mod context;
 pub mod doctor;
+pub mod docker;
 pub mod documents;
 pub mod embeddings;
 pub mod handlers;

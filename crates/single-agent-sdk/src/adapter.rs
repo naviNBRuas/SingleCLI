@@ -1,3 +1,4 @@
+use crate::backend::ExecBackend;
 use crate::discover::{discover, Discovery};
 use anyhow::Result;
 use single_protocol::{IntegrationWrite, LspServerSpec, McpServerSpec, RunOutcome};
@@ -55,17 +56,19 @@ pub trait AgentAdapter {
     /// `timeout`. Default: unsupported (used by agents with no verified
     /// non-interactive mode, e.g. `pplx`, which isn't a coding agent at all).
     ///
-    /// `home` overrides `$HOME` for the subprocess when set — this is how
-    /// multiple isolated accounts of the same agent run concurrently (see
-    /// `single-core::account::ensure_isolated_home`); `None` runs against
-    /// the caller's real `$HOME` as before.
+    /// `backend` picks where the process actually runs — the host (with an
+    /// optional `$HOME` override, same meaning as the old plain
+    /// `Option<&Path>` this replaced; this is how multiple isolated
+    /// accounts of the same agent run concurrently, see
+    /// `single-core::account::ensure_isolated_home`) or an opt-in
+    /// persistent Docker container (see `backend::ExecBackend`).
     ///
     /// `live_output_path`, when set, receives the agent's stdout/stderr
     /// tee'd there as they're produced (see
     /// `single-agent-sdk::run::run_command_live`), so a concurrent reader
     /// — the TUI's task-detail view — can watch the run in progress
     /// instead of only seeing output once it finishes.
-    fn run_prompt(&self, _cwd: &Path, _prompt: &str, _home: Option<&Path>, _live_output_path: Option<&Path>, _timeout: Duration) -> Result<RunOutcome> {
+    fn run_prompt(&self, _cwd: &Path, _prompt: &str, _backend: &ExecBackend, _live_output_path: Option<&Path>, _timeout: Duration) -> Result<RunOutcome> {
         anyhow::bail!("{} has no non-interactive run mode wired up", self.command())
     }
 
@@ -98,11 +101,11 @@ pub(crate) fn run_with_prompt_flag(
     command: &str,
     cwd: &Path,
     prompt: &str,
-    home: Option<&Path>,
+    backend: &ExecBackend,
     live_output_path: Option<&Path>,
     timeout: Duration,
 ) -> Result<RunOutcome> {
-    crate::run::run_command_live(command, &["-p".to_string(), prompt.to_string()], cwd, home, live_output_path, timeout)
+    crate::run::run_command_live(command, &["-p".to_string(), prompt.to_string()], cwd, backend, live_output_path, timeout)
 }
 
 fn unsupported_lsp(agent: &str, home: &Path) -> IntegrationWrite {
