@@ -3,6 +3,7 @@ pub mod agent_home;
 pub mod config;
 pub mod custom_agents;
 pub mod docker;
+pub mod hooks;
 pub mod lsp;
 pub mod mcp;
 pub mod paths;

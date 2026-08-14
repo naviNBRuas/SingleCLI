@@ -411,6 +411,26 @@ fn dispatch(ctx: &Context, request: Request) -> anyhow::Result<ResponseData> {
                 running: Some(false),
             }))
         }
+        Request::HooksEnable { agent } => {
+            single_core::hooks::set_enabled(&ctx.dirs.hooks_registry_file(), &agent, true)?;
+            let real_home = integrations::home_dir()?;
+            let home = single_core::agent_home::ensure_bootstrapped(&ctx.dirs.homes_dir(), &real_home, &agent)?;
+            let settings_path = home.join(".claude/settings.json");
+            let hook_command = format!("{} internal claude-pretooluse-hook", resolve_single_binary_path());
+            let updated = single_agent_sdk::formats::claude_settings::apply_hook(&settings_path, &hook_command, single_core::hooks::CLAUDE_HOOK_TIMEOUT_SECS)?;
+            write_settings_with_backup(&settings_path, &updated)?;
+            Ok(ResponseData::Empty)
+        }
+        Request::HooksDisable { agent } => {
+            single_core::hooks::set_enabled(&ctx.dirs.hooks_registry_file(), &agent, false)?;
+            let settings_path = ctx.dirs.homes_dir().join(&agent).join(".claude/settings.json");
+            let hook_command = format!("{} internal claude-pretooluse-hook", resolve_single_binary_path());
+            if let Some(updated) = single_agent_sdk::formats::claude_settings::remove_hook(&settings_path, &hook_command)? {
+                write_settings_with_backup(&settings_path, &updated)?;
+            }
+            Ok(ResponseData::Empty)
+        }
+        Request::HooksStatus => Ok(ResponseData::HooksStatus(single_core::hooks::status(&ctx.dirs.hooks_registry_file())?)),
         Request::ApprovalList => {
             let conn = preferences_db(ctx)?;
             let approvals = single_core::preferences::list_pending(&conn)?.into_iter().map(to_approval_info).collect();
@@ -666,6 +686,36 @@ fn to_document_info(doc: crate::documents::DocumentInfo) -> single_protocol::Doc
         memory_id: doc.memory_id,
         ingested_at: doc.ingested_at,
     }
+}
+
+/// The `single` binary's absolute path, so the hook command written into
+/// an isolated home's settings.json works regardless of what `PATH` looks
+/// like when Claude Code spawns the hook process — falls back to the bare
+/// command name (relying on `PATH`) if `which` can't find it, same
+/// resolution style `single-agent-sdk::discover` already uses.
+fn resolve_single_binary_path() -> String {
+    std::process::Command::new("which")
+        .arg("single")
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "single".to_string())
+}
+
+fn write_settings_with_backup(path: &std::path::Path, contents: &serde_json::Value) -> anyhow::Result<()> {
+    if path.exists() {
+        let timestamp = chrono::Utc::now().format("%Y%m%dT%H%M%SZ");
+        let backup = path.with_extension(format!("json.bak-{timestamp}"));
+        let _ = std::fs::copy(path, &backup);
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(path, serde_json::to_string_pretty(contents)?)?;
+    Ok(())
 }
 
 fn preferences_db(ctx: &Context) -> anyhow::Result<rusqlite::Connection> {

@@ -271,6 +271,14 @@ fn print_data(data: ResponseData) {
                 print_docker_info(&info);
             }
         }
+        ResponseData::HooksStatus(statuses) => {
+            if statuses.is_empty() {
+                println!("(no agents configured for mid-run permission interception — see `single agent hooks enable`)");
+            }
+            for (agent, enabled) in statuses {
+                println!("{:<12} {}", agent, if enabled { "enabled" } else { "disabled" });
+            }
+        }
         ResponseData::Approvals(approvals) => {
             if approvals.is_empty() {
                 println!("(no pending approvals)");

@@ -17,6 +17,7 @@ clap.workspace = true
 tokio.workspace = true
 directories.workspace = true
 reqwest.workspace = true
+rusqlite.workspace = true
 tempfile = "3"
 single-agent-sdk = { path = "../single-agent-sdk" }
 single-core = { path = "../single-core" }

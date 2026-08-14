@@ -71,6 +71,12 @@ impl SingleDirs {
         self.root.join("docker.toml")
     }
 
+    /// Per-agent opt-in mid-run permission interception settings — see
+    /// `single_core::hooks`.
+    pub fn hooks_registry_file(&self) -> PathBuf {
+        self.root.join("hooks.toml")
+    }
+
     /// Whether `single install-integrations` should sync only the
     /// `single-mcp` dynamic gateway into agents' native MCP config,
     /// instead of every enabled server in `mcp_registry_file()` — see

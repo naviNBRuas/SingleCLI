@@ -137,13 +137,23 @@ pub enum Request {
     DockerStatus { agent: Option<String> },
     DockerStop { agent: String, account: Option<String> },
     /// Pending human decisions created by `single_core::preferences::evaluate_and_learn`
-    /// (currently only the single-mcp gateway's `invoke_mcp` calls this) —
-    /// see `single_core::preferences`.
+    /// — raised by the single-mcp gateway's `invoke_mcp` and, when enabled,
+    /// an agent's own mid-run permission hook (see `HooksEnable`). See
+    /// `single_core::preferences`.
     ApprovalList,
     /// `remember: true` also records this as a learned preference for the
     /// same resource pattern, so it doesn't ask again next time.
     ApprovalResolve { id: i64, allow: bool, remember: bool },
     PreferenceList,
+    /// Opt-in per-agent mid-run permission interception (see
+    /// `single_core::hooks`) — an agent's own process pauses mid-task to
+    /// ask before using a tool, gated the same way as `single-mcp`'s
+    /// `invoke_mcp`. Only `claude` is wired up; other agents error.
+    /// Bootstraps the isolated home and writes the hook into its
+    /// settings.json immediately, so it takes effect on the next run.
+    HooksEnable { agent: String },
+    HooksDisable { agent: String },
+    HooksStatus,
     ProviderAdd { name: String, env_var_name: String, base_url: Option<String> },
     ProviderAddPreset { name: String },
     ProviderPresetList,
@@ -228,6 +238,8 @@ pub enum ResponseData {
     DockerContainerInfo(DockerContainerInfo),
     DockerContainerList(Vec<DockerContainerInfo>),
     Approvals(Vec<ApprovalInfo>),
+    /// `(agent, enabled)` pairs — see `single_core::hooks::status`.
+    HooksStatus(Vec<(String, bool)>),
     Preferences(Vec<PreferenceInfo>),
     Provider(ProviderSpec),
     Providers(Vec<ProviderSpec>),

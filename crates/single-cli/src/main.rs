@@ -176,6 +176,14 @@ enum InternalCommand {
     /// single_core::registry::builtin_registry() at build time, instead
     /// of a separately maintained install list going stale.
     PrintBootstrapScript,
+    /// Claude Code's PreToolUse hook (see `single agent hooks enable
+    /// claude`): reads the hook's JSON on stdin, evaluates the tool call
+    /// against permissions.toml + learned preferences, and — for the
+    /// undecided case — blocks polling for a real `single approval
+    /// resolve` before answering. Prints the exact
+    /// hookSpecificOutput/permissionDecision JSON Claude Code expects.
+    #[command(name = "claude-pretooluse-hook")]
+    ClaudePreToolUseHook,
 }
 
 #[derive(Subcommand)]
@@ -211,6 +219,20 @@ enum AgentCommand {
         #[command(subcommand)]
         action: AgentDockerCommand,
     },
+    /// Opt-in mid-run permission interception: the agent's own process
+    /// pauses before using a tool and asks (see `single approval`). Only
+    /// `claude` is wired up right now (its PreToolUse hook).
+    Hooks {
+        #[command(subcommand)]
+        action: AgentHooksCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum AgentHooksCommand {
+    Enable { agent: String },
+    Disable { agent: String },
+    Status,
 }
 
 #[derive(Subcommand)]
@@ -809,6 +831,12 @@ fn main() -> anyhow::Result<()> {
         print_bootstrap_script();
         return Ok(());
     }
+    // Runs synchronously inside Claude Code's own hook lifecycle, blocking
+    // it — must not depend on a daemon being reachable, so this talks to
+    // SingleCLI's state database directly, same as single-mcp's gateway.
+    if let Command::Internal(InternalCommand::ClaudePreToolUseHook) = command {
+        return run_claude_pretooluse_hook();
+    }
 
     // Interactive login needs the user's real terminal (browser OAuth
     // round-trips, device codes, password prompts) attached directly —
@@ -868,6 +896,20 @@ fn main() -> anyhow::Result<()> {
                 }
                 AgentDockerCommand::Stop { agent, account } => {
                     let response = client::send(&socket_path, Request::DockerStop { agent, account })?;
+                    render::print(response, false);
+                }
+            },
+            AgentCommand::Hooks { action } => match action {
+                AgentHooksCommand::Enable { agent } => {
+                    let response = client::send(&socket_path, Request::HooksEnable { agent })?;
+                    render::print(response, false);
+                }
+                AgentHooksCommand::Disable { agent } => {
+                    let response = client::send(&socket_path, Request::HooksDisable { agent })?;
+                    render::print(response, false);
+                }
+                AgentHooksCommand::Status => {
+                    let response = client::send(&socket_path, Request::HooksStatus)?;
                     render::print(response, false);
                 }
             },
@@ -1357,6 +1399,86 @@ fn print_bootstrap_script() {
         let Some(install) = agent.bootstrap_install else { continue };
         println!("echo '==> installing {}'", agent.name);
         println!("if ! ( {} ); then echo 'WARN: {} install failed' >&2; fi", install.command, agent.name);
+    }
+}
+
+/// See `InternalCommand::ClaudePreToolUseHook`'s doc comment. Contract
+/// (stdin/stdout JSON shape) verified against a real installed plugin —
+/// see `single_agent_sdk::formats::claude_settings`'s module doc.
+fn run_claude_pretooluse_hook() -> anyhow::Result<()> {
+    use std::io::Read;
+    let mut input = String::new();
+    std::io::stdin().read_to_string(&mut input)?;
+    let input: serde_json::Value = serde_json::from_str(&input).unwrap_or(serde_json::Value::Null);
+    let tool_name = input.get("tool_name").and_then(|v| v.as_str()).unwrap_or("");
+    let tool_input = input.get("tool_input").cloned().unwrap_or(serde_json::Value::Null);
+    let resource = claude_hook_resource(tool_name, &tool_input);
+
+    let dirs = SingleDirs::discover()?;
+    let rules = single_core::permissions::load(&dirs.permissions_file())?;
+    let db_path = dirs.db_path();
+    if let Some(parent) = db_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let conn = rusqlite::Connection::open(&db_path)?;
+    single_core::preferences::ensure_schema(&conn)?;
+
+    let verdict = single_core::preferences::evaluate_and_learn(&rules.tools, &conn, &resource, Some("claude PreToolUse hook"))?;
+    let output = match verdict {
+        single_core::preferences::Verdict::Allow => serde_json::json!({}),
+        single_core::preferences::Verdict::Deny => hook_deny_json("blocked by SingleCLI permission policy"),
+        single_core::preferences::Verdict::PendingApproval(id) => wait_for_approval(&conn, id)?,
+    };
+    println!("{}", serde_json::to_string(&output)?);
+    Ok(())
+}
+
+/// Polls the pending approval created for this call until a human
+/// resolves it via `single approval resolve` (from another terminal or
+/// the TUI) or our own margin under `HOOK_TIMEOUT_SECS` runs out —
+/// timing out denies (fail closed) rather than guessing.
+fn wait_for_approval(conn: &rusqlite::Connection, id: i64) -> anyhow::Result<serde_json::Value> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(single_core::hooks::CLAUDE_HOOK_TIMEOUT_SECS.saturating_sub(20));
+    loop {
+        let Some(approval) = single_core::preferences::get_approval(conn, id)? else {
+            return Ok(hook_deny_json("approval record disappeared"));
+        };
+        match approval.status {
+            single_core::preferences::ApprovalStatus::Allowed => return Ok(serde_json::json!({})),
+            single_core::preferences::ApprovalStatus::Denied => return Ok(hook_deny_json("denied via `single approval resolve`")),
+            single_core::preferences::ApprovalStatus::Pending => {
+                if std::time::Instant::now() >= deadline {
+                    return Ok(hook_deny_json(&format!(
+                        "timed out waiting for approval #{id} — run `single approval resolve {id} --allow`, then retry"
+                    )));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(1000));
+            }
+        }
+    }
+}
+
+fn hook_deny_json(reason: &str) -> serde_json::Value {
+    serde_json::json!({
+        "hookSpecificOutput": { "hookEventName": "PreToolUse", "permissionDecision": "deny" },
+        "systemMessage": reason
+    })
+}
+
+/// Builds the `permissions.toml`/learned-preference resource pattern for
+/// one Claude tool call. Field names (`tool_input.command`/`file_path`)
+/// verified against the same real plugin as `claude_settings.rs`.
+fn claude_hook_resource(tool_name: &str, tool_input: &serde_json::Value) -> String {
+    match tool_name {
+        "Bash" => {
+            let command = tool_input.get("command").and_then(|v| v.as_str()).unwrap_or("");
+            format!("claude:bash:{command}")
+        }
+        "Edit" | "Write" | "MultiEdit" | "NotebookEdit" => {
+            let path = tool_input.get("file_path").and_then(|v| v.as_str()).unwrap_or("");
+            format!("claude:edit:{path}")
+        }
+        other => format!("claude:{other}"),
     }
 }
 
