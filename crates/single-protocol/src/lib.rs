@@ -136,6 +136,14 @@ pub enum Request {
     /// `agent: None` lists every configured agent/account pair.
     DockerStatus { agent: Option<String> },
     DockerStop { agent: String, account: Option<String> },
+    /// Pending human decisions created by `single_core::preferences::evaluate_and_learn`
+    /// (currently only the single-mcp gateway's `invoke_mcp` calls this) —
+    /// see `single_core::preferences`.
+    ApprovalList,
+    /// `remember: true` also records this as a learned preference for the
+    /// same resource pattern, so it doesn't ask again next time.
+    ApprovalResolve { id: i64, allow: bool, remember: bool },
+    PreferenceList,
     ProviderAdd { name: String, env_var_name: String, base_url: Option<String> },
     ProviderAddPreset { name: String },
     ProviderPresetList,
@@ -219,6 +227,8 @@ pub enum ResponseData {
     AccountSwitched(AccountSwitchResult),
     DockerContainerInfo(DockerContainerInfo),
     DockerContainerList(Vec<DockerContainerInfo>),
+    Approvals(Vec<ApprovalInfo>),
+    Preferences(Vec<PreferenceInfo>),
     Provider(ProviderSpec),
     Providers(Vec<ProviderSpec>),
     ProviderPresets(Vec<ProviderPresetInfo>),
@@ -559,6 +569,30 @@ pub struct DockerContainerInfo {
     /// or `enabled` but no task has run since) — distinct from `Some(false)`,
     /// which means it exists but is stopped.
     pub running: Option<bool>,
+}
+
+/// A pending or resolved human decision — see `single_core::preferences`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApprovalInfo {
+    pub id: i64,
+    pub resource: String,
+    pub context: Option<String>,
+    /// `"pending"` / `"allowed"` / `"denied"`.
+    pub status: String,
+    pub created_at: String,
+    pub resolved_at: Option<String>,
+}
+
+/// A learned decision for a resource pattern — see `single_core::preferences`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PreferenceInfo {
+    pub id: i64,
+    pub pattern: String,
+    /// `"deny"` / `"ask"` / `"allow"`.
+    pub decision: String,
+    pub confidence: f64,
+    pub learned_from: Option<String>,
+    pub created_at: String,
 }
 
 /// Task lifecycle status (spec section 17's TaskCreated/TaskStarted/

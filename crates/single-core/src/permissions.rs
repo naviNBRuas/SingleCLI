@@ -1,13 +1,13 @@
 //! Permission policy model (spec section 16): `deny`/`ask`/`allow` rules
 //! scoped by resource pattern, stored at `~/.config/single/permissions.toml`.
 //!
-//! Phase 2 ships the data model and evaluation function only — there is no
-//! CLI surface (`single permission ...`) and nothing calls `evaluate` yet,
-//! because nothing in SingleCLI actually executes tools/agents on a user's
-//! behalf until the Phase 4 orchestrator exists. Shipping a `single
-//! permission allow ...` command with no enforcement behind it would be a
-//! fake capability (spec section 52 explicitly rules this out) — so this
-//! stays a library seam until there's a real caller.
+//! `evaluate`'s first real caller is the `single-mcp` gateway
+//! (`crates/single-mcp/src/gateway.rs`), via
+//! `single_core::preferences::evaluate_and_learn` — every `invoke_mcp`
+//! call is checked against the `tools` rule set below before being
+//! proxied. `Ask` (the default for anything unlisted) escalates through
+//! `preferences.rs`'s learned-decision + pending-approval flow rather
+//! than blocking silently.
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -36,6 +36,11 @@ pub struct PermissionSet {
     pub filesystem: Vec<Rule>,
     #[serde(default)]
     pub network: Vec<Rule>,
+    /// Arbitrary tool/resource patterns — e.g. `mcp:<server>:<tool>` for
+    /// the single-mcp gateway's `invoke_mcp` calls. Distinct from
+    /// `filesystem`/`network` since a tool call isn't cleanly either one.
+    #[serde(default)]
+    pub tools: Vec<Rule>,
 }
 
 pub fn load(path: &Path) -> Result<PermissionSet> {
@@ -93,10 +98,12 @@ mod tests {
         let set = PermissionSet {
             filesystem: vec![Rule { pattern: "~/.ssh".into(), decision: Decision::Deny }],
             network: vec![Rule { pattern: "github.com".into(), decision: Decision::Allow }],
+            tools: vec![Rule { pattern: "mcp:danger".into(), decision: Decision::Deny }],
         };
         save(&path, &set).unwrap();
         let loaded = load(&path).unwrap();
         assert_eq!(loaded.filesystem[0].pattern, "~/.ssh");
         assert_eq!(loaded.network[0].decision, Decision::Allow);
+        assert_eq!(loaded.tools[0].pattern, "mcp:danger");
     }
 }

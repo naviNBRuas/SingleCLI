@@ -75,6 +75,18 @@ enum Command {
         #[command(subcommand)]
         action: DocCommand,
     },
+    /// Pending human decisions (see `single_core::preferences`) — currently
+    /// raised by the single-mcp gateway when a tool call needs approval.
+    Approval {
+        #[command(subcommand)]
+        action: ApprovalCommand,
+    },
+    /// Learned decisions — what SingleCLI has auto-approved/denied before
+    /// without asking, and why (see `single_core::preferences`).
+    Preference {
+        #[command(subcommand)]
+        action: PreferenceCommand,
+    },
     /// Show resolved project context (git state, project docs) for a directory.
     Context {
         /// Defaults to the current directory.
@@ -468,6 +480,26 @@ enum NoteCommand {
         json: bool,
     },
     MarkRead { id: i64 },
+}
+
+#[derive(Subcommand)]
+enum ApprovalCommand {
+    List,
+    Resolve {
+        id: i64,
+        #[arg(long, conflicts_with = "deny")]
+        allow: bool,
+        #[arg(long, conflicts_with = "allow")]
+        deny: bool,
+        /// Also learn this as a preference for the same resource pattern, so it doesn't ask again.
+        #[arg(long)]
+        remember: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum PreferenceCommand {
+    List,
 }
 
 #[derive(Subcommand)]
@@ -1108,6 +1140,25 @@ fn main() -> anyhow::Result<()> {
                     render::print(response, false);
                 }
             },
+        },
+        Command::Approval { action } => match action {
+            ApprovalCommand::List => {
+                let response = client::send(&socket_path, Request::ApprovalList)?;
+                render::print(response, false);
+            }
+            ApprovalCommand::Resolve { id, allow, deny, remember } => {
+                if !allow && !deny {
+                    anyhow::bail!("pass --allow or --deny");
+                }
+                let response = client::send(&socket_path, Request::ApprovalResolve { id, allow, remember })?;
+                render::print(response, false);
+            }
+        },
+        Command::Preference { action } => match action {
+            PreferenceCommand::List => {
+                let response = client::send(&socket_path, Request::PreferenceList)?;
+                render::print(response, false);
+            }
         },
         Command::Note { action } => match action {
             NoteCommand::Leave { content, from, to, topic, project } => {

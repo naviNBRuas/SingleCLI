@@ -101,13 +101,38 @@ impl Gateway {
         let tool = arguments.get("tool").and_then(Value::as_str);
         let call_args = arguments.get("arguments").and_then(Value::as_object).cloned();
 
-        let session = self.ensure_session(server).await?;
         match tool {
             None => {
+                // Listing a server's own tools is read-only discovery, not
+                // an action with consequences — not gated by permissions.
+                let session = self.ensure_session(server).await?;
                 let tools = session.list_all_tools().await.with_context(|| format!("listing tools on mcp server '{server}'"))?;
                 Ok(json!({ "server": server, "tools": tools }))
             }
             Some(tool_name) => {
+                // Checked before spawning anything: a denied/pending call
+                // shouldn't pay for (or trigger) starting the underlying
+                // server process at all.
+                let resource = format!("mcp:{server}:{tool_name}");
+                match check_permission(&resource)? {
+                    single_core::preferences::Verdict::Deny => {
+                        return Ok(json!({
+                            "server": server, "tool": tool_name, "denied": true,
+                            "reason": "blocked by permission policy (permissions.toml or a learned preference)"
+                        }));
+                    }
+                    single_core::preferences::Verdict::PendingApproval(id) => {
+                        return Ok(json!({
+                            "server": server, "tool": tool_name, "pending_approval": id,
+                            "message": format!(
+                                "this action needs your approval first — run `single approval resolve {id} --allow` (or --deny), then retry"
+                            )
+                        }));
+                    }
+                    single_core::preferences::Verdict::Allow => {}
+                }
+
+                let session = self.ensure_session(server).await?;
                 let mut params = CallToolRequestParams::new(tool_name.to_string());
                 if let Some(args) = call_args {
                     params = params.with_arguments(args);
@@ -117,6 +142,24 @@ impl Gateway {
             }
         }
     }
+}
+
+/// The real first caller of `permissions::evaluate` (via
+/// `preferences::evaluate_and_learn`) — every `invoke_mcp` tool call is
+/// checked against `permissions.toml`'s `tools` rules, then learned
+/// preferences, before being proxied. Opens the same SQLite db the daemon
+/// uses directly (see this file's module doc for why) rather than
+/// round-tripping through the socket.
+fn check_permission(resource: &str) -> Result<single_core::preferences::Verdict> {
+    let dirs = single_core::SingleDirs::discover().context("resolving SingleCLI config directory")?;
+    let rules = single_core::permissions::load(&dirs.permissions_file())?;
+    let db_path = dirs.db_path();
+    if let Some(parent) = db_path.parent() {
+        std::fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
+    }
+    let conn = rusqlite::Connection::open(&db_path).with_context(|| format!("opening {}", db_path.display()))?;
+    single_core::preferences::ensure_schema(&conn)?;
+    single_core::preferences::evaluate_and_learn(&rules.tools, &conn, resource, Some("single-mcp invoke_mcp"))
 }
 
 fn schema(fields: Value) -> Arc<Map<String, Value>> {

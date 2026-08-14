@@ -411,6 +411,21 @@ fn dispatch(ctx: &Context, request: Request) -> anyhow::Result<ResponseData> {
                 running: Some(false),
             }))
         }
+        Request::ApprovalList => {
+            let conn = preferences_db(ctx)?;
+            let approvals = single_core::preferences::list_pending(&conn)?.into_iter().map(to_approval_info).collect();
+            Ok(ResponseData::Approvals(approvals))
+        }
+        Request::ApprovalResolve { id, allow, remember } => {
+            let conn = preferences_db(ctx)?;
+            single_core::preferences::resolve(&conn, id, allow, remember)?;
+            Ok(ResponseData::Empty)
+        }
+        Request::PreferenceList => {
+            let conn = preferences_db(ctx)?;
+            let prefs = single_core::preferences::list_preferences(&conn)?.into_iter().map(to_preference_info).collect();
+            Ok(ResponseData::Preferences(prefs))
+        }
         Request::ProviderAdd { name, env_var_name, base_url } => {
             let secret_name = format!("provider:{name}");
             single_core::providers::add(&ctx.dirs.providers_registry_file(), single_protocol::ProviderSpec {
@@ -650,6 +665,44 @@ fn to_document_info(doc: crate::documents::DocumentInfo) -> single_protocol::Doc
         extracted_chars: doc.extracted_chars,
         memory_id: doc.memory_id,
         ingested_at: doc.ingested_at,
+    }
+}
+
+fn preferences_db(ctx: &Context) -> anyhow::Result<rusqlite::Connection> {
+    let conn = crate::state::open(&ctx.dirs.db_path())?;
+    single_core::preferences::ensure_schema(&conn)?;
+    Ok(conn)
+}
+
+fn to_approval_info(a: single_core::preferences::Approval) -> single_protocol::ApprovalInfo {
+    let status = match a.status {
+        single_core::preferences::ApprovalStatus::Pending => "pending",
+        single_core::preferences::ApprovalStatus::Allowed => "allowed",
+        single_core::preferences::ApprovalStatus::Denied => "denied",
+    };
+    single_protocol::ApprovalInfo {
+        id: a.id,
+        resource: a.resource,
+        context: a.context,
+        status: status.to_string(),
+        created_at: a.created_at,
+        resolved_at: a.resolved_at,
+    }
+}
+
+fn to_preference_info(p: single_core::preferences::Preference) -> single_protocol::PreferenceInfo {
+    let decision = match p.decision {
+        single_core::permissions::Decision::Deny => "deny",
+        single_core::permissions::Decision::Ask => "ask",
+        single_core::permissions::Decision::Allow => "allow",
+    };
+    single_protocol::PreferenceInfo {
+        id: p.id,
+        pattern: p.pattern,
+        decision: decision.to_string(),
+        confidence: p.confidence,
+        learned_from: p.learned_from,
+        created_at: p.created_at,
     }
 }
 

@@ -271,6 +271,32 @@ fn print_data(data: ResponseData) {
                 print_docker_info(&info);
             }
         }
+        ResponseData::Approvals(approvals) => {
+            if approvals.is_empty() {
+                println!("(no pending approvals)");
+            }
+            for a in approvals {
+                println!("#{:<5} [{}] {}", a.id, a.status, a.resource);
+                if let Some(ctx) = &a.context {
+                    println!("        {ctx}");
+                }
+            }
+        }
+        ResponseData::Preferences(prefs) => {
+            if prefs.is_empty() {
+                println!("(no learned preferences yet)");
+            }
+            for p in prefs {
+                println!(
+                    "#{:<5} {:<30} {:<7} conf={:.2}  {}",
+                    p.id,
+                    p.pattern,
+                    p.decision,
+                    p.confidence,
+                    p.learned_from.as_deref().unwrap_or("-")
+                );
+            }
+        }
         ResponseData::Provider(p) => print_provider(&p),
         ResponseData::Providers(providers) => {
             if providers.is_empty() {
