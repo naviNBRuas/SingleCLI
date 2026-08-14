@@ -342,12 +342,16 @@ artifact, a real persisted record.
 - **`single-runtime::qdrant_backend`** — optional (`SINGLE_QDRANT_URL`)
   vector store: upsert/search/delete over Qdrant's real REST API, whose
   shape was captured directly from a running local Qdrant instance during
-  development (not assumed from documentation). **Honest scope limit**:
-  this stores and searches *pre-computed* vectors — there is no
-  embeddings-provider call wired up to turn text into a vector yet, since
-  faking that with a pseudo-embedding would be exactly the kind of
-  fabricated capability this project avoids elsewhere. `single memory
-  vector ...`.
+  development (not assumed from documentation). This module itself stores
+  and searches *pre-computed* vectors — `single memory vector
+  upsert/search` still take one directly. `single-runtime::embeddings`
+  closes the text→vector gap for the memory-entry path specifically: a
+  real call to OpenAI's `/v1/embeddings` (API key via `single secret set
+  embeddings:api_key <key>`), wired into `MemoryStore` (best-effort
+  auto-embed on write into a `single_memory` collection) and
+  `MemorySearchSemantic` (`single memory search --semantic`, embeds the
+  query and searches Qdrant, falling back to substring search if either
+  the key or `SINGLE_QDRANT_URL` isn't configured) — see `handlers.rs`.
 
 ## Distribution: release workflow, installer, and the TUI rewrite
 
@@ -721,11 +725,11 @@ home instead of the real system, silently.
 Per the original spec's own §50 "Development Strategy" (build vertically,
 don't implement everything at once): a multi-agent task-graph orchestrator,
 an event *stream* (vs. the persisted log that exists), a plugin
-*marketplace/discovery* layer (installing a named plugin is real; browsing
-or searching what's available is not), permission *enforcement* (the
-model exists, nothing calls it), a real embeddings pipeline (text →
-vector), task-scoped context selection, workflows, full model/provider
-abstraction (discovery, streaming, usage accounting), and full process
+*marketplace/discovery* layer (installing a named plugin, including from
+a curated preset catalog, is real; live browsing/searching an arbitrary
+marketplace is not), task-scoped context selection, workflows, full
+model/provider abstraction (discovery, streaming, usage accounting), and
+full process
 lifecycle management (start/stop/pause/resume/stream a running agent
 session, vs. Phase 4's one-shot blocking `run_prompt`) are all
 future-phase work. Where the full spec's shape is visible in this

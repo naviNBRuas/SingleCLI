@@ -130,5 +130,31 @@ pub fn run(ctx: &Context) -> DoctorReport {
         }
     }
 
+    match crate::qdrant_backend::resolve_url() {
+        Some(url) => {
+            let reachable = crate::qdrant_backend::ping(&url).is_ok();
+            checks.push(DoctorCheck {
+                name: "vector store (qdrant)".into(),
+                status: if reachable { CheckStatus::Ok } else { CheckStatus::Warn },
+                detail: if reachable { format!("{url} (reachable)") } else { format!("{url} (configured but unreachable)") },
+            });
+        }
+        None => checks.push(DoctorCheck {
+            name: "vector store (qdrant)".into(),
+            status: CheckStatus::Skipped,
+            detail: "not configured — set SINGLE_QDRANT_URL to enable `single memory search --semantic`".into(),
+        }),
+    }
+    let embeddings_configured = crate::embeddings::is_configured();
+    checks.push(DoctorCheck {
+        name: "semantic memory search (embeddings)".into(),
+        status: if embeddings_configured { CheckStatus::Ok } else { CheckStatus::Skipped },
+        detail: if embeddings_configured {
+            "configured".into()
+        } else {
+            "not configured — `single secret set embeddings:api_key <key>`; semantic search falls back to substring search until then".into()
+        },
+    });
+
     DoctorReport { checks }
 }

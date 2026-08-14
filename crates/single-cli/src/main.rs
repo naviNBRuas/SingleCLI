@@ -717,6 +717,11 @@ enum PluginCommand {
         #[arg(long)]
         json: bool,
     },
+    /// List built-in plugin presets, sourced from Anthropic's official
+    /// marketplace (github.com/anthropics/claude-plugins-official).
+    Presets,
+    /// Register a plugin from a built-in preset (verified to sync into `claude`; other agents best-effort).
+    AddPreset { name: String },
     /// Install the plugin into the named agents (all registered agents if none given).
     Sync {
         name: String,
@@ -1333,6 +1338,14 @@ fn main() -> anyhow::Result<()> {
                     eprintln!("Dry run (pass --yes to actually install the plugin into agent CLIs).");
                 }
                 let response = client::send(&socket_path, Request::PluginSync { name, agents, dry_run: !yes })?;
+                render::print(response, false);
+            }
+            PluginCommand::Presets => {
+                let response = client::send(&socket_path, Request::PluginPresetList)?;
+                render::print(response, false);
+            }
+            PluginCommand::AddPreset { name } => {
+                let response = client::send(&socket_path, Request::PluginAddPreset { name })?;
                 render::print(response, false);
             }
         },

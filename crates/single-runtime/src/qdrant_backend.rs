@@ -1,17 +1,19 @@
 //! Optional Qdrant-backed vector store — the storage/search half of RAG
 //! (spec section 9's "vector search through configurable providers").
 //!
-//! **Scope note, read before assuming this does semantic search on text**:
-//! this module stores and searches pre-computed vectors. It does not turn
-//! text into a vector itself — that needs a real call to an embeddings API
-//! (OpenAI/Anthropic/etc), which isn't wired up yet (no embeddings-provider
-//! integration exists in this project as of this module). Building that
-//! without a real, tested call to a real embeddings endpoint would be
-//! exactly the kind of fabricated capability this project has avoided
-//! elsewhere, so it's left as an honest gap rather than faked with, say, a
-//! hash-based pseudo-embedding pretending to be semantic. Callers (a
-//! future embeddings integration, or a caller with its own vectors)
-//! supply the vector; this module makes it queryable.
+//! **Scope note**: this module itself stores and searches pre-computed
+//! vectors only — it does not turn text into a vector. That's
+//! `embeddings.rs`'s job (a real call to OpenAI's `/v1/embeddings`), which
+//! *is* wired up as of v0.1.9: `MemoryStore` best-effort embeds and
+//! upserts every memory entry into the `single_memory` collection here,
+//! and `MemorySearchSemantic` embeds the query and searches it, falling
+//! back to substring search if either the embeddings key or
+//! `SINGLE_QDRANT_URL` isn't configured — see `handlers.rs`'s
+//! `MemoryStore`/`MemorySearchSemantic` arms and `embeddings.rs`'s module
+//! docs. This module's own direct callers (`single memory vector
+//! upsert/search`) still take pre-computed vectors — the text→vector step
+//! only happens in the memory-entry path described above, not as a
+//! generic feature of this module.
 //!
 //! The REST API shape used here (`PUT /collections/{name}`, `PUT
 //! .../points`, `POST .../points/search`, `POST .../points/delete`) was

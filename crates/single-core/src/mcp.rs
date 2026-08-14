@@ -161,6 +161,114 @@ pub fn presets() -> Vec<McpPreset> {
         // distrobox containers. Requires distrobox itself, and containers
         // named "kali"/"blackarch" to already exist (`distrobox list`).
         McpPreset { name: "distrobox-control", command: "single-mcp", args: &["--distrobox"], secret_env_vars: &[] },
+
+        // --- Growth v0.1.16: catalog expansion (52 new presets) ---
+        //
+        // Every package name below was confirmed to actually exist via a
+        // live registry lookup at the time it was added (`curl
+        // https://registry.npmjs.org/<pkg>` / `https://pypi.org/pypi/<pkg>/json`
+        // returning 200, same discipline `npm view <package> version`
+        // already established above) — nothing here is a guessed package
+        // name. Env var names split into two confidence tiers, marked
+        // per-entry:
+        //   - "confirmed": read directly from that project's own README
+        //     (fetched live, not from memory).
+        //   - "convention": not independently confirmed for this specific
+        //     package, but matches that vendor's own standard env var
+        //     naming used across their other tooling (same honesty
+        //     standard as the `cloudflare` preset above) — verify against
+        //     the package's own docs before enabling if it matters.
+        // A few real servers take a connection string/credential as a
+        // positional CLI arg rather than an env var (redis, sqlite,
+        // twilio) — these ship with a placeholder arg and no
+        // secret_env_vars, same pattern as the `filesystem` default above:
+        // present so `single mcp add-preset` reaches them, but requiring a
+        // manual edit before they'll actually run.
+
+        // Dev tools / project management
+        McpPreset { name: "notion", command: "npx", args: &["-y", "@notionhq/notion-mcp-server"], secret_env_vars: &["NOTION_TOKEN"] }, // confirmed
+        McpPreset { name: "linear", command: "npx", args: &["-y", "mcp-server-linear"], secret_env_vars: &["LINEAR_ACCESS_TOKEN"] }, // confirmed
+        McpPreset { name: "sentry", command: "npx", args: &["-y", "@sentry/mcp-server"], secret_env_vars: &["SENTRY_ACCESS_TOKEN"] }, // confirmed
+        McpPreset { name: "gitlab", command: "npx", args: &["-y", "@modelcontextprotocol/server-gitlab"], secret_env_vars: &["GITLAB_PERSONAL_ACCESS_TOKEN"] }, // convention (official MCP reference server)
+        McpPreset { name: "figma", command: "npx", args: &["-y", "figma-developer-mcp"], secret_env_vars: &["FIGMA_API_KEY"] }, // confirmed
+        McpPreset { name: "docker", command: "npx", args: &["-y", "docker-mcp"], secret_env_vars: &[] }, // local docker socket, no secret
+        McpPreset { name: "kubernetes", command: "npx", args: &["-y", "mcp-server-kubernetes"], secret_env_vars: &[] }, // local kubeconfig, no secret
+        McpPreset { name: "azure", command: "npx", args: &["-y", "@azure/mcp"], secret_env_vars: &[] }, // uses `az login` CLI auth, no env secret
+        McpPreset { name: "vercel", command: "npx", args: &["-y", "vercel-mcp-server"], secret_env_vars: &["VERCEL_TOKEN"] }, // convention
+        McpPreset { name: "netlify", command: "npx", args: &["-y", "@netlify/mcp"], secret_env_vars: &["NETLIFY_AUTH_TOKEN"] }, // convention
+
+        // Databases / data infra
+        McpPreset { name: "mongodb", command: "npx", args: &["-y", "mongodb-mcp-server"], secret_env_vars: &["MDB_MCP_CONNECTION_STRING"] }, // confirmed
+        McpPreset { name: "elasticsearch", command: "npx", args: &["-y", "@elastic/mcp-server-elasticsearch"], secret_env_vars: &["ES_URL", "ES_API_KEY"] }, // confirmed
+        McpPreset { name: "mysql", command: "npx", args: &["-y", "@benborla29/mcp-server-mysql"], secret_env_vars: &["MYSQL_HOST", "MYSQL_USER", "MYSQL_PASS", "MYSQL_DB"] }, // confirmed
+        // Real, functioning invocation but no connection URL configured —
+        // ships disabled like `filesystem` above; edit the arg before
+        // enabling (`single mcp add-preset redis` then edit mcp.toml).
+        McpPreset { name: "redis", command: "npx", args: &["-y", "@modelcontextprotocol/server-redis", "redis://localhost:6379"], secret_env_vars: &[] },
+        McpPreset { name: "qdrant-server", command: "uvx", args: &["mcp-server-qdrant"], secret_env_vars: &["QDRANT_URL", "QDRANT_API_KEY"] }, // confirmed
+        McpPreset { name: "chroma", command: "uvx", args: &["chroma-mcp"], secret_env_vars: &[] }, // local mode by default, no secret required
+        McpPreset { name: "neo4j", command: "uvx", args: &["mcp-neo4j-cypher"], secret_env_vars: &["NEO4J_URI", "NEO4J_USERNAME", "NEO4J_PASSWORD"] }, // URI/USERNAME confirmed, PASSWORD by convention
+        McpPreset { name: "snowflake", command: "uvx", args: &["mcp-snowflake-server"], secret_env_vars: &["SNOWFLAKE_ACCOUNT", "SNOWFLAKE_USER", "SNOWFLAKE_PASSWORD"] }, // PASSWORD confirmed, others by convention
+        McpPreset { name: "sqlite", command: "uvx", args: &["mcp-server-sqlite", "--db-path", "/path/to/database.db"], secret_env_vars: &[] }, // local file; edit --db-path before enabling
+        McpPreset { name: "meilisearch", command: "npx", args: &["-y", "meilisearch-mcp"], secret_env_vars: &["MEILI_HTTP_ADDR", "MEILI_MASTER_KEY"] }, // convention
+        McpPreset { name: "supabase", command: "npx", args: &["-y", "@supabase/mcp-server-supabase"], secret_env_vars: &["SUPABASE_ACCESS_TOKEN"] }, // convention
+
+        // Cloud / infra
+        McpPreset { name: "aws-kb-retrieval", command: "npx", args: &["-y", "@modelcontextprotocol/server-aws-kb-retrieval"], secret_env_vars: &["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"] }, // convention (standard AWS SDK env vars)
+
+        // Search / web
+        McpPreset { name: "tavily", command: "npx", args: &["-y", "tavily-mcp"], secret_env_vars: &["TAVILY_API_KEY"] }, // convention
+        McpPreset { name: "exa", command: "npx", args: &["-y", "exa-mcp-server"], secret_env_vars: &["EXA_API_KEY"] }, // convention
+        McpPreset { name: "firecrawl", command: "npx", args: &["-y", "firecrawl-mcp"], secret_env_vars: &["FIRECRAWL_API_KEY"] }, // confirmed
+        McpPreset { name: "context7", command: "npx", args: &["-y", "@upstash/context7-mcp"], secret_env_vars: &[] }, // works unauthenticated (rate-limited); API key is an optional CLI flag, not an env var
+        McpPreset { name: "duckduckgo", command: "uvx", args: &["duckduckgo-mcp-server"], secret_env_vars: &[] }, // public search, no secret
+        McpPreset { name: "wikipedia", command: "uvx", args: &["wikipedia-mcp"], secret_env_vars: &[] }, // public API, no secret
+        McpPreset { name: "arxiv", command: "uvx", args: &["arxiv-mcp-server"], secret_env_vars: &[] }, // public API, no secret
+        McpPreset { name: "browserbase", command: "npx", args: &["-y", "@browserbasehq/mcp-server-browserbase"], secret_env_vars: &["BROWSERBASE_API_KEY", "BROWSERBASE_PROJECT_ID"] }, // convention
+        McpPreset { name: "weather", command: "npx", args: &["-y", "mcp-server-weather"], secret_env_vars: &[] }, // open-meteo backed, no secret
+
+        // Productivity / knowledge
+        McpPreset { name: "airtable", command: "npx", args: &["-y", "airtable-mcp-server"], secret_env_vars: &["AIRTABLE_API_KEY"] }, // confirmed
+        McpPreset { name: "obsidian", command: "npx", args: &["-y", "mcp-obsidian"], secret_env_vars: &["OBSIDIAN_API_KEY"] }, // convention (talks to the Obsidian Local REST API plugin)
+        McpPreset {
+            name: "atlassian",
+            command: "uvx",
+            args: &["mcp-atlassian"],
+            // Confirmed via README: covers both Jira and Confluence in one server.
+            secret_env_vars: &["JIRA_URL", "JIRA_USERNAME", "JIRA_API_TOKEN", "CONFLUENCE_URL", "CONFLUENCE_USERNAME", "CONFLUENCE_API_TOKEN"],
+        },
+        McpPreset { name: "google-maps", command: "npx", args: &["-y", "@modelcontextprotocol/server-google-maps"], secret_env_vars: &["GOOGLE_MAPS_API_KEY"] }, // convention (official MCP reference server)
+        // OAuth credential-file flow (a real `credentials.json`), not a
+        // simple env secret — ships with no secret_env_vars; see the
+        // package's own README for the OAuth setup step before enabling.
+        McpPreset { name: "gdrive", command: "npx", args: &["-y", "@modelcontextprotocol/server-gdrive"], secret_env_vars: &[] },
+        McpPreset { name: "google-calendar", command: "npx", args: &["-y", "google-calendar-mcp"], secret_env_vars: &["GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET"] }, // confirmed
+        McpPreset { name: "everart", command: "npx", args: &["-y", "@modelcontextprotocol/server-everart"], secret_env_vars: &["EVERART_API_KEY"] }, // convention (official MCP reference server)
+
+        // Comms / social / media
+        McpPreset { name: "discord", command: "npx", args: &["-y", "mcp-discord"], secret_env_vars: &["DISCORD_TOKEN"] }, // confirmed
+        McpPreset { name: "reddit", command: "npx", args: &["-y", "reddit-mcp"], secret_env_vars: &["REDDIT_CLIENT_ID", "REDDIT_CLIENT_SECRET"] }, // confirmed
+        McpPreset { name: "youtube", command: "npx", args: &["-y", "youtube-data-mcp-server"], secret_env_vars: &["YOUTUBE_API_KEY"] }, // confirmed
+        McpPreset { name: "spotify", command: "npx", args: &["-y", "spotify-mcp"], secret_env_vars: &["SPOTIFY_CLIENT_ID", "SPOTIFY_CLIENT_SECRET"] }, // convention
+        McpPreset { name: "elevenlabs", command: "uvx", args: &["elevenlabs-mcp"], secret_env_vars: &["ELEVENLABS_API_KEY"] }, // confirmed
+        // Twilio's own CLI takes a single composite "SID/KEY:SECRET"
+        // positional credential, not separate env vars — ships with a
+        // placeholder arg, edit before enabling.
+        McpPreset { name: "twilio", command: "npx", args: &["-y", "@twilio-alpha/mcp", "YOUR_ACCOUNT_SID/YOUR_API_KEY:YOUR_API_SECRET"], secret_env_vars: &[] },
+
+        // Commerce / business
+        McpPreset { name: "stripe", command: "npx", args: &["-y", "@stripe/mcp"], secret_env_vars: &["STRIPE_SECRET_KEY"] }, // confirmed
+        McpPreset { name: "shopify", command: "npx", args: &["-y", "@shopify/dev-mcp"], secret_env_vars: &[] }, // shopify.dev docs assistant, no store-data access, no secret
+        McpPreset { name: "hubspot", command: "npx", args: &["-y", "@hubspot/mcp-server"], secret_env_vars: &["PRIVATE_APP_ACCESS_TOKEN"] }, // convention (HubSpot's private-app token naming)
+        McpPreset { name: "n8n", command: "npx", args: &["-y", "n8n-mcp"], secret_env_vars: &["N8N_API_URL", "N8N_API_KEY"] }, // convention
+
+        // AI / ML platforms
+        McpPreset { name: "huggingface", command: "npx", args: &["-y", "huggingface-mcp-server"], secret_env_vars: &["HF_TOKEN"] }, // convention (Hugging Face's own standard token env var)
+        McpPreset { name: "replicate", command: "npx", args: &["-y", "replicate-mcp-server"], secret_env_vars: &["REPLICATE_API_TOKEN"] }, // convention (matches Replicate's own client libraries)
+
+        // Time / utility (no secrets)
+        McpPreset { name: "time", command: "uvx", args: &["mcp-server-time"], secret_env_vars: &[] },
+        McpPreset { name: "pandoc", command: "uvx", args: &["mcp-pandoc"], secret_env_vars: &[] }, // local document conversion
     ]
 }
 
@@ -368,6 +476,37 @@ mod tests {
         let spec = preset("postgres").unwrap().to_spec();
         assert_eq!(spec.command, "npx");
         assert!(!spec.enabled);
+    }
+
+    #[test]
+    fn v0_1_16_catalog_expansion_added_at_least_50_new_presets_all_disabled_with_unique_names() {
+        let presets = presets();
+        // 7 presets existed before the v0.1.16 catalog expansion.
+        assert!(presets.len() >= 57, "expected 50+ new presets on top of the original 7, got {} total", presets.len());
+
+        let mut seen = std::collections::HashSet::new();
+        for p in &presets {
+            assert!(seen.insert(p.name), "duplicate preset name: {}", p.name);
+            assert!(!p.to_spec().enabled, "preset {} must ship disabled", p.name);
+        }
+    }
+
+    #[test]
+    fn spot_check_new_preset_secret_wiring() {
+        let spec = preset("notion").unwrap().to_spec();
+        assert_eq!(spec.secret_env.get("NOTION_TOKEN"), Some(&"mcp:notion:NOTION_TOKEN".to_string()));
+
+        let spec = preset("atlassian").unwrap().to_spec();
+        assert_eq!(spec.command, "uvx");
+        for var in ["JIRA_URL", "JIRA_USERNAME", "JIRA_API_TOKEN", "CONFLUENCE_URL", "CONFLUENCE_USERNAME", "CONFLUENCE_API_TOKEN"] {
+            assert!(spec.secret_env.contains_key(var), "atlassian missing {var}");
+        }
+
+        // Servers whose credential is a positional CLI arg, not an env var,
+        // must ship with no secret_env_vars (nothing to silently mis-wire).
+        for name in ["redis", "sqlite", "twilio"] {
+            assert!(preset(name).unwrap().to_spec().secret_env.is_empty(), "{name} should have no secret_env");
+        }
     }
 
     #[test]

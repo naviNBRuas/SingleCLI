@@ -551,6 +551,19 @@ fn dispatch(ctx: &Context, request: Request) -> anyhow::Result<ResponseData> {
             }
             Ok(ResponseData::PluginSyncResults(results))
         }
+        Request::PluginPresetList => {
+            let presets = single_core::plugins::presets()
+                .into_iter()
+                .map(|p| single_protocol::PluginPresetInfo { name: p.name.to_string(), target: p.target.to_string() })
+                .collect();
+            Ok(ResponseData::PluginPresets(presets))
+        }
+        Request::PluginAddPreset { name } => {
+            let preset = single_core::plugins::preset(&name)
+                .ok_or_else(|| anyhow::anyhow!("no such preset: {name} (see `single plugin presets`)"))?;
+            single_core::plugins::add(&ctx.dirs.plugins_registry_file(), preset.to_spec())?;
+            Ok(ResponseData::Empty)
+        }
         Request::KgCreateEntity { name, entity_type } => {
             let conn = kg_db(ctx)?;
             crate::knowledge_graph::create_entity(&conn, &name, &entity_type)?;

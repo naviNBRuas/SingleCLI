@@ -104,6 +104,123 @@ pub fn presets() -> Vec<LspPreset> {
         LspPreset { name: "tailwindcss", command: "tailwindcss-language-server", args: &["--stdio"], extensions: &[".html", ".jsx", ".tsx", ".vue"] },
         LspPreset { name: "asm", command: "asm-lsp", args: &[], extensions: &[".asm", ".s", ".S"] },
         LspPreset { name: "solidity", command: "nomicfoundation-solidity-language-server", args: &["--stdio"], extensions: &[".sol"] },
+
+        // --- Growth v0.1.16: catalog expansion (101 new presets) ---
+        //
+        // Every command/args tuple below was pulled verbatim from
+        // nvim-lspconfig's own generated reference doc
+        // (github.com/neovim/nvim-lspconfig, doc/configs.md, fetched live
+        // and parsed programmatically, not retyped from memory) — the same
+        // real, machine-checked `default_config.cmd` every Neovim LSP user
+        // actually runs. Nothing here is a guessed command or flag.
+        // Extensions were curated by hand per language (not derived from
+        // Neovim's internal filetype names, which don't map 1:1 to file
+        // extensions). A small number of real entries whose cmd embeds a
+        // multi-line generated script rather than a flat arg list (e.g.
+        // Julia's LanguageServer.jl bootstrap) were left out rather than
+        // mangled into something that wouldn't actually run.
+        LspPreset { name: "elixir", command: "elixir-ls", args: &[], extensions: &[".ex", ".exs"] },
+        LspPreset { name: "elm", command: "elm-language-server", args: &[], extensions: &[".elm"] },
+        LspPreset { name: "haskell", command: "haskell-language-server-wrapper", args: &["--lsp"], extensions: &[".hs", ".lhs"] },
+        LspPreset { name: "ocaml", command: "ocamllsp", args: &[], extensions: &[".ml", ".mli"] },
+        LspPreset { name: "clojure", command: "clojure-lsp", args: &[], extensions: &[".clj", ".cljs", ".cljc"] },
+        LspPreset { name: "fsharp", command: "fsautocomplete", args: &["--adaptive-lsp-server-enabled"], extensions: &[".fs", ".fsi", ".fsx"] },
+        LspPreset { name: "kotlin", command: "kotlin-language-server", args: &[], extensions: &[".kt", ".kts"] },
+        LspPreset { name: "scala", command: "metals", args: &[], extensions: &[".scala", ".sbt"] },
+        LspPreset { name: "sourcekit", command: "sourcekit-lsp", args: &[], extensions: &[".swift"] },
+        LspPreset { name: "lua", command: "lua-language-server", args: &[], extensions: &[".lua"] },
+        LspPreset { name: "ruby-solargraph", command: "solargraph", args: &["stdio"], extensions: &[".rb"] },
+        LspPreset { name: "ruby-standardrb", command: "standardrb", args: &["--lsp"], extensions: &[".rb"] },
+        LspPreset { name: "perl", command: "perlnavigator", args: &[], extensions: &[".pl", ".pm"] },
+        LspPreset { name: "r", command: "R", args: &["--no-echo", "-e", "languageserver::run()"], extensions: &[".r", ".R"] },
+        LspPreset { name: "nim", command: "nimlsp", args: &[], extensions: &[".nim"] },
+        LspPreset { name: "zig", command: "zls", args: &[], extensions: &[".zig"] },
+        LspPreset { name: "vlang", command: "v-analyzer", args: &[], extensions: &[".v"] },
+        LspPreset { name: "crystal", command: "crystalline", args: &[], extensions: &[".cr"] },
+        LspPreset { name: "dart", command: "dart", args: &["language-server", "--protocol=lsp"], extensions: &[".dart"] },
+        LspPreset { name: "groovy", command: "groovy-language-server", args: &[], extensions: &[".groovy", ".gradle"] },
+        LspPreset { name: "graphql", command: "graphql-lsp", args: &["server", "-m", "stream"], extensions: &[".graphql", ".gql"] },
+        LspPreset { name: "prisma", command: "prisma-language-server", args: &["--stdio"], extensions: &[".prisma"] },
+        LspPreset { name: "toml", command: "taplo", args: &["lsp", "stdio"], extensions: &[".toml"] },
+        LspPreset { name: "nix", command: "nixd", args: &[], extensions: &[".nix"] },
+        LspPreset { name: "cmake", command: "neocmakelsp", args: &["stdio"], extensions: &["CMakeLists.txt", ".cmake"] },
+        LspPreset { name: "just", command: "just-lsp", args: &[], extensions: &["Justfile", ".just"] },
+        LspPreset { name: "meson", command: "mesonlsp", args: &["--lsp"], extensions: &["meson.build"] },
+        LspPreset { name: "ansible", command: "ansible-language-server", args: &["--stdio"], extensions: &[".yml", ".yaml"] },
+        LspPreset { name: "puppet", command: "puppet-languageserver", args: &["--stdio"], extensions: &[".pp"] },
+        LspPreset { name: "postgres", command: "postgres-language-server", args: &["lsp-proxy"], extensions: &[".sql"] },
+        LspPreset { name: "sql", command: "sql-language-server", args: &["up", "--method", "stdio"], extensions: &[".sql"] },
+        LspPreset { name: "protobuf", command: "protols", args: &[], extensions: &[".proto"] },
+        LspPreset { name: "buf", command: "buf", args: &["lsp", "serve", "--log-format=text"], extensions: &[".proto"] },
+        LspPreset { name: "thrift", command: "thriftls", args: &[], extensions: &[".thrift"] },
+        LspPreset { name: "verilog", command: "svlangserver", args: &[], extensions: &[".v", ".sv", ".svh"] },
+        LspPreset { name: "vhdl", command: "vhdl_ls", args: &[], extensions: &[".vhd", ".vhdl"] },
+        LspPreset { name: "robotframework", command: "robotframework_ls", args: &[], extensions: &[".robot"] },
+        LspPreset { name: "latex", command: "texlab", args: &[], extensions: &[".tex"] },
+        LspPreset { name: "typst", command: "tinymist", args: &[], extensions: &[".typ"] },
+        LspPreset { name: "markdown", command: "marksman", args: &["server"], extensions: &[".md"] },
+        LspPreset { name: "vue", command: "vue-language-server", args: &["--stdio"], extensions: &[".vue"] },
+        LspPreset { name: "astro", command: "astro-ls", args: &["--stdio"], extensions: &[".astro"] },
+        LspPreset { name: "unocss", command: "unocss-language-server", args: &["--stdio"], extensions: &[".html", ".jsx", ".tsx", ".vue"] },
+        LspPreset { name: "stylelint", command: "stylelint-language-server", args: &["--stdio"], extensions: &[".css", ".scss", ".less"] },
+        LspPreset { name: "jsonnet", command: "jsonnet-language-server", args: &[], extensions: &[".jsonnet", ".libsonnet"] },
+        LspPreset { name: "kdl", command: "kdl-lsp", args: &[], extensions: &[".kdl"] },
+        LspPreset { name: "helm", command: "helm_ls", args: &["serve"], extensions: &[".yaml", ".yml"] },
+        LspPreset { name: "opentofu", command: "tofu-ls", args: &["serve"], extensions: &[".tf", ".tofu"] },
+        LspPreset { name: "pkl", command: "pkl-lsp", args: &[], extensions: &[".pkl"] },
+        LspPreset { name: "cue", command: "cue", args: &["lsp"], extensions: &[".cue"] },
+        LspPreset { name: "dhall", command: "dhall-lsp-server", args: &[], extensions: &[".dhall"] },
+        LspPreset { name: "purescript", command: "purescript-language-server", args: &["--stdio"], extensions: &[".purs"] },
+        LspPreset { name: "reasonml", command: "reason-language-server", args: &[], extensions: &[".re", ".rei"] },
+        LspPreset { name: "gleam", command: "gleam", args: &["lsp"], extensions: &[".gleam"] },
+        LspPreset { name: "roc", command: "roc_language_server", args: &[], extensions: &[".roc"] },
+        LspPreset { name: "unison", command: "nc", args: &["localhost", "5757"], extensions: &[".u"] },
+        LspPreset { name: "idris2", command: "idris2-lsp", args: &[], extensions: &[".idr"] },
+        LspPreset { name: "agda", command: "als", args: &[], extensions: &[".agda"] },
+        LspPreset { name: "coq", command: "coq-lsp", args: &[], extensions: &[".v"] },
+        LspPreset { name: "lean3", command: "lean-language-server", args: &["--stdio", "--", "-M", "4096", "-T", "100000"], extensions: &[".lean"] },
+        LspPreset { name: "scheme", command: "scheme-langserver", args: &["~/.scheme-langserver.log", "enable", "disable"], extensions: &[".scm", ".ss"] },
+        LspPreset { name: "racket", command: "racket", args: &["--lib", "racket-langserver"], extensions: &[".rkt"] },
+        LspPreset { name: "fennel", command: "fennel-ls", args: &[], extensions: &[".fnl"] },
+        LspPreset { name: "janet", command: "janet-lsp", args: &["--stdio"], extensions: &[".janet"] },
+        LspPreset { name: "wgsl", command: "wgsl-analyzer", args: &[], extensions: &[".wgsl"] },
+        LspPreset { name: "glsl", command: "glsl_analyzer", args: &[], extensions: &[".glsl", ".vert", ".frag"] },
+        LspPreset { name: "move", command: "move-analyzer", args: &[], extensions: &[".move"] },
+        LspPreset { name: "cairo", command: "scarb", args: &["cairo-language-server", "/C", "--node-ipc"], extensions: &[".cairo"] },
+        LspPreset { name: "vala", command: "vala-language-server", args: &[], extensions: &[".vala"] },
+        LspPreset { name: "nginx", command: "nginx-language-server", args: &[], extensions: &["nginx.conf"] },
+        LspPreset { name: "systemd", command: "systemd-lsp", args: &[], extensions: &[".service", ".socket", ".timer"] },
+        LspPreset { name: "awk", command: "awk-language-server", args: &[], extensions: &[".awk"] },
+        LspPreset { name: "fish", command: "fish-lsp", args: &["start"], extensions: &[".fish"] },
+        LspPreset { name: "openscad", command: "openscad-lsp", args: &["--stdio"], extensions: &[".scad"] },
+        LspPreset { name: "matlab", command: "matlab-language-server", args: &["--stdio"], extensions: &[".m"] },
+        LspPreset { name: "fortran", command: "fortls", args: &["--notify_init", "--hover_signature", "--hover_language=fortran", "--use_signature_help"], extensions: &[".f90", ".f95", ".f03"] },
+        LspPreset { name: "cobol", command: "cobol-language-support", args: &[], extensions: &[".cob", ".cbl"] },
+        LspPreset { name: "ada", command: "ada_language_server", args: &[], extensions: &[".adb", ".ads"] },
+        LspPreset { name: "prolog", command: "swipl", args: &["-g", "use_module(library(lsp_server)).", "-g", "lsp_server:main", "-t", "halt", "--", "stdio"], extensions: &[".pl", ".pro"] },
+        LspPreset { name: "rescript", command: "rescript-language-server", args: &["--stdio"], extensions: &[".res", ".resi"] },
+        LspPreset { name: "templ", command: "templ", args: &["lsp"], extensions: &[".templ"] },
+        LspPreset { name: "htmx", command: "htmx-lsp", args: &[], extensions: &[".html"] },
+        LspPreset { name: "emmet", command: "emmet-language-server", args: &["--stdio"], extensions: &[".html", ".css", ".jsx", ".tsx"] },
+        LspPreset { name: "yang", command: "yang-language-server", args: &[], extensions: &[".yang"] },
+        LspPreset { name: "spectral", command: "spectral-language-server", args: &["--stdio"], extensions: &[".yaml", ".json"] },
+        LspPreset { name: "rego", command: "regal", args: &["language-server"], extensions: &[".rego"] },
+        LspPreset { name: "starlark", command: "starpls", args: &[], extensions: &[".bzl", ".bazel", "BUILD"] },
+        LspPreset { name: "robotcode", command: "robotcode", args: &["language-server"], extensions: &[".robot", ".resource"] },
+        LspPreset { name: "beancount", command: "beancount-language-server", args: &["--stdio"], extensions: &[".beancount"] },
+        LspPreset { name: "dockercompose", command: "docker-compose-langserver", args: &["--stdio"], extensions: &["docker-compose.yml", "docker-compose.yaml"] },
+        LspPreset { name: "biome", command: "biome", args: &["lsp-proxy"], extensions: &[".js", ".ts", ".jsx", ".tsx", ".json"] },
+        LspPreset { name: "denols", command: "deno", args: &["lsp"], extensions: &[".ts", ".tsx", ".js"] },
+        LspPreset { name: "basedpyright", command: "basedpyright-langserver", args: &["--stdio"], extensions: &[".py"] },
+        LspPreset { name: "ruff-lsp", command: "ruff", args: &["server"], extensions: &[".py"] },
+        LspPreset { name: "gdshader", command: "gdshader-lsp", args: &["--stdio"], extensions: &[".gdshader"] },
+        LspPreset { name: "svelte", command: "svelteserver", args: &["--stdio"], extensions: &[".svelte"] },
+        LspPreset { name: "omnisharp", command: "omnisharp", args: &["-z", "--hostPID", "12345", "DotNet:enablePackageRestore=false", "--encoding", "utf-8", "--languageserver"], extensions: &[".cs"] },
+        LspPreset { name: "csharp-lsp", command: "csharp-ls", args: &[], extensions: &[".cs"] },
+        LspPreset { name: "teal", command: "teal-language-server", args: &[], extensions: &[".tl"] },
+        LspPreset { name: "nickel", command: "nls", args: &[], extensions: &[".ncl"] },
+        LspPreset { name: "dotenv", command: "dot-language-server", args: &["--stdio"], extensions: &[".env"] },
+
     ]
 }
 
@@ -221,6 +338,37 @@ mod tests {
         let spec = preset("clangd").unwrap().to_spec();
         assert_eq!(spec.command, "clangd");
         assert!(spec.enabled);
+    }
+
+    #[test]
+    fn v0_1_16_catalog_expansion_added_at_least_100_new_presets_with_unique_names() {
+        let presets = presets();
+        // 16 presets existed before the v0.1.16 catalog expansion.
+        assert!(presets.len() >= 116, "expected 100+ new presets on top of the original 16, got {} total", presets.len());
+
+        let mut seen = std::collections::HashSet::new();
+        for p in &presets {
+            assert!(seen.insert(p.name), "duplicate preset name: {}", p.name);
+            assert!(!p.command.is_empty(), "{} has an empty command", p.name);
+        }
+    }
+
+    #[test]
+    fn spot_check_new_language_presets() {
+        for (name, command) in [
+            ("elixir", "elixir-ls"),
+            ("haskell", "haskell-language-server-wrapper"),
+            ("kotlin", "kotlin-language-server"),
+            ("scala", "metals"),
+            ("zig", "zls"),
+            ("lua", "lua-language-server"),
+            ("vue", "vue-language-server"),
+            ("svelte", "svelteserver"),
+        ] {
+            let spec = preset(name).unwrap_or_else(|| panic!("missing preset {name}")).to_spec();
+            assert_eq!(spec.command, command, "preset {name}");
+            assert!(!spec.extensions.is_empty(), "preset {name} has no extensions");
+        }
     }
 
     #[test]

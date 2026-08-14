@@ -189,6 +189,8 @@ pub enum Request {
     PluginList,
     PluginInspect { name: String },
     PluginSync { name: String, agents: Vec<String>, dry_run: bool },
+    PluginPresetList,
+    PluginAddPreset { name: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -262,6 +264,7 @@ pub enum ResponseData {
     Profiles(Vec<String>),
     Plugin(PluginSpec),
     Plugins(Vec<PluginSpec>),
+    PluginPresets(Vec<PluginPresetInfo>),
     PluginSyncResults(Vec<PluginInstallResult>),
     Empty,
 }
@@ -764,6 +767,12 @@ pub struct LspPresetInfo {
     pub command: String,
     pub args: Vec<String>,
     pub extensions: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PluginPresetInfo {
+    pub name: String,
+    pub target: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -341,6 +341,11 @@ fn print_data(data: ResponseData) {
                 println!("{:<16} {:<28} {}", p.name, p.target, p.opencode_module.as_deref().unwrap_or("-"));
             }
         }
+        ResponseData::PluginPresets(presets) => {
+            for p in presets {
+                println!("{:<28} {}", p.name, p.target);
+            }
+        }
         ResponseData::PluginSyncResults(results) => {
             for r in results {
                 let mark = if r.applied { "✓" } else { "·" };
