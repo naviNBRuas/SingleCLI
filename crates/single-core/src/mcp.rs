@@ -34,28 +34,28 @@ pub fn default_servers() -> Vec<McpServerSpec> {
             name: "git".into(),
             command: "uvx".into(),
             args: vec!["mcp-server-git".into()],
-            env: BTreeMap::new(),
+            env: BTreeMap::new(), secret_env: BTreeMap::new(),
             enabled: true,
         },
         McpServerSpec {
             name: "memory".into(),
             command: "npx".into(),
             args: vec!["-y".into(), "@modelcontextprotocol/server-memory".into()],
-            env: BTreeMap::new(),
+            env: BTreeMap::new(), secret_env: BTreeMap::new(),
             enabled: true,
         },
         McpServerSpec {
             name: "fetch".into(),
             command: "uvx".into(),
             args: vec!["mcp-server-fetch".into()],
-            env: BTreeMap::new(),
+            env: BTreeMap::new(), secret_env: BTreeMap::new(),
             enabled: true,
         },
         McpServerSpec {
             name: "sequential-thinking".into(),
             command: "npx".into(),
             args: vec!["-y".into(), "@modelcontextprotocol/server-sequential-thinking".into()],
-            env: BTreeMap::new(),
+            env: BTreeMap::new(), secret_env: BTreeMap::new(),
             enabled: true,
         },
         McpServerSpec {
@@ -68,7 +68,7 @@ pub fn default_servers() -> Vec<McpServerSpec> {
             // which is why it ships disabled rather than auto-granting
             // filesystem access to every synced agent.
             args: vec!["-y".into(), "@modelcontextprotocol/server-filesystem".into()],
-            env: BTreeMap::new(),
+            env: BTreeMap::new(), secret_env: BTreeMap::new(),
             enabled: false,
         },
         McpServerSpec {
@@ -82,21 +82,21 @@ pub fn default_servers() -> Vec<McpServerSpec> {
                 "GITHUB_PERSONAL_ACCESS_TOKEN".into(),
                 "ghcr.io/github/github-mcp-server".into(),
             ],
-            env: BTreeMap::new(), // set GITHUB_PERSONAL_ACCESS_TOKEN before enabling
+            env: BTreeMap::new(), secret_env: BTreeMap::new(), // set GITHUB_PERSONAL_ACCESS_TOKEN before enabling
             enabled: false,
         },
         McpServerSpec {
             name: "playwright".into(),
             command: "npx".into(),
             args: vec!["-y".into(), "@playwright/mcp@latest".into()],
-            env: BTreeMap::new(),
+            env: BTreeMap::new(), secret_env: BTreeMap::new(),
             enabled: false,
         },
         McpServerSpec {
             name: "chrome-devtools".into(),
             command: "npx".into(),
             args: vec!["-y".into(), "chrome-devtools-mcp@latest".into()],
-            env: BTreeMap::new(),
+            env: BTreeMap::new(), secret_env: BTreeMap::new(),
             enabled: false,
         },
     ]
@@ -116,14 +116,51 @@ pub struct McpPreset {
     pub name: &'static str,
     pub command: &'static str,
     pub args: &'static [&'static str],
+    /// Env var names this server needs a secret value for, e.g.
+    /// `CLOUDFLARE_API_TOKEN`. `to_spec()` pre-wires each into
+    /// `secret_env` under the `mcp:<preset-name>:<VAR>` key convention —
+    /// the value itself still needs `single secret set mcp:<preset-name>:<VAR> <value>`
+    /// before the server can actually run.
+    pub secret_env_vars: &'static [&'static str],
 }
 
 pub fn presets() -> Vec<McpPreset> {
     vec![
-        McpPreset { name: "brave-search", command: "npx", args: &["-y", "@modelcontextprotocol/server-brave-search"] },
-        McpPreset { name: "slack", command: "npx", args: &["-y", "@modelcontextprotocol/server-slack"] },
-        McpPreset { name: "puppeteer", command: "npx", args: &["-y", "@modelcontextprotocol/server-puppeteer"] },
-        McpPreset { name: "postgres", command: "npx", args: &["-y", "@modelcontextprotocol/server-postgres"] },
+        McpPreset { name: "brave-search", command: "npx", args: &["-y", "@modelcontextprotocol/server-brave-search"], secret_env_vars: &[] },
+        McpPreset { name: "slack", command: "npx", args: &["-y", "@modelcontextprotocol/server-slack"], secret_env_vars: &[] },
+        McpPreset { name: "puppeteer", command: "npx", args: &["-y", "@modelcontextprotocol/server-puppeteer"], secret_env_vars: &[] },
+        McpPreset { name: "postgres", command: "npx", args: &["-y", "@modelcontextprotocol/server-postgres"], secret_env_vars: &[] },
+        // Confirmed real via `npm view <package> version` against the live
+        // registry (same discipline as above), in addition to the four
+        // presets already there before this pass:
+        McpPreset {
+            name: "postman",
+            command: "npx",
+            args: &["-y", "postman-mcp-server"],
+            // Confirmed via the project's own README (github.com/ankit-roy-0602/postman-mcp-server).
+            secret_env_vars: &["POSTMAN_API_KEY"],
+        },
+        McpPreset {
+            name: "cloudflare",
+            command: "npx",
+            args: &["-y", "@cloudflare/mcp-server-cloudflare"],
+            // NOT independently confirmed against this package's own docs
+            // (Cloudflare's MCP tooling has moved toward hosted remote
+            // servers since this npm package was published; its exact
+            // env var wasn't verified here) — CLOUDFLARE_API_TOKEN is
+            // Cloudflare's consistent convention across their other CLI
+            // tooling (wrangler, their Terraform provider), used here as
+            // the best-available real convention, not a guess made up for
+            // this preset specifically. Verify against the package's own
+            // README before relying on it.
+            secret_env_vars: &["CLOUDFLARE_API_TOKEN"],
+        },
+        // Not an npm package like the others — a real companion mode of
+        // SingleCLI's own single-mcp binary (crates/single-mcp/src/distrobox.rs),
+        // exposing run_in_kali/run_in_blackarch by shelling into those
+        // distrobox containers. Requires distrobox itself, and containers
+        // named "kali"/"blackarch" to already exist (`distrobox list`).
+        McpPreset { name: "distrobox-control", command: "single-mcp", args: &["--distrobox"], secret_env_vars: &[] },
     ]
 }
 
@@ -133,11 +170,14 @@ pub fn preset(name: &str) -> Option<McpPreset> {
 
 impl McpPreset {
     pub fn to_spec(&self) -> McpServerSpec {
+        let secret_env =
+            self.secret_env_vars.iter().map(|var| (var.to_string(), format!("mcp:{}:{var}", self.name))).collect();
         McpServerSpec {
             name: self.name.to_string(),
             command: self.command.to_string(),
             args: self.args.iter().map(|s| s.to_string()).collect(),
             env: BTreeMap::new(),
+            secret_env,
             enabled: false,
         }
     }
@@ -201,6 +241,40 @@ pub fn find(path: &Path, name: &str) -> Result<Option<McpServerSpec>> {
     Ok(load(path)?.into_iter().find(|s| s.name == name))
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct GatewayModeFile {
+    #[serde(default)]
+    enabled: bool,
+}
+
+/// The `single-mcp` server spec `install_integrations` syncs into every
+/// agent when gateway mode is on — one entry instead of every enabled
+/// server in the registry, since `single-mcp` itself dynamically proxies
+/// to them (see `crates/single-mcp`). Resolved via `PATH`, same as `single`
+/// itself, since both binaries are installed side by side.
+pub fn gateway_server_spec() -> McpServerSpec {
+    McpServerSpec { name: "single-mcp".into(), command: "single-mcp".into(), args: vec![], env: BTreeMap::new(), secret_env: BTreeMap::new(), enabled: true }
+}
+
+/// Reads the `mcp_gateway.toml` flag (see `SingleDirs::mcp_gateway_file`).
+/// Missing file means gateway mode has never been turned on — `false`.
+pub fn gateway_mode(path: &Path) -> Result<bool> {
+    if !path.exists() {
+        return Ok(false);
+    }
+    let text = std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    let file: GatewayModeFile = toml::from_str(&text).with_context(|| format!("parsing {} as TOML", path.display()))?;
+    Ok(file.enabled)
+}
+
+pub fn set_gateway_mode(path: &Path, enabled: bool) -> Result<()> {
+    let rendered = toml::to_string_pretty(&GatewayModeFile { enabled }).context("serializing mcp gateway flag")?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(path, rendered).with_context(|| format!("writing {}", path.display()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -240,7 +314,7 @@ mod tests {
             name: "custom".into(),
             command: "npx".into(),
             args: vec!["-y".into(), "custom-server".into()],
-            env: BTreeMap::new(),
+            env: BTreeMap::new(), secret_env: BTreeMap::new(),
             enabled: false,
         }];
         save(&path, &servers).unwrap();
@@ -255,7 +329,7 @@ mod tests {
             name: "custom".into(),
             command: "npx".into(),
             args: vec!["-y".into(), "custom-server".into()],
-            env: BTreeMap::new(),
+            env: BTreeMap::new(), secret_env: BTreeMap::new(),
             enabled: true,
         }
     }
@@ -287,13 +361,50 @@ mod tests {
     #[test]
     fn presets_are_disabled_by_default_and_resolve_by_name() {
         let names: Vec<_> = presets().iter().map(|p| p.name).collect();
-        for expected in ["brave-search", "slack", "puppeteer", "postgres"] {
+        for expected in ["brave-search", "slack", "puppeteer", "postgres", "postman", "cloudflare", "distrobox-control"] {
             assert!(names.contains(&expected), "missing preset {expected}");
         }
         assert!(preset("nonexistent").is_none());
         let spec = preset("postgres").unwrap().to_spec();
         assert_eq!(spec.command, "npx");
         assert!(!spec.enabled);
+    }
+
+    #[test]
+    fn secret_backed_presets_prewire_secret_env_under_the_naming_convention() {
+        let spec = preset("postman").unwrap().to_spec();
+        assert_eq!(spec.secret_env.get("POSTMAN_API_KEY"), Some(&"mcp:postman:POSTMAN_API_KEY".to_string()));
+        assert!(spec.env.is_empty(), "the raw value must never land in the plain env map");
+
+        let spec = preset("cloudflare").unwrap().to_spec();
+        assert_eq!(spec.secret_env.get("CLOUDFLARE_API_TOKEN"), Some(&"mcp:cloudflare:CLOUDFLARE_API_TOKEN".to_string()));
+    }
+
+    #[test]
+    fn presets_with_no_secret_needs_have_empty_secret_env() {
+        let spec = preset("brave-search").unwrap().to_spec();
+        assert!(spec.secret_env.is_empty());
+    }
+
+    #[test]
+    fn gateway_mode_defaults_to_off_and_round_trips() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mcp_gateway.toml");
+        assert!(!gateway_mode(&path).unwrap());
+
+        set_gateway_mode(&path, true).unwrap();
+        assert!(gateway_mode(&path).unwrap());
+
+        set_gateway_mode(&path, false).unwrap();
+        assert!(!gateway_mode(&path).unwrap());
+    }
+
+    #[test]
+    fn gateway_server_spec_is_named_and_enabled() {
+        let spec = gateway_server_spec();
+        assert_eq!(spec.name, "single-mcp");
+        assert_eq!(spec.command, "single-mcp");
+        assert!(spec.enabled);
     }
 
     #[test]

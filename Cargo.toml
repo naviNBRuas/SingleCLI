@@ -7,10 +7,11 @@ members = [
     "crates/single-agent-sdk",
     "crates/single-cli",
     "crates/single-tui",
+    "crates/single-mcp",
 ]
 
 [workspace.package]
-version = "0.1.9"
+version = "0.1.10"
 edition = "2021"
 license = "MIT"
 authors = ["Navin B. Ruas <founder@nbr.company>"]

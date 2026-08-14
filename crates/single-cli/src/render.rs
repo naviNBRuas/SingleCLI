@@ -96,6 +96,9 @@ fn print_data(data: ResponseData) {
                 println!("{:<16} {} {}", p.name, p.command, p.args.join(" "));
             }
         }
+        ResponseData::McpGatewayMode(enabled) => {
+            println!("gateway mode: {}", if enabled { "enabled" } else { "disabled" });
+        }
         ResponseData::LspServers(servers) => {
             if servers.is_empty() {
                 println!("(no lsp servers registered)");

@@ -25,6 +25,11 @@ pub enum Request {
     McpInspect { name: String },
     McpPresetList,
     McpAddPreset { name: String },
+    /// Toggles gateway mode (see `single_core::mcp::gateway_mode`) — takes
+    /// effect on the next `single install-integrations --yes`, not
+    /// retroactively.
+    McpGatewaySetEnabled { enabled: bool },
+    McpGatewayStatus,
     LspList,
     LspAdd { server: LspServerSpec },
     LspRemove { name: String },
@@ -179,6 +184,7 @@ pub enum ResponseData {
     McpServers(Vec<McpServerInfo>),
     McpServer(McpServerSpec),
     McpPresets(Vec<McpPresetInfo>),
+    McpGatewayMode(bool),
     LspServers(Vec<LspServerSpec>),
     LspServer(LspServerSpec),
     LspPresets(Vec<LspPresetInfo>),
@@ -401,6 +407,21 @@ pub struct McpServerSpec {
     pub args: Vec<String>,
     #[serde(default)]
     pub env: BTreeMap<String, String>,
+    /// Env var name -> secret-store key (see `single_core::secrets`), for
+    /// values that must never sit in plain text in `mcp.toml` the way
+    /// `env` does — an API token for Cloudflare/Postman, for example.
+    /// Resolved at spawn time, not stored raw: the `single-mcp` gateway
+    /// (crates/single-mcp) reads each key from the OS keychain and sets it
+    /// as a real env var on the child process it spawns, so the value
+    /// never touches disk anywhere. This resolution currently only
+    /// happens in the gateway path — direct native-config sync
+    /// (`single install-integrations` without gateway mode) still writes
+    /// whatever's in `env` verbatim into each agent's own config file,
+    /// same as it always has (matching `provider_sync.rs`'s existing
+    /// precedent for provider API keys); a secret-backed server synced
+    /// that way needs its value put in `env` directly, same as before.
+    #[serde(default)]
+    pub secret_env: BTreeMap<String, String>,
     #[serde(default = "default_true")]
     pub enabled: bool,
 }

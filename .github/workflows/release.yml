@@ -56,6 +56,7 @@ jobs:
           mkdir -p "$out"
           cp target/${{ matrix.rust_target }}/release/single "$out/"
           cp target/${{ matrix.rust_target }}/release/single-runtimed "$out/"
+          cp target/${{ matrix.rust_target }}/release/single-mcp "$out/"
           tar -czf "$out.tar.gz" "$out"
       - uses: actions/upload-artifact@v4
         with:
@@ -84,6 +85,7 @@ jobs:
           mkdir -p "$out"
           cp target/x86_64-apple-darwin/release/single "$out/"
           cp target/x86_64-apple-darwin/release/single-runtimed "$out/"
+          cp target/x86_64-apple-darwin/release/single-mcp "$out/"
           tar -czf "$out.tar.gz" "$out"
       - uses: actions/upload-artifact@v4
         with:

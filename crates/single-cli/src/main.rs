@@ -190,6 +190,13 @@ enum McpCommand {
     Add {
         name: String,
         command: String,
+        /// A secret-backed env var this server needs, e.g.
+        /// `--secret CLOUDFLARE_API_TOKEN=abc123`. Repeatable. Stored in
+        /// the OS keychain (see `single secret`), never written to
+        /// mcp.toml in plain text — only resolved at spawn time by the
+        /// single-mcp gateway (see `single mcp gateway enable`).
+        #[arg(long = "secret", value_parser = parse_key_val)]
+        secrets: Vec<(String, String)>,
         /// Extra arguments passed to `command`, in order (may start with `-`, e.g. `-y`).
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
@@ -208,10 +215,29 @@ enum McpCommand {
         #[arg(long)]
         json: bool,
     },
-    /// List built-in MCP server presets (brave-search, slack, puppeteer, postgres).
+    /// List built-in MCP server presets (brave-search, slack, puppeteer, postgres, cloudflare, postman, distrobox-control).
     Presets,
     /// Register an MCP server from a built-in preset (ships disabled — most need a secret).
     AddPreset { name: String },
+    /// Dynamic MCP gateway (crates/single-mcp): when enabled, `single install-integrations`
+    /// syncs only single-mcp into agents' native config instead of every enabled server —
+    /// single-mcp then proxies to them lazily. Takes effect on the next install-integrations.
+    Gateway {
+        #[command(subcommand)]
+        action: McpGatewayCommand,
+    },
+}
+
+fn parse_key_val(s: &str) -> anyhow::Result<(String, String)> {
+    let (k, v) = s.split_once('=').ok_or_else(|| anyhow::anyhow!("expected KEY=VALUE, got '{s}'"))?;
+    Ok((k.to_string(), v.to_string()))
+}
+
+#[derive(Subcommand)]
+enum McpGatewayCommand {
+    Enable,
+    Disable,
+    Status,
 }
 
 #[derive(Subcommand)]
@@ -753,8 +779,15 @@ fn main() -> anyhow::Result<()> {
                 let response = client::send(&socket_path, Request::McpList)?;
                 render::print(response, json);
             }
-            McpCommand::Add { name, command, args } => {
-                let server = McpServerSpec { name, command, args, env: BTreeMap::new(), enabled: true };
+            McpCommand::Add { name, command, secrets, args } => {
+                let mut secret_env = BTreeMap::new();
+                for (env_var, value) in secrets {
+                    let secret_key = format!("mcp:{name}:{env_var}");
+                    let response = client::send(&socket_path, Request::SecretSet { name: secret_key.clone(), value })?;
+                    render::print(response, false); // exits on failure, prints nothing on success
+                    secret_env.insert(env_var, secret_key);
+                }
+                let server = McpServerSpec { name, command, args, env: BTreeMap::new(), secret_env, enabled: true };
                 let response = client::send(&socket_path, Request::McpAdd { server })?;
                 render::print(response, false);
             }
@@ -782,6 +815,22 @@ fn main() -> anyhow::Result<()> {
                 let response = client::send(&socket_path, Request::McpAddPreset { name })?;
                 render::print(response, false);
             }
+            McpCommand::Gateway { action } => match action {
+                McpGatewayCommand::Enable => {
+                    let response = client::send(&socket_path, Request::McpGatewaySetEnabled { enabled: true })?;
+                    render::print(response, false);
+                    eprintln!("run `single install-integrations --yes` to apply this to agents' native config.");
+                }
+                McpGatewayCommand::Disable => {
+                    let response = client::send(&socket_path, Request::McpGatewaySetEnabled { enabled: false })?;
+                    render::print(response, false);
+                    eprintln!("run `single install-integrations --yes` to apply this to agents' native config.");
+                }
+                McpGatewayCommand::Status => {
+                    let response = client::send(&socket_path, Request::McpGatewayStatus)?;
+                    render::print(response, false);
+                }
+            },
         },
         Command::Lsp { action } => match action {
             LspCommand::List { json } => {

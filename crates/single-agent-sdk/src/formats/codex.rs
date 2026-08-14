@@ -81,7 +81,7 @@ mod tests {
             name: "git".into(),
             command: "uvx".into(),
             args: vec!["mcp-server-git".into()],
-            env: BTreeMap::new(),
+            env: BTreeMap::new(), secret_env: BTreeMap::new(),
             enabled: true,
         }];
         let result = apply(&path, &servers).unwrap();
@@ -98,7 +98,7 @@ mod tests {
             name: "memory".into(),
             command: "npx".into(),
             args: vec![],
-            env: BTreeMap::new(),
+            env: BTreeMap::new(), secret_env: BTreeMap::new(),
             enabled: true,
         }];
         let result = apply(&path, &servers).unwrap();

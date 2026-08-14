@@ -756,7 +756,7 @@ fn build_quick_add_request(kind: QuickAddKind, parts: &[&str]) -> Result<Request
             let name = parts.first().filter(|s| !s.is_empty()).ok_or_else(bad_format)?;
             let command = parts.get(1).filter(|s| !s.is_empty()).ok_or_else(bad_format)?;
             let args = parts.get(2).map(|s| s.split(',').filter(|a| !a.is_empty()).map(|a| a.to_string()).collect()).unwrap_or_default();
-            Ok(Request::McpAdd { server: single_protocol::McpServerSpec { name: name.to_string(), command: command.to_string(), args, env: Default::default(), enabled: true } })
+            Ok(Request::McpAdd { server: single_protocol::McpServerSpec { name: name.to_string(), command: command.to_string(), args, env: Default::default(), secret_env: Default::default(), enabled: true } })
         }
         QuickAddKind::Lsp => {
             let name = parts.first().filter(|s| !s.is_empty()).ok_or_else(bad_format)?;

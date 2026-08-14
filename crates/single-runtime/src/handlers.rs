@@ -82,6 +82,13 @@ fn dispatch(ctx: &Context, request: Request) -> anyhow::Result<ResponseData> {
             single_core::mcp::add(&ctx.dirs.mcp_registry_file(), preset.to_spec())?;
             Ok(ResponseData::Empty)
         }
+        Request::McpGatewaySetEnabled { enabled } => {
+            single_core::mcp::set_gateway_mode(&ctx.dirs.mcp_gateway_file(), enabled)?;
+            Ok(ResponseData::Empty)
+        }
+        Request::McpGatewayStatus => {
+            Ok(ResponseData::McpGatewayMode(single_core::mcp::gateway_mode(&ctx.dirs.mcp_gateway_file())?))
+        }
         Request::LspList => {
             Ok(ResponseData::LspServers(single_core::lsp::load(&ctx.dirs.lsp_registry_file())?))
         }

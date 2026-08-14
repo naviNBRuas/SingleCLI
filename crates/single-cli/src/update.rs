@@ -141,7 +141,7 @@ pub fn apply(release: &ReleaseInfo) -> Result<PathBuf> {
     let target = detect_target()?;
     let extracted_dir = tmp_dir.path().join(format!("singlecli-{target}"));
     let mut replaced = Vec::new();
-    for binary in ["single", "single-runtimed"] {
+    for binary in ["single", "single-runtimed", "single-mcp"] {
         let src = extracted_dir.join(binary);
         if !src.exists() {
             continue;

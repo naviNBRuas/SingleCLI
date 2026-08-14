@@ -65,6 +65,14 @@ impl SingleDirs {
         self.root.join("mcp.toml")
     }
 
+    /// Whether `single install-integrations` should sync only the
+    /// `single-mcp` dynamic gateway into agents' native MCP config,
+    /// instead of every enabled server in `mcp_registry_file()` — see
+    /// `single_core::mcp::gateway_mode`.
+    pub fn mcp_gateway_file(&self) -> PathBuf {
+        self.root.join("mcp_gateway.toml")
+    }
+
     pub fn lsp_registry_file(&self) -> PathBuf {
         self.root.join("lsp.toml")
     }

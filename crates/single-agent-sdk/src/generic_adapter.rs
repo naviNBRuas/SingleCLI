@@ -205,7 +205,7 @@ mod tests {
     }
 
     fn sample_servers() -> Vec<McpServerSpec> {
-        vec![McpServerSpec { name: "git".into(), command: "uvx".into(), args: vec!["mcp-server-git".into()], env: BTreeMap::new(), enabled: true }]
+        vec![McpServerSpec { name: "git".into(), command: "uvx".into(), args: vec!["mcp-server-git".into()], env: BTreeMap::new(), secret_env: BTreeMap::new(), enabled: true }]
     }
 
     #[test]
@@ -248,7 +248,7 @@ mod tests {
         let adapter = GenericAdapter::new(sample_def());
         adapter.configure_mcp(dir.path(), &sample_servers(), false).unwrap();
         let mut two_servers = sample_servers();
-        two_servers.push(McpServerSpec { name: "memory".into(), command: "npx".into(), args: vec![], env: BTreeMap::new(), enabled: true });
+        two_servers.push(McpServerSpec { name: "memory".into(), command: "npx".into(), args: vec![], env: BTreeMap::new(), secret_env: BTreeMap::new(), enabled: true });
         adapter.configure_mcp(dir.path(), &two_servers, false).unwrap();
 
         adapter.remove_mcp(dir.path(), &["git".to_string()], false).unwrap();

@@ -11,7 +11,14 @@ use single_protocol::IntegrationResult;
 
 pub fn install_all(ctx: &Context, dry_run: bool) -> Result<IntegrationResult> {
     let real_home = home_dir()?;
-    let mcp_servers = single_core::mcp::load(&ctx.dirs.mcp_registry_file())?;
+    // Gateway mode: sync only the single-mcp dynamic gateway (it proxies
+    // to every enabled server itself) instead of the full registry list —
+    // see single_core::mcp::gateway_mode's doc comment.
+    let mcp_servers = if single_core::mcp::gateway_mode(&ctx.dirs.mcp_gateway_file())? {
+        vec![single_core::mcp::gateway_server_spec()]
+    } else {
+        single_core::mcp::load(&ctx.dirs.mcp_registry_file())?
+    };
     let lsp_servers = single_core::lsp::load(&ctx.dirs.lsp_registry_file())?;
 
     let mut writes = Vec::new();
