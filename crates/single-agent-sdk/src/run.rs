@@ -20,10 +20,10 @@ use std::time::{Duration, Instant};
 /// `run_command`'s captured-output, timeout-bounded, non-interactive
 /// shape. Used only by `AgentAdapter::login`.
 pub fn run_interactive_with_home(command: &str, args: &[String], home: &Path) -> Result<()> {
-    let status = Command::new(command)
-        .args(args)
-        .current_dir(home)
-        .env("HOME", home)
+    let mut cmd = Command::new(command);
+    cmd.args(args).current_dir(home).env("HOME", home);
+    pin_real_config_dir(&mut cmd);
+    let status = cmd
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
@@ -79,6 +79,7 @@ pub fn run_command_live(
             cmd.args(args).current_dir(cwd);
             if let Some(home) = home {
                 cmd.env("HOME", home);
+                pin_real_config_dir(&mut cmd);
             }
             cmd
         }
@@ -149,6 +150,23 @@ pub fn run_command_live(
     })
 }
 
+/// When a child's `$HOME` is overridden for isolation, its own view of
+/// `directories::BaseDirs` (and therefore `SingleDirs::discover()`) would
+/// otherwise resolve `~/.config/single` under the *isolated* home instead
+/// of the real one. That breaks any nested `single` invocation the child
+/// makes on its own — notably Claude Code's `PreToolUse` hook, which shells
+/// back out to `single internal claude-pretooluse-hook` — silently
+/// splitting its permission rules/preferences/pending-approvals into a
+/// second, invisible store nobody's `single approval list` or the TUI ever
+/// looks at. Pinning `SINGLE_CONFIG_DIR` to the resolving process's own
+/// (real) config root keeps every nested `single` call pointed at the same
+/// central state regardless of what `$HOME` the child sees.
+fn pin_real_config_dir(cmd: &mut Command) {
+    if let Ok(dirs) = single_core::paths::SingleDirs::discover() {
+        cmd.env("SINGLE_CONFIG_DIR", dirs.root());
+    }
+}
+
 /// Reads `pipe` line by line, accumulating into `buf` and — when `tee` is
 /// set — appending each line to the shared file immediately (flushed, so
 /// a concurrent reader of that file sees it right away).
@@ -181,6 +199,30 @@ mod tests {
         assert_eq!(outcome.stdout.trim(), "hello");
         assert_eq!(outcome.exit_code, Some(0));
         assert!(!outcome.timed_out);
+    }
+
+    #[test]
+    fn overriding_home_also_pins_single_config_dir_for_the_child() {
+        // Regression test: a child spawned with $HOME overridden (agent
+        // isolation) must still see the *real* SINGLE_CONFIG_DIR, or any
+        // nested `single` invocation it makes on its own (e.g. Claude
+        // Code's PreToolUse hook shelling back into `single internal
+        // claude-pretooluse-hook`) would resolve config/state under the
+        // isolated home instead of the real central one — splitting
+        // pending approvals/preferences into a store nobody ever looks at.
+        let dir = tempfile::tempdir().unwrap();
+        let fake_home = tempfile::tempdir().unwrap();
+        let outcome = run_command_with_home(
+            "sh",
+            &["-c".into(), "echo \"$SINGLE_CONFIG_DIR\"".into()],
+            dir.path(),
+            Some(fake_home.path()),
+            Duration::from_secs(5),
+        )
+        .unwrap();
+        assert!(outcome.success);
+        let expected = single_core::paths::SingleDirs::discover().unwrap().root().to_string_lossy().into_owned();
+        assert_eq!(outcome.stdout.trim(), expected);
     }
 
     #[test]
