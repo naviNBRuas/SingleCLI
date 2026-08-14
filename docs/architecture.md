@@ -332,7 +332,12 @@ artifact, a real persisted record.
   `@modelcontextprotocol/server-memory`, a proven convention already
   configured in this project's own real MCP setup, rather than inventing
   a new graph schema. Cascading deletes, idempotent entity creation,
-  substring query, full-graph dump. `single memory graph ...`.
+  substring query, full-graph dump. `single memory graph ...`. Writing
+  stays manual (no auto-promotion of task output into entities, to avoid
+  guessing at entity-naming heuristics), but as of v0.1.17 reading is
+  automatic: `task::build_context_preamble` queries it for entities
+  relevant to a task's description and injects them alongside memory and
+  notes, the same shared-blackboard treatment those two already got.
 - **`single-runtime::redis_backend`** — optional (`SINGLE_REDIS_URL`)
   TTL-capable key/value working memory: genuinely useful as fast shared
   state *while several agent processes are concurrently running*, a role
@@ -719,6 +724,46 @@ home instead of the real system, silently.
   <custom-agent>` printed the isolated home path by default and the real
   `$HOME` with `--real-home`, confirming the override actually reaches
   the subprocess and nothing else changed.
+
+## Growth Phase 7 (v0.1.17): real agent coordination
+
+Three real extensions to how agents work together, on top of what already
+existed (the sequential `orchestrate` relay, and memory/notes context
+already auto-injected into every task prompt):
+
+- **Real parallel execution.** `single-runtime::orchestrate::run_parallel`
+  (`single orchestrate-parallel --task <agent>:<description> ...`) runs
+  each agent on its own OS thread, its own git worktree, and its own
+  SQLite connection to the shared state db — safe because `state::open`
+  now sets `PRAGMA journal_mode=WAL` and a busy timeout (previously
+  unset; any real concurrent writer would have hit "database is locked"
+  immediately). No automatic goal decomposition — the caller supplies
+  each agent's own task explicitly, matching this project's rule against
+  fabricating a reasoning capability that doesn't exist. Branches are
+  never auto-merged; that stays a human decision.
+- **Knowledge graph as real shared context.** `task::build_context_preamble`
+  (already injecting relevant memory + unread notes into every task
+  prompt) now also queries the knowledge graph for relevant entities and
+  injects those too. Writing the graph is still manual — no
+  auto-promotion of task output into entities, to avoid guessing at
+  entity-naming heuristics.
+- **`notes.rs` moved from `single-runtime` to `single-core`**, the same
+  reason `preferences`/`permissions` already live there: so `single-mcp`
+  (a separate binary that doesn't depend on `single-runtime`) can use it
+  directly. `single-mcp`'s gateway gained two real tools —
+  `notes_leave`/`notes_read` — implemented directly against
+  `single_core::notes`, not proxied. Because the gateway process stays
+  alive for an agent's entire session (its own module doc explains why),
+  these give an agent genuine mid-session messaging: real tool calls
+  during a real run, not simulated inter-process signaling. True live
+  bidirectional IPC between two running agent processes is still out of
+  scope — these CLIs don't expose it, and `orchestrate.rs`'s module doc
+  says so plainly rather than pretending otherwise.
+- Parallel orchestrate steps also auto-broadcast a short note (agent →
+  everyone, project-scoped) summarizing what they did on completion, so
+  siblings that ran at the same time — and couldn't see each other in the
+  moment, since none of this is live IPC — see it on their next run or
+  via `notes_read`.
 
 ## Not in Phase 1-6
 

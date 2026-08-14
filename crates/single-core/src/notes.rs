@@ -1,10 +1,27 @@
-//! Minimal agent-to-agent inbox (spec: "communicate with each other when
-//! needed"). Deliberately not a live event stream — SingleCLI has no
-//! persistent multi-request daemon state to push through (ADR 0001) — just
-//! a project+topic-keyed table a task's prompt preamble reads from at the
-//! start of its run (see `task::run`'s note-delivery step) and agents can
-//! also leave/read via the `single note` CLI or the MCP gateway's
-//! `notes_leave`/`notes_read` tools.
+//! Agent-to-agent inbox (spec: "communicate with each other when
+//! needed"). Not a live event stream — nothing here holds a persistent
+//! connection open — but it now has two real delivery paths:
+//!
+//! - **Start-of-run delivery**: `single-runtime::task::run`'s prompt
+//!   preamble reads unread notes addressed to the agent at the start of
+//!   every task and marks them read (see that module's
+//!   `build_context_preamble`). Works for every agent, no cooperation from
+//!   the agent CLI needed.
+//! - **Live, mid-session (v0.1.17)**: `single-mcp`'s gateway exposes real
+//!   `notes_leave`/`notes_read` tools an agent can call itself, at any
+//!   point during its own run, if it has the gateway configured as an MCP
+//!   server — the most honest version of "live" messaging achievable
+//!   here, since it's a real tool call during a real run rather than
+//!   simulated inter-process signaling (see `single-mcp::gateway`'s
+//!   module doc for why bidirectional process-level IPC isn't real for
+//!   these agent CLIs).
+//!
+//! Lives in `single-core` (not `single-runtime`, where it originated)
+//! specifically so `single-mcp` — a separate binary that doesn't depend on
+//! `single-runtime` — can use it directly, the same reason
+//! `single-core::preferences`/`permissions` live here instead of the
+//! runtime crate (see `single-mcp::gateway::check_permission` for the
+//! established precedent this follows).
 
 use anyhow::{Context, Result};
 use rusqlite::{params, Connection, OptionalExtension};

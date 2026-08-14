@@ -5,6 +5,7 @@ use single_core::{registry::AgentDefinition, ResolvedConfig, SingleDirs};
 /// request in Phase 1 (cheap: local file reads) rather than kept as a long
 /// lived mutable daemon state — there is no in-memory state that outlives a
 /// single request yet, since orchestration/task state is Phase 4.
+#[derive(Clone)]
 pub struct Context {
     pub dirs: SingleDirs,
     pub resolved: ResolvedConfig,

@@ -117,6 +117,24 @@ enum Command {
         #[arg(long, default_value = "300")]
         timeout_secs: u64,
     },
+    /// Run several agents concurrently, each on its own explicit sub-task
+    /// (e.g. `--task claude:"backend API" --task codex:"frontend UI"`),
+    /// each in its own git worktree. Real parallel execution, unlike
+    /// `orchestrate`'s sequential relay. No automatic goal splitting: you
+    /// decide each agent's task, SingleCLI just runs them at the same time
+    /// and reports what happened — branches are never auto-merged.
+    OrchestrateParallel {
+        /// Repeatable: <agent>:<description>, e.g. claude:"implement the API"
+        #[arg(long = "task", required = true)]
+        tasks: Vec<String>,
+        #[arg(long)]
+        cwd: Option<String>,
+        /// See `single task run --help`'s --real-home — applies to every task.
+        #[arg(long)]
+        real_home: bool,
+        #[arg(long, default_value = "300")]
+        timeout_secs: u64,
+    },
     /// Switch between multiple logged-in accounts for an agent (e.g. two
     /// Claude Code accounts). Log in normally with the agent's own CLI
     /// first, then capture that login state as a named profile.
@@ -1277,6 +1295,24 @@ fn main() -> anyhow::Result<()> {
                 eprintln!("warning: running against your real $HOME — every agent in this relay will see your real credentials/config and can modify real files.");
             }
             let response = client::send(&socket_path, Request::Orchestrate { goal, agents, cwd, use_worktree: worktree, real_home, timeout_secs })?;
+            render::print(response, false);
+        }
+        Command::OrchestrateParallel { tasks, cwd, real_home, timeout_secs } => {
+            let cwd = cwd.unwrap_or_else(|| ".".to_string());
+            let cwd = std::fs::canonicalize(&cwd).map(|p| p.display().to_string()).unwrap_or(cwd);
+            if real_home {
+                eprintln!("warning: running against your real $HOME — every agent will see your real credentials/config and can modify real files.");
+            }
+            let parsed: Vec<single_protocol::ParallelTaskSpec> = tasks
+                .into_iter()
+                .map(|t| {
+                    let (agent, description) = t.split_once(':').ok_or_else(|| {
+                        anyhow::anyhow!("--task '{t}' must be in the form <agent>:<description>, e.g. claude:\"implement the API\"")
+                    })?;
+                    Ok(single_protocol::ParallelTaskSpec { agent: agent.to_string(), description: description.to_string() })
+                })
+                .collect::<anyhow::Result<Vec<_>>>()?;
+            let response = client::send(&socket_path, Request::OrchestrateParallel { tasks: parsed, cwd, real_home, timeout_secs })?;
             render::print(response, false);
         }
         Command::Provider { action } => match action {

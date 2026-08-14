@@ -275,16 +275,16 @@ fn dispatch(ctx: &Context, request: Request) -> anyhow::Result<ResponseData> {
         }
         Request::NoteLeave { project, from_agent, to_agent, topic, content } => {
             let conn = notes_db(ctx)?;
-            let id = crate::notes::leave(&conn, project, &from_agent, to_agent.as_deref(), &topic, &content)?;
+            let id = single_core::notes::leave(&conn, project, &from_agent, to_agent.as_deref(), &topic, &content)?;
             Ok(ResponseData::NoteId(id))
         }
         Request::NoteInbox { project, to_agent, unread_only } => {
             let conn = notes_db(ctx)?;
-            Ok(ResponseData::Notes(crate::notes::inbox(&conn, project.as_deref(), &to_agent, unread_only)?))
+            Ok(ResponseData::Notes(single_core::notes::inbox(&conn, project.as_deref(), &to_agent, unread_only)?))
         }
         Request::NoteMarkRead { id } => {
             let conn = notes_db(ctx)?;
-            if !crate::notes::mark_read(&conn, id)? {
+            if !single_core::notes::mark_read(&conn, id)? {
                 anyhow::bail!("no unread note with id {id}");
             }
             Ok(ResponseData::Empty)
@@ -337,6 +337,16 @@ fn dispatch(ctx: &Context, request: Request) -> anyhow::Result<ResponseData> {
                 agents: &agents,
                 cwd: std::path::Path::new(&cwd),
                 use_worktree,
+                real_home,
+                timeout: std::time::Duration::from_secs(timeout_secs),
+            })?;
+            Ok(ResponseData::OrchestrateResult(records))
+        }
+        Request::OrchestrateParallel { tasks, cwd, real_home, timeout_secs } => {
+            let task_pairs: Vec<(String, String)> = tasks.into_iter().map(|t| (t.agent, t.description)).collect();
+            let records = crate::orchestrate::run_parallel(ctx, crate::orchestrate::ParallelOrchestrateOptions {
+                tasks: &task_pairs,
+                cwd: std::path::Path::new(&cwd),
                 real_home,
                 timeout: std::time::Duration::from_secs(timeout_secs),
             })?;
@@ -672,12 +682,18 @@ fn memory_db(ctx: &Context) -> anyhow::Result<rusqlite::Connection> {
 fn task_db(ctx: &Context) -> anyhow::Result<rusqlite::Connection> {
     let conn = crate::state::open(&ctx.dirs.db_path())?;
     crate::task::ensure_schema(&conn)?;
+    // Also needed here (not just via memory_db/kg_db/notes_db) since
+    // task::run's context preamble reads all three best-effort on every
+    // run — see build_context_preamble.
+    crate::memory::ensure_schema(&conn)?;
+    single_core::notes::ensure_schema(&conn)?;
+    crate::knowledge_graph::ensure_schema(&conn)?;
     Ok(conn)
 }
 
 fn notes_db(ctx: &Context) -> anyhow::Result<rusqlite::Connection> {
     let conn = crate::state::open(&ctx.dirs.db_path())?;
-    crate::notes::ensure_schema(&conn)?;
+    single_core::notes::ensure_schema(&conn)?;
     Ok(conn)
 }
 

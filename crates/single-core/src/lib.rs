@@ -6,6 +6,7 @@ pub mod docker;
 pub mod hooks;
 pub mod lsp;
 pub mod mcp;
+pub mod notes;
 pub mod paths;
 pub mod permissions;
 pub mod plugins;

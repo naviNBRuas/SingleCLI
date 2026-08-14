@@ -1,13 +1,13 @@
-//! The gateway `ServerHandler`: exposes exactly two tools
-//! (`list_available_mcp_tools`, `invoke_mcp`) over stdio to whichever agent
-//! CLI has this binary registered as its one MCP server, and lazily
-//! proxies to the real MCP servers listed in SingleCLI's `mcp.toml`
-//! registry — spawned as child processes only on first use, then reused
-//! for the rest of this gateway process's lifetime (which is exactly the
-//! agent session's lifetime, since the agent's own MCP client keeps this
-//! stdio child alive for as long as it's talking to it). This deliberately
-//! holds no state in `single-runtimed` itself — the statefulness lives
-//! here, in a process the agent already owns.
+//! The gateway `ServerHandler`: exposes four tools
+//! (`list_available_mcp_tools`, `invoke_mcp`, `notes_leave`, `notes_read`)
+//! over stdio to whichever agent CLI has this binary registered as its one
+//! MCP server, and lazily proxies to the real MCP servers listed in
+//! SingleCLI's `mcp.toml` registry — spawned as child processes only on
+//! first use, then reused for the rest of this gateway process's lifetime
+//! (which is exactly the agent session's lifetime, since the agent's own
+//! MCP client keeps this stdio child alive for as long as it's talking to
+//! it). This deliberately holds no state in `single-runtimed` itself — the
+//! statefulness lives here, in a process the agent already owns.
 //!
 //! Discovery is two-step by design, not "list every tool from every
 //! server upfront": `list_available_mcp_tools` returns only the *servers*
@@ -16,6 +16,21 @@
 //! called with `tool: null`. This is a smaller, honest scope: probing
 //! every registered server just to build an upfront catalog would spawn
 //! exactly the N processes this design exists to avoid.
+//!
+//! **`notes_leave`/`notes_read` (v0.1.17)** are not proxied to anything —
+//! implemented directly here against `single_core::notes`, the same
+//! SQLite-backed inbox `task::run`'s prompt preamble already reads from at
+//! the start of every run. Since this gateway process stays alive for an
+//! agent's whole session, these give the agent genuine mid-session
+//! messaging: it can call `notes_read` at any point to check for new
+//! notes, or `notes_leave` to tell a sibling agent something, without
+//! waiting for its own run to end — the most honest version of "live"
+//! coordination achievable given these agent CLIs don't expose real
+//! process-level IPC (see `orchestrate.rs`'s module doc for why that part
+//! stays out of scope). The gateway has no ambient identity for which
+//! agent is calling it (it's spawned by whatever CLI configured it, with
+//! no distinguishing env var SingleCLI controls), so `from_agent` is a
+//! required argument, same as the `single note leave --from` CLI command.
 
 use anyhow::{Context, Result};
 use rmcp::model::{
@@ -142,6 +157,59 @@ impl Gateway {
             }
         }
     }
+
+    /// Opens a fresh connection to the shared state db for every call
+    /// (this gateway holds no long-lived db handle, matching its module
+    /// doc's "no state in single-runtimed" — the one place state lives is
+    /// the db file itself). WAL + busy_timeout mirror
+    /// `single-runtime::state::open`'s fix for the same real concurrency
+    /// this introduces: an agent's mid-session note write racing the
+    /// daemon's own writes to the same file.
+    fn notes_conn() -> Result<rusqlite::Connection> {
+        let dirs = single_core::SingleDirs::discover().context("resolving SingleCLI config directory")?;
+        let db_path = dirs.db_path();
+        if let Some(parent) = db_path.parent() {
+            std::fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
+        }
+        let conn = rusqlite::Connection::open(&db_path).with_context(|| format!("opening {}", db_path.display()))?;
+        conn.pragma_update(None, "journal_mode", "WAL").context("setting WAL journal mode")?;
+        conn.busy_timeout(std::time::Duration::from_secs(5)).context("setting busy timeout")?;
+        single_core::notes::ensure_schema(&conn)?;
+        Ok(conn)
+    }
+
+    /// Best-effort project scope from this gateway process's own cwd —
+    /// there's no separate "which project is this session for" signal to
+    /// read, so this mirrors how `task::run` resolves project scope from
+    /// the directory it's actually working in.
+    fn current_project() -> Option<String> {
+        std::env::current_dir().ok().and_then(|cwd| single_core::project_context::resolve(&cwd).repo_root)
+    }
+
+    async fn notes_leave(&self, arguments: &Map<String, Value>) -> Result<Value> {
+        let from_agent = arguments.get("from_agent").and_then(Value::as_str).context("notes_leave needs a \"from_agent\" argument")?;
+        let to_agent = arguments.get("to_agent").and_then(Value::as_str);
+        let topic = arguments.get("topic").and_then(Value::as_str).context("notes_leave needs a \"topic\" argument")?;
+        let content = arguments.get("content").and_then(Value::as_str).context("notes_leave needs a \"content\" argument")?;
+
+        let conn = Self::notes_conn()?;
+        let project = Self::current_project();
+        let id = single_core::notes::leave(&conn, project, from_agent, to_agent, topic, content)?;
+        Ok(json!({ "note_id": id, "from": from_agent, "to": to_agent, "topic": topic }))
+    }
+
+    async fn notes_read(&self, arguments: &Map<String, Value>) -> Result<Value> {
+        let to_agent = arguments.get("to_agent").and_then(Value::as_str).context("notes_read needs a \"to_agent\" argument (which agent's inbox to read)")?;
+        let unread_only = arguments.get("unread_only").and_then(Value::as_bool).unwrap_or(true);
+
+        let conn = Self::notes_conn()?;
+        let project = Self::current_project();
+        let notes = single_core::notes::inbox(&conn, project.as_deref(), to_agent, unread_only)?;
+        for n in &notes {
+            let _ = single_core::notes::mark_read(&conn, n.id);
+        }
+        Ok(json!({ "notes": notes }))
+    }
 }
 
 /// The real first caller of `permissions::evaluate` (via
@@ -171,8 +239,19 @@ fn schema(fields: Value) -> Arc<Map<String, Value>> {
 mod tests {
     use super::*;
 
+    /// `SingleDirs::discover()` (used by `registry()`, `notes_conn`,
+    /// `current_project`, `check_permission`) reads the `SINGLE_CONFIG_DIR`
+    /// env var fresh on every call rather than taking an injected
+    /// `SingleDirs` — a real constraint shared with `check_permission`'s
+    /// existing design, not something worth reworking just for tests. Rust
+    /// runs tests in this module concurrently by default, and that env var
+    /// is process-global, so any test that sets it races every other one
+    /// that does. This mutex serializes just those tests.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn registry_only_returns_enabled_servers() {
+        let _guard = ENV_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
         std::env::set_var("SINGLE_CONFIG_DIR", dir.path());
         let dirs = single_core::SingleDirs::discover().unwrap();
@@ -192,6 +271,57 @@ mod tests {
         let obj = schema(json!({ "type": "object", "properties": {} }));
         assert_eq!(obj.get("type").and_then(Value::as_str), Some("object"));
     }
+
+    #[tokio::test]
+    async fn notes_leave_then_notes_read_round_trips_through_the_gateway() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("SINGLE_CONFIG_DIR", dir.path());
+        let gateway = Gateway::new();
+
+        let leave_args = json!({ "from_agent": "claude", "to_agent": "codex", "topic": "heads up", "content": "watch the flaky test" });
+        let Value::Object(leave_args) = leave_args else { unreachable!() };
+        let left = gateway.notes_leave(&leave_args).await.unwrap();
+        assert!(left["note_id"].as_i64().is_some());
+
+        let read_args = json!({ "to_agent": "codex" });
+        let Value::Object(read_args) = read_args else { unreachable!() };
+        let result = gateway.notes_read(&read_args).await.unwrap();
+        let notes = result["notes"].as_array().unwrap();
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0]["from_agent"], "claude");
+        assert_eq!(notes[0]["content"], "watch the flaky test");
+
+        // A second read shouldn't redeliver it — notes_read marks read.
+        let result2 = gateway.notes_read(&read_args).await.unwrap();
+        assert!(result2["notes"].as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn notes_leave_requires_from_agent_topic_and_content() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("SINGLE_CONFIG_DIR", dir.path());
+        let gateway = Gateway::new();
+
+        let Value::Object(missing_from) = json!({ "topic": "t", "content": "c" }) else { unreachable!() };
+        assert!(gateway.notes_leave(&missing_from).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn notes_read_sees_broadcast_notes() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("SINGLE_CONFIG_DIR", dir.path());
+        let gateway = Gateway::new();
+
+        let Value::Object(leave_args) = json!({ "from_agent": "claude", "topic": "fyi", "content": "for everyone" }) else { unreachable!() };
+        gateway.notes_leave(&leave_args).await.unwrap();
+
+        let Value::Object(read_args) = json!({ "to_agent": "agy" }) else { unreachable!() };
+        let result = gateway.notes_read(&read_args).await.unwrap();
+        assert_eq!(result["notes"].as_array().unwrap().len(), 1);
+    }
 }
 
 impl ServerHandler for Gateway {
@@ -201,7 +331,10 @@ impl ServerHandler for Gateway {
             .with_instructions(
                 "Dynamic MCP gateway for SingleCLI. Call list_available_mcp_tools first to see \
                  registered servers, then invoke_mcp with {server, tool: null} to discover that \
-                 server's real tools, then invoke_mcp with {server, tool, arguments} to call one.",
+                 server's real tools, then invoke_mcp with {server, tool, arguments} to call one. \
+                 Also exposes notes_leave/notes_read for messaging other agents working on this \
+                 same project, live during your session — call notes_read any time to check for \
+                 new notes, and notes_leave to tell another agent (or everyone) something.",
             )
     }
 
@@ -227,6 +360,37 @@ impl ServerHandler for Gateway {
                     "additionalProperties": false
                 })),
             ),
+            Tool::new(
+                "notes_leave",
+                "Leaves a note for another agent (or, with to_agent omitted, a broadcast note for \
+                 every agent) working on this project. Delivered immediately to notes_read, and \
+                 also to the recipient's next `single task run` prompt preamble.",
+                schema(json!({
+                    "type": "object",
+                    "properties": {
+                        "from_agent": { "type": "string", "description": "Your own agent name, e.g. \"claude\" or \"codex\"." },
+                        "to_agent": { "type": "string", "description": "Recipient agent name; omit to broadcast to every agent on this project." },
+                        "topic": { "type": "string", "description": "Short topic/subject line." },
+                        "content": { "type": "string", "description": "The note itself." }
+                    },
+                    "required": ["from_agent", "topic", "content"],
+                    "additionalProperties": false
+                })),
+            ),
+            Tool::new(
+                "notes_read",
+                "Reads notes left for an agent on this project (including broadcast notes), \
+                 newest first. Marks returned notes as read.",
+                schema(json!({
+                    "type": "object",
+                    "properties": {
+                        "to_agent": { "type": "string", "description": "Your own agent name — reads notes addressed to you." },
+                        "unread_only": { "type": "boolean", "description": "Defaults to true; set false to also see already-read notes." }
+                    },
+                    "required": ["to_agent"],
+                    "additionalProperties": false
+                })),
+            ),
         ]))
     }
 
@@ -236,6 +400,8 @@ impl ServerHandler for Gateway {
         let result = match request.name.as_ref() {
             "list_available_mcp_tools" => self.list_available_mcp_tools().await,
             "invoke_mcp" => self.invoke_mcp(arguments).await,
+            "notes_leave" => self.notes_leave(arguments).await,
+            "notes_read" => self.notes_read(arguments).await,
             other => Err(anyhow::anyhow!("unknown tool: {other}")),
         };
         match result {

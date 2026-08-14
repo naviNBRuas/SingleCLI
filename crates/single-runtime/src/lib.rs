@@ -8,7 +8,6 @@ pub mod handlers;
 pub mod integrations;
 pub mod knowledge_graph;
 pub mod memory;
-pub mod notes;
 pub mod orchestrate;
 pub mod qdrant_backend;
 pub mod redis_backend;

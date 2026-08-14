@@ -122,6 +122,13 @@ pub enum Request {
     TaskList,
     TaskInspect { id: i64 },
     Orchestrate { goal: String, agents: Vec<String>, cwd: String, use_worktree: bool, real_home: bool, timeout_secs: u64 },
+    /// Real concurrent execution (v0.1.17), as opposed to `Orchestrate`'s
+    /// sequential relay: each `ParallelTaskSpec` runs on its own thread, in
+    /// its own git worktree, with its own SQLite connection. There's no
+    /// automatic goal decomposition here — the caller supplies each
+    /// agent's own description explicitly (SingleCLI runs them, it doesn't
+    /// invent the split).
+    OrchestrateParallel { tasks: Vec<ParallelTaskSpec>, cwd: String, real_home: bool, timeout_secs: u64 },
     AccountCapture { agent: String, name: String, label: Option<String> },
     AccountUse { agent: String, name: String },
     AccountList { agent: Option<String> },
@@ -621,6 +628,14 @@ pub enum TaskStatus {
     Running,
     Completed,
     Failed,
+}
+
+/// One agent's explicit sub-task within a parallel orchestrate batch —
+/// see `Request::OrchestrateParallel`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ParallelTaskSpec {
+    pub agent: String,
+    pub description: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

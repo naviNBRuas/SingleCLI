@@ -151,22 +151,25 @@ pub struct RunTaskOptions<'a> {
     pub timeout: Duration,
 }
 
-/// Cap on the injected memory/notes preamble so it can't dwarf the actual
-/// prompt — same discipline as `orchestrate::MAX_HANDOFF_CHARS`.
+/// Cap on the injected memory/notes/knowledge preamble so it can't dwarf
+/// the actual prompt — same discipline as `orchestrate::MAX_HANDOFF_CHARS`.
 const MAX_CONTEXT_CHARS: usize = 4000;
 /// How many past memory entries get pulled into the preamble, at most.
 const MAX_CONTEXT_MEMORIES: usize = 5;
+/// How many knowledge-graph entities get pulled into the preamble, at most.
+const MAX_CONTEXT_KG_ENTITIES: usize = 5;
 
-/// Builds the prompt actually sent to the agent: relevant memory + any
-/// unread notes addressed to it in this project, prepended ahead of
-/// `description`. Best-effort and additive — a lookup failure here must
-/// never block the task itself, so errors are swallowed and just result in
-/// a smaller (or absent) preamble. Delivered notes are marked read as part
-/// of this call so the same note isn't re-delivered on the next run.
-/// Works for every agent, including ones with no MCP support, since it
-/// needs no cooperation from the agent CLI itself — the D2 MCP gateway's
-/// `memory_search`/`notes_read` tools are the complementary on-demand path
-/// for agents that pull context mid-session instead.
+/// Builds the prompt actually sent to the agent: relevant memory, relevant
+/// knowledge-graph entities, and any unread notes addressed to it in this
+/// project, prepended ahead of `description`. Best-effort and additive — a
+/// lookup failure here must never block the task itself, so errors are
+/// swallowed and just result in a smaller (or absent) preamble. Delivered
+/// notes are marked read as part of this call so the same note isn't
+/// re-delivered on the next run. Works for every agent, including ones
+/// with no MCP support, since it needs no cooperation from the agent CLI
+/// itself — the single-mcp gateway's live `notes_leave`/`notes_read` tools
+/// (v0.1.17) are the complementary on-demand path for agents that want to
+/// pull/push notes mid-session instead of only at the start of a run.
 fn build_context_preamble(conn: &Connection, description: &str, agent: &str, project: Option<&str>) -> String {
     let mut sections = String::new();
 
@@ -190,12 +193,38 @@ fn build_context_preamble(conn: &Connection, description: &str, agent: &str, pro
         sections.push_str("--- end memory ---\n\n");
     }
 
-    if let Ok(notes) = crate::notes::inbox(conn, project, agent, true) {
+    // Shared blackboard state: the knowledge graph is written manually
+    // (`single memory graph create-entity`/`add-observation`) by humans or
+    // agents that choose to, not auto-populated from task output — see
+    // knowledge_graph.rs's module doc. This is the read half: whatever's
+    // there that's relevant gets surfaced to every agent automatically,
+    // the same way memory/notes already are.
+    let mut kg_entities = Vec::new();
+    for keyword in significant_keywords(description) {
+        if let Ok(hits) = crate::knowledge_graph::query(conn, &keyword) {
+            for hit in hits {
+                if !kg_entities.iter().any(|e: &single_protocol::KgEntity| e.name == hit.name) {
+                    kg_entities.push(hit);
+                }
+            }
+        }
+    }
+    kg_entities.truncate(MAX_CONTEXT_KG_ENTITIES);
+    if !kg_entities.is_empty() {
+        sections.push_str("--- Shared knowledge (from the team's knowledge graph) ---\n");
+        for e in &kg_entities {
+            let observations = e.observations.join("; ");
+            sections.push_str(&format!("- {} ({}): {}\n", e.name, e.entity_type, crate::orchestrate::truncate(&observations, 300)));
+        }
+        sections.push_str("--- end shared knowledge ---\n\n");
+    }
+
+    if let Ok(notes) = single_core::notes::inbox(conn, project, agent, true) {
         if !notes.is_empty() {
             sections.push_str("--- Notes left by other agents ---\n");
             for n in &notes {
                 sections.push_str(&format!("- from {} [{}]: {}\n", n.from_agent, n.topic, crate::orchestrate::truncate(&n.content, 400)));
-                let _ = crate::notes::mark_read(conn, n.id);
+                let _ = single_core::notes::mark_read(conn, n.id);
             }
             sections.push_str("--- end notes ---\n\n");
         }
@@ -415,10 +444,12 @@ mod tests {
 
     fn test_conn() -> Connection {
         let conn = Connection::open_in_memory().unwrap();
+        conn.execute("PRAGMA foreign_keys = ON", []).unwrap();
         ensure_schema(&conn).unwrap();
         crate::state::ensure_events_schema(&conn).unwrap();
         memory::ensure_schema(&conn).unwrap();
-        crate::notes::ensure_schema(&conn).unwrap();
+        single_core::notes::ensure_schema(&conn).unwrap();
+        crate::knowledge_graph::ensure_schema(&conn).unwrap();
         conn
     }
 
@@ -433,15 +464,28 @@ mod tests {
             ..Default::default()
         })
         .unwrap();
-        let note_id = crate::notes::leave(&conn, Some("proj".into()), "claude", Some("codex"), "heads up", "watch the flaky test").unwrap();
+        let note_id = single_core::notes::leave(&conn, Some("proj".into()), "claude", Some("codex"), "heads up", "watch the flaky test").unwrap();
 
         let prompt = build_context_preamble(&conn, "fix the token refresh bug", "codex", Some("proj"));
         assert!(prompt.contains("root cause was a token refresh race"));
         assert!(prompt.contains("watch the flaky test"));
         assert!(prompt.ends_with("Task: fix the token refresh bug"));
 
-        let note = crate::notes::get(&conn, note_id).unwrap().unwrap();
+        let note = single_core::notes::get(&conn, note_id).unwrap().unwrap();
         assert!(note.read_at.is_some(), "a note delivered in the preamble should be marked read");
+    }
+
+    #[test]
+    fn context_preamble_includes_relevant_knowledge_graph_entities() {
+        let conn = test_conn();
+        crate::knowledge_graph::create_entity(&conn, "token-refresh-race", "bug").unwrap();
+        crate::knowledge_graph::add_observation(&conn, "token-refresh-race", "fixed by adding a mutex around refresh").unwrap();
+        crate::knowledge_graph::create_entity(&conn, "unrelated-thing", "note").unwrap();
+
+        let prompt = build_context_preamble(&conn, "investigate the token refresh race", "codex", None);
+        assert!(prompt.contains("token-refresh-race"));
+        assert!(prompt.contains("fixed by adding a mutex around refresh"));
+        assert!(!prompt.contains("unrelated-thing"));
     }
 
     #[test]
