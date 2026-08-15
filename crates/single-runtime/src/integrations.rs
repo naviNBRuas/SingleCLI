@@ -23,7 +23,7 @@ pub fn install_all(ctx: &Context, dry_run: bool) -> Result<IntegrationResult> {
 
     let mut writes = Vec::new();
     for agent in &ctx.registry {
-        let Some(adapter) = for_agent_with_custom(&agent.name, &ctx.dirs.agents_dir()) else { continue };
+        let Some(adapter) = for_agent_with_custom(&agent.name, &ctx.dirs.agents_dir(), &ctx.registry) else { continue };
         let home = single_core::agent_home::ensure_bootstrapped(&ctx.dirs.homes_dir(), &real_home, &agent.name)?;
         writes.push(adapter.configure_mcp(&home, &mcp_servers, dry_run)?);
         writes.push(adapter.configure_lsp(&home, &lsp_servers, dry_run)?);
@@ -40,7 +40,7 @@ pub fn uninstall_all(ctx: &Context, dry_run: bool) -> Result<IntegrationResult> 
 
     let mut writes = Vec::new();
     for agent in &ctx.registry {
-        let Some(adapter) = for_agent_with_custom(&agent.name, &ctx.dirs.agents_dir()) else { continue };
+        let Some(adapter) = for_agent_with_custom(&agent.name, &ctx.dirs.agents_dir(), &ctx.registry) else { continue };
         let home = single_core::agent_home::ensure_bootstrapped(&ctx.dirs.homes_dir(), &real_home, &agent.name)?;
         writes.push(adapter.remove_mcp(&home, &mcp_names, dry_run)?);
         writes.push(adapter.remove_lsp(&home, &lsp_names, dry_run)?);

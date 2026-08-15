@@ -260,7 +260,7 @@ fn significant_keywords(description: &str) -> Vec<String> {
 /// even though there's no live event *stream* yet (spec section 25) — only
 /// a persisted log.
 pub fn run(conn: &Connection, ctx: &Context, opts: RunTaskOptions) -> Result<TaskRecord> {
-    let Some(adapter) = for_agent_with_custom(opts.agent, &ctx.dirs.agents_dir()) else {
+    let Some(adapter) = for_agent_with_custom(opts.agent, &ctx.dirs.agents_dir(), &ctx.registry) else {
         anyhow::bail!("unknown agent: {}", opts.agent);
     };
     if !adapter.discover().detected {

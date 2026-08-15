@@ -543,7 +543,7 @@ fn dispatch(ctx: &Context, request: Request) -> anyhow::Result<ResponseData> {
                 } else {
                     plugin.target.clone()
                 };
-                let (applied, detail) = match for_agent_with_custom(&agent, &ctx.dirs.agents_dir()) {
+                let (applied, detail) = match for_agent_with_custom(&agent, &ctx.dirs.agents_dir(), &ctx.registry) {
                     Some(adapter) if dry_run => {
                         (false, format!("dry run: would run `{} plugin install {selector}`", adapter.command()))
                     }
@@ -805,7 +805,7 @@ fn status(ctx: &Context) -> RuntimeStatus {
     let detected = ctx
         .registry
         .iter()
-        .filter(|a| for_agent_with_custom(&a.name, &ctx.dirs.agents_dir()).map(|ad| ad.discover().detected).unwrap_or(false))
+        .filter(|a| for_agent_with_custom(&a.name, &ctx.dirs.agents_dir(), &ctx.registry).map(|ad| ad.discover().detected).unwrap_or(false))
         .count();
     RuntimeStatus {
         version: env!("CARGO_PKG_VERSION").to_string(),
@@ -818,7 +818,7 @@ fn status(ctx: &Context) -> RuntimeStatus {
 }
 
 fn to_agent_info(def: &AgentDefinition, ctx: &Context) -> AgentInfo {
-    let discovery = for_agent_with_custom(&def.name, &ctx.dirs.agents_dir()).map(|a| a.discover());
+    let discovery = for_agent_with_custom(&def.name, &ctx.dirs.agents_dir(), &ctx.registry).map(|a| a.discover());
     let isolated_home = ctx.dirs.homes_dir().join(&def.name);
     let authenticated = single_core::account::is_authenticated(&isolated_home, &def.name);
     AgentInfo {

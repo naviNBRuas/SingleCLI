@@ -1561,7 +1561,11 @@ fn run_update(channel: &str, check_only: bool, yes: bool) -> anyhow::Result<()> 
 }
 
 fn run_agent_login(dirs: &SingleDirs, socket_path: &std::path::Path, agent: &str) -> anyhow::Result<()> {
-    let Some(adapter) = single_agent_sdk::adapters::for_agent_with_custom(agent, &dirs.agents_dir()) else {
+    let mut registry = single_core::builtin_registry();
+    if let Ok((custom, _errors)) = single_core::custom_agents::load_all(&dirs.agents_dir()) {
+        registry.extend(custom.iter().map(single_core::custom_agents::to_agent_definition));
+    }
+    let Some(adapter) = single_agent_sdk::adapters::for_agent_with_custom(agent, &dirs.agents_dir(), &registry) else {
         anyhow::bail!("unknown agent: {agent}");
     };
     if !adapter.discover().detected {

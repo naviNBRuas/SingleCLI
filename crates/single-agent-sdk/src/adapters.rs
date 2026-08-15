@@ -535,17 +535,32 @@ pub fn for_agent(name: &str) -> Option<Box<dyn AgentAdapter>> {
     }
 }
 
-/// Same as `for_agent`, but falls back to a user-defined custom agent
-/// (`<custom_agents_dir>/<name>.toml`, see `single-core::custom_agents`)
-/// when `name` isn't one of the five built-in agents. This is the seam
-/// that lets a new CLI agent be added without recompiling SingleCLI.
-pub fn for_agent_with_custom(name: &str, custom_agents_dir: &Path) -> Option<Box<dyn AgentAdapter>> {
+/// Same as `for_agent`, but falls back (in order) to a user-defined custom
+/// agent (`<custom_agents_dir>/<name>.toml`, see `single-core::custom_agents`)
+/// and then to a bare-minimum generic adapter derived from `registry` —
+/// detection only (`command -v <command>`), everything else honestly
+/// `Unsupported` — for `builtin_registry()` entries that don't have a
+/// dedicated Rust adapter (e.g. the v0.1.18 agent-catalog additions). This
+/// is the seam that lets a new CLI agent be added without recompiling
+/// SingleCLI, and the reason registry entries without a real adapter still
+/// get detected by `doctor`/`single setup` instead of silently doing nothing.
+pub fn for_agent_with_custom(name: &str, custom_agents_dir: &Path, registry: &[single_core::registry::AgentDefinition]) -> Option<Box<dyn AgentAdapter>> {
     if let Some(builtin) = for_agent(name) {
         return Some(builtin);
     }
-    let (defs, _errors) = single_core::custom_agents::load_all(custom_agents_dir).ok()?;
-    let def = defs.into_iter().find(|d| d.name == name)?;
-    Some(Box::new(crate::generic_adapter::GenericAdapter::new(def)))
+    if let Ok((defs, _errors)) = single_core::custom_agents::load_all(custom_agents_dir) {
+        if let Some(def) = defs.into_iter().find(|d| d.name == name) {
+            return Some(Box::new(crate::generic_adapter::GenericAdapter::new(def)));
+        }
+    }
+    let entry = registry.iter().find(|a| a.name == name)?;
+    Some(Box::new(crate::generic_adapter::GenericAdapter::new(single_core::custom_agents::CustomAgentFile {
+        name: entry.name.clone(),
+        command: entry.command.clone(),
+        install: None,
+        run: None,
+        mcp: None,
+    })))
 }
 
 #[cfg(test)]
@@ -622,5 +637,28 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let adapter = PerplexityAdapter;
         assert!(adapter.run_prompt(dir.path(), "hello", &ExecBackend::host(None), None, Duration::from_secs(1)).is_err());
+    }
+
+    #[test]
+    fn for_agent_with_custom_falls_back_to_a_registry_derived_generic_adapter() {
+        // A v0.1.18 catalog addition like "gemini" has no dedicated Rust
+        // adapter (no ClaudeAdapter-style struct) and no custom_agents.toml
+        // override — it should still resolve to a working GenericAdapter
+        // built straight from its AgentDefinition, not None.
+        let dir = tempfile::tempdir().unwrap();
+        let registry = single_core::builtin_registry();
+        let entry = registry.iter().find(|a| a.name == "gemini").expect("gemini should be in builtin_registry()");
+
+        let adapter = for_agent_with_custom("gemini", dir.path(), &registry).expect("expected a generic-adapter fallback");
+        assert_eq!(adapter.command(), entry.command);
+        // Detection still does something real (checks PATH), it just won't find it in a test sandbox.
+        assert!(!adapter.discover().detected);
+    }
+
+    #[test]
+    fn for_agent_with_custom_returns_none_for_a_name_in_neither_registry_nor_custom_agents() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = single_core::builtin_registry();
+        assert!(for_agent_with_custom("totally-made-up-agent", dir.path(), &registry).is_none());
     }
 }

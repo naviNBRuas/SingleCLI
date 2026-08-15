@@ -765,6 +765,71 @@ already auto-injected into every task prompt):
   moment, since none of this is live IPC — see it on their next run or
   via `notes_read`.
 
+## Growth Phase 8 (v0.1.18): preset visibility + catalog expansion
+
+A preset catalog (`mcp::presets()`, `lsp::presets()`, `plugins::presets()`,
+`providers::presets()`) only ever mattered once something explicitly ran
+`add-preset` — nothing surfaced the other ~230 entries anywhere a user
+would actually see them (`list` commands, the TUI, `single status`), so in
+practice the v0.1.16 catalog expansion was invisible after install. Four
+fixes/expansions:
+
+- **Preset visibility fix.** `Context::load()` (the one place every daemon
+  request already builds its state) now calls
+  `{mcp,lsp,plugins,providers}::sync_missing_presets[_disabled]` on every
+  load — idempotent (only adds presets missing by name; never touches an
+  entry the user already registered/edited/enabled), so it's cheap enough
+  to run unconditionally rather than needing a one-time migration flag.
+  MCP presets already default disabled (`to_spec()`); LSP presets are
+  forced disabled here too even though `to_spec()` defaults them enabled,
+  since a bulk sync must never turn on 100+ file-watching servers at once.
+  Plugin/provider presets have no enabled concept — registering one
+  doesn't install or activate anything by itself (`plugin sync` and
+  setting a provider's secret are separate explicit steps), so there's
+  nothing to gate.
+- **Tool catalog.** `tools.rs::default_tools()` grew from 26 to 74 —
+  security/recon (`nmap`, `sqlmap`, `nuclei`, `trivy`, ...),
+  containers/orchestration (`podman`, `kind`, `k9s`, ...), IaC/cloud
+  (`terragrunt`, `doctl`, `wrangler`, ...), VCS (`git-lfs`, `svn`, `hg`),
+  language toolchains (`mvn`, `dotnet`, `deno`, `bun`, `zig`, ...),
+  database clients (`psql`, `redis-cli`, `mongosh`, ...), and
+  system/networking tools. Unlike the original 26 (each confirmed present
+  via `command -v` on the reference machine), these are verified as real,
+  well-known CLIs with correct binary names rather than required to be
+  locally installed — this registry has no execution engine yet (Phase 4
+  scope), so "real tool, correct name" is the bar that matters.
+- **Agent registry.** `registry.rs::builtin_registry()` grew from 11 to
+  22 (gemini, qwen-code, amp, openhands, droid, codebuff, plandex,
+  continue-cli, grok, mistral-vibe, crush). None of these were installed
+  on the machine this registry was built on, so every install
+  command/capability flag is sourced from the vendor's own current docs
+  rather than confirmed by direct execution — `unverified: true` on all
+  eleven, the same honest-uncertainty precedent `cody` already set.
+  Candidates that didn't meet the bar were dropped rather than guessed at:
+  SWE-agent (superseded by mini-swe-agent, stale), Amazon Q Developer CLI
+  (no single verified one-line install command across platforms), and
+  several IDE-embedded "agents" (Warp, Zed, Devin, Replit Agent, Cline,
+  Bolt, v0, Trae) that don't ship a standalone CLI binary separate from
+  their IDE/web product.
+  - **Generic-adapter fallback for registry entries.** None of the eleven
+    new agents have a dedicated Rust adapter, which used to mean
+    `for_agent_with_custom` returned `None` for them — `doctor`/`single
+    setup` would report them `Unsupported` regardless of whether a real
+    bootstrap-install command existed. `for_agent_with_custom` now takes
+    the agent registry as a third argument and, after checking the
+    hardcoded adapters and any user-defined `custom_agents.toml`
+    override, falls back to wrapping the registry entry in the existing
+    `GenericAdapter` (previously only reachable via a user's own
+    `custom_agents.toml`) — real `command -v` detection, everything else
+    honestly `Unsupported` rather than fabricated. This is why a new
+    catalog entry gets real detection/install-planning for free instead
+    of needing a bespoke adapter written for it.
+- **Provider catalog.** `providers.rs::presets()` grew from 4 to 17 (groq,
+  deepseek, mistral, xai, gemini, openrouter, together, fireworks,
+  cerebras, sambanova, deepinfra, perplexity, cohere) — every base
+  URL/env var pair confirmed against the vendor's own current docs, same
+  bar as the original four.
+
 ## Not in Phase 1-6
 
 Per the original spec's own §50 "Development Strategy" (build vertically,

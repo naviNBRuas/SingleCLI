@@ -27,7 +27,7 @@ pub fn run_one(ctx: &Context, agent_name: &str, dry_run: bool) -> anyhow::Result
 }
 
 fn plan_one(ctx: &Context, agent: &single_core::registry::AgentDefinition, dry_run: bool) -> SetupAction {
-    let Some(adapter) = for_agent_with_custom(&agent.name, &ctx.dirs.agents_dir()) else {
+    let Some(adapter) = for_agent_with_custom(&agent.name, &ctx.dirs.agents_dir(), &ctx.registry) else {
         return SetupAction { agent: agent.name.clone(), action: SetupActionKind::Unsupported, detail: "no adapter registered".into(), executed: false };
     };
     let discovery = adapter.discover();
@@ -126,10 +126,8 @@ mod tests {
         let (_dir, ctx) = test_context();
         let plan = run(&ctx, true);
         let names: Vec<_> = plan.actions.iter().map(|a| a.agent.as_str()).collect();
-        assert_eq!(
-            names,
-            ["claude", "codex", "opencode", "agy", "perplexity", "cursor", "aider", "goose", "copilot", "kiro", "cody"]
-        );
+        let registry_names: Vec<_> = ctx.registry.iter().map(|a| a.name.as_str()).collect();
+        assert_eq!(names, registry_names, "bootstrap plan should cover exactly the agent registry, in order");
     }
 
     #[test]

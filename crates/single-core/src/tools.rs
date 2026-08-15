@@ -20,9 +20,17 @@ struct ToolRegistryFile {
 /// one agent, just the metadata/risk-level seam described in the module
 /// docs above. Risk levels reflect what the tool can actually do: read-only
 /// or scoped-write tools are `Low`/`Medium`; anything that can run
-/// arbitrary containers, reach a remote cluster/cloud account, or push to
-/// a remote is `High`. Every entry below was confirmed present (`command
-/// -v`) on the reference machine before being added — not a guessed list.
+/// arbitrary containers, reach a remote cluster/cloud account, brute-force
+/// or scan a remote target, or push to a remote is `High`.
+///
+/// The original 26 entries were each confirmed present (`command -v`) on
+/// the reference machine before being added. The v0.1.18 additions below
+/// widen scope to security/recon, cloud, container-orchestration, VCS,
+/// language-toolchain, and database-client tools — real, well-known CLIs
+/// (verified as genuine tools with correct binary names, several spot
+/// checked present via `command -v` on this machine), not required to be
+/// installed locally the way the original set was, since this registry is
+/// metadata-only with no execution engine yet.
 pub fn default_tools() -> Vec<ToolSpec> {
     use single_protocol::RiskLevel;
     vec![
@@ -52,6 +60,68 @@ pub fn default_tools() -> Vec<ToolSpec> {
         ToolSpec { name: "az".into(), description: "Azure CLI".into(), risk_level: RiskLevel::High, enabled: true },
         ToolSpec { name: "tmux".into(), description: "terminal multiplexer".into(), risk_level: RiskLevel::Low, enabled: true },
         ToolSpec { name: "vim".into(), description: "text editor".into(), risk_level: RiskLevel::Low, enabled: true },
+
+        // -- security / recon --
+        ToolSpec { name: "nmap".into(), description: "network scanner and host/port discovery".into(), risk_level: RiskLevel::High, enabled: true },
+        ToolSpec { name: "sqlmap".into(), description: "automated SQL injection and database takeover tool".into(), risk_level: RiskLevel::High, enabled: true },
+        ToolSpec { name: "hydra".into(), description: "network login brute-forcer".into(), risk_level: RiskLevel::High, enabled: true },
+        ToolSpec { name: "john".into(), description: "John the Ripper — offline password cracker".into(), risk_level: RiskLevel::Medium, enabled: true },
+        ToolSpec { name: "hashcat".into(), description: "GPU-accelerated password cracker".into(), risk_level: RiskLevel::Medium, enabled: true },
+        ToolSpec { name: "gobuster".into(), description: "directory, DNS, and vhost brute-forcer".into(), risk_level: RiskLevel::High, enabled: true },
+        ToolSpec { name: "ffuf".into(), description: "fast web fuzzer".into(), risk_level: RiskLevel::High, enabled: true },
+        ToolSpec { name: "tshark".into(), description: "Wireshark's CLI packet capture and analysis tool".into(), risk_level: RiskLevel::Medium, enabled: true },
+        ToolSpec { name: "nuclei".into(), description: "template-driven vulnerability scanner".into(), risk_level: RiskLevel::High, enabled: true },
+        ToolSpec { name: "subfinder".into(), description: "passive subdomain enumeration".into(), risk_level: RiskLevel::Low, enabled: true },
+        ToolSpec { name: "amass".into(), description: "attack surface mapping and subdomain enumeration".into(), risk_level: RiskLevel::Medium, enabled: true },
+        ToolSpec { name: "trivy".into(), description: "container image, filesystem, and IaC vulnerability scanner".into(), risk_level: RiskLevel::Low, enabled: true },
+        ToolSpec { name: "grype".into(), description: "container image and filesystem vulnerability scanner".into(), risk_level: RiskLevel::Low, enabled: true },
+        ToolSpec { name: "cosign".into(), description: "container image signing and verification".into(), risk_level: RiskLevel::Medium, enabled: true },
+        ToolSpec { name: "syft".into(), description: "software bill of materials (SBOM) generator".into(), risk_level: RiskLevel::Low, enabled: true },
+
+        // -- containers / orchestration --
+        ToolSpec { name: "podman".into(), description: "rootless container runtime, Docker-compatible CLI".into(), risk_level: RiskLevel::High, enabled: true },
+        ToolSpec { name: "kind".into(), description: "runs local Kubernetes clusters using Docker containers".into(), risk_level: RiskLevel::Medium, enabled: true },
+        ToolSpec { name: "minikube".into(), description: "runs a local single-node Kubernetes cluster".into(), risk_level: RiskLevel::Medium, enabled: true },
+        ToolSpec { name: "k9s".into(), description: "terminal UI for managing Kubernetes clusters".into(), risk_level: RiskLevel::High, enabled: true },
+
+        // -- IaC / cloud platform CLIs --
+        ToolSpec { name: "terragrunt".into(), description: "thin wrapper for keeping Terraform configurations DRY".into(), risk_level: RiskLevel::High, enabled: true },
+        ToolSpec { name: "packer".into(), description: "automated machine image builder".into(), risk_level: RiskLevel::High, enabled: true },
+        ToolSpec { name: "vagrant".into(), description: "builds and manages local virtual machine environments".into(), risk_level: RiskLevel::Medium, enabled: true },
+        ToolSpec { name: "doctl".into(), description: "DigitalOcean cloud CLI".into(), risk_level: RiskLevel::High, enabled: true },
+        ToolSpec { name: "flyctl".into(), description: "Fly.io deployment CLI".into(), risk_level: RiskLevel::High, enabled: true },
+        ToolSpec { name: "wrangler".into(), description: "Cloudflare Workers/Pages CLI".into(), risk_level: RiskLevel::High, enabled: true },
+        ToolSpec { name: "heroku".into(), description: "Heroku platform CLI".into(), risk_level: RiskLevel::High, enabled: true },
+
+        // -- version control --
+        ToolSpec { name: "git-lfs".into(), description: "Git extension for versioning large files".into(), risk_level: RiskLevel::Low, enabled: true },
+        ToolSpec { name: "svn".into(), description: "Subversion version control client".into(), risk_level: RiskLevel::Medium, enabled: true },
+        ToolSpec { name: "hg".into(), description: "Mercurial version control client".into(), risk_level: RiskLevel::Medium, enabled: true },
+
+        // -- language toolchains / build tools --
+        ToolSpec { name: "mvn".into(), description: "Apache Maven build tool for Java/JVM projects".into(), risk_level: RiskLevel::Medium, enabled: true },
+        ToolSpec { name: "gradle".into(), description: "Gradle build tool for JVM and native projects".into(), risk_level: RiskLevel::Medium, enabled: true },
+        ToolSpec { name: "dotnet".into(), description: ".NET SDK and CLI".into(), risk_level: RiskLevel::Medium, enabled: true },
+        ToolSpec { name: "poetry".into(), description: "Python dependency management and packaging".into(), risk_level: RiskLevel::Medium, enabled: true },
+        ToolSpec { name: "uv".into(), description: "fast Python package and project manager".into(), risk_level: RiskLevel::Medium, enabled: true },
+        ToolSpec { name: "deno".into(), description: "secure-by-default JavaScript/TypeScript runtime".into(), risk_level: RiskLevel::Medium, enabled: true },
+        ToolSpec { name: "bun".into(), description: "fast JavaScript runtime, bundler, and package manager".into(), risk_level: RiskLevel::Medium, enabled: true },
+        ToolSpec { name: "zig".into(), description: "Zig compiler and build system".into(), risk_level: RiskLevel::Medium, enabled: true },
+
+        // -- database clients --
+        ToolSpec { name: "psql".into(), description: "PostgreSQL interactive terminal client".into(), risk_level: RiskLevel::High, enabled: true },
+        ToolSpec { name: "mysql".into(), description: "MySQL/MariaDB command-line client".into(), risk_level: RiskLevel::High, enabled: true },
+        ToolSpec { name: "redis-cli".into(), description: "Redis command-line client".into(), risk_level: RiskLevel::High, enabled: true },
+        ToolSpec { name: "sqlite3".into(), description: "SQLite command-line client".into(), risk_level: RiskLevel::Low, enabled: true },
+        ToolSpec { name: "mongosh".into(), description: "MongoDB shell client".into(), risk_level: RiskLevel::High, enabled: true },
+
+        // -- system / networking / secrets --
+        ToolSpec { name: "htop".into(), description: "interactive process viewer".into(), risk_level: RiskLevel::Low, enabled: true },
+        ToolSpec { name: "mtr".into(), description: "combined traceroute and ping network diagnostic".into(), risk_level: RiskLevel::Low, enabled: true },
+        ToolSpec { name: "sops".into(), description: "encrypts/decrypts secrets in files (Mozilla SOPS)".into(), risk_level: RiskLevel::Medium, enabled: true },
+        ToolSpec { name: "age".into(), description: "modern, simple file encryption tool".into(), risk_level: RiskLevel::Low, enabled: true },
+        ToolSpec { name: "watchexec".into(), description: "runs a command whenever watched files change".into(), risk_level: RiskLevel::Medium, enabled: true },
+        ToolSpec { name: "entr".into(), description: "runs a command whenever watched files change".into(), risk_level: RiskLevel::Medium, enabled: true },
     ]
 }
 
@@ -133,5 +203,32 @@ mod tests {
         assert!(set_enabled(&path, "git", false).unwrap());
         assert!(!find(&path, "git").unwrap().unwrap().enabled);
         assert!(!set_enabled(&path, "ghost", true).unwrap());
+    }
+
+    #[test]
+    fn v0_1_18_catalog_expansion_added_at_least_40_new_tools_with_unique_names() {
+        let tools = default_tools();
+        assert!(tools.len() >= 66, "expected at least 66 total tools (26 original + 40 new), got {}", tools.len());
+
+        let mut names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
+        let before = names.len();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), before, "duplicate tool name in catalog");
+    }
+
+    #[test]
+    fn spot_check_new_tool_risk_levels() {
+        let tools = default_tools();
+        let get = |n: &str| tools.iter().find(|t| t.name == n).unwrap_or_else(|| panic!("missing {n}")).clone();
+
+        // read-only/passive tooling should never be High
+        for name in ["subfinder", "trivy", "grype", "syft", "sqlite3", "age", "htop", "mtr"] {
+            assert_eq!(get(name).risk_level, RiskLevel::Low, "{name} should be Low risk");
+        }
+        // direct remote attack/scan/db-access tooling should be High
+        for name in ["nmap", "sqlmap", "hydra", "gobuster", "ffuf", "nuclei", "psql", "mysql", "redis-cli", "mongosh", "podman", "k9s"] {
+            assert_eq!(get(name).risk_level, RiskLevel::High, "{name} should be High risk");
+        }
     }
 }

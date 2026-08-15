@@ -63,6 +63,28 @@ pub fn find(path: &Path, name: &str) -> Result<Option<PluginSpec>> {
     Ok(load(path)?.into_iter().find(|p| p.name == name))
 }
 
+/// Registers every built-in preset not already present in the registry.
+/// Being registered doesn't install anything into any agent — `single
+/// plugin sync` is the separate, explicit step that does that — so unlike
+/// the MCP/LSP equivalents there's no `enabled` flag to force off here.
+/// Idempotent: safe to call on every startup. Returns how many were newly
+/// added.
+pub fn sync_missing_presets(path: &Path) -> Result<usize> {
+    let mut plugins = load(path)?;
+    let existing: std::collections::HashSet<String> = plugins.iter().map(|p| p.name.clone()).collect();
+    let mut added = 0;
+    for preset in presets() {
+        if !existing.contains(preset.name) {
+            plugins.push(preset.to_spec());
+            added += 1;
+        }
+    }
+    if added > 0 {
+        save(path, &plugins)?;
+    }
+    Ok(added)
+}
+
 /// A named starter config for a real plugin, not yet in the user's
 /// registry — same growth mechanism as `mcp::McpPreset`/`lsp::LspPreset`
 /// (`single plugin add-preset <name>`). Every entry below was pulled
@@ -202,5 +224,35 @@ mod tests {
         assert_eq!(spec.name, "github");
         assert_eq!(spec.target, "github@claude-plugins-official");
         assert!(spec.opencode_module.is_none());
+    }
+
+    #[test]
+    fn sync_missing_presets_registers_every_preset_and_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("plugins.toml");
+
+        let added_first = sync_missing_presets(&path).unwrap();
+        assert_eq!(added_first, presets().len());
+
+        let plugins = load(&path).unwrap();
+        for preset in presets() {
+            assert!(plugins.iter().any(|p| p.name == preset.name), "missing {}", preset.name);
+        }
+
+        let added_second = sync_missing_presets(&path).unwrap();
+        assert_eq!(added_second, 0, "second run should be a no-op");
+    }
+
+    #[test]
+    fn sync_missing_presets_never_overwrites_an_already_registered_plugin() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("plugins.toml");
+        let first_preset = presets().first().unwrap().name.to_string();
+        add(&path, PluginSpec { name: first_preset.clone(), target: "custom-target".into(), opencode_module: None }).unwrap();
+
+        sync_missing_presets(&path).unwrap();
+
+        let plugin = find(&path, &first_preset).unwrap().unwrap();
+        assert_eq!(plugin.target, "custom-target");
     }
 }

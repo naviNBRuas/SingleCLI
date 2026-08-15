@@ -28,6 +28,19 @@ impl Context {
             registry.extend(custom.iter().map(single_core::custom_agents::to_agent_definition));
         }
 
+        // One-time (per-preset) migration: bring the real registries up to
+        // date with the built-in preset catalogs, disabled, so `list`/the
+        // TUI actually show what's available instead of only the original
+        // hand-picked entries. Idempotent — each call only adds presets
+        // missing by name, so this is cheap to run on every load. Errors
+        // here (e.g. an unwritable config dir) are surfaced elsewhere
+        // (`doctor`) and shouldn't block every other request, so they're
+        // swallowed rather than propagated.
+        let _ = single_core::mcp::sync_missing_presets_disabled(&dirs.mcp_registry_file());
+        let _ = single_core::lsp::sync_missing_presets_disabled(&dirs.lsp_registry_file());
+        let _ = single_core::plugins::sync_missing_presets(&dirs.plugins_registry_file());
+        let _ = single_core::providers::sync_missing_presets(&dirs.providers_registry_file());
+
         Ok(Self { dirs, resolved, registry })
     }
 

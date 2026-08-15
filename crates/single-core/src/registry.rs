@@ -328,6 +328,285 @@ pub fn builtin_registry() -> Vec<AgentDefinition> {
                     .into(),
             ),
         },
+        // -- v0.1.18 additions: none of the following were installed on the
+        // reference machine, so every command/capability below is sourced
+        // from the vendor's own current docs (fetched directly, not taken on
+        // an agent's word) rather than confirmed by direct execution — the
+        // same honest-uncertainty precedent `cody` above already set.
+        AgentDefinition {
+            name: "gemini".into(),
+            adapter: "gemini".into(),
+            command: "gemini".into(),
+            install_method: InstallMethod::PackageManager {
+                detail: "Google's official npm package, installs the `gemini` binary".into(),
+            },
+            bootstrap_install: Some(BootstrapInstall {
+                command: "npm install -g @google/gemini-cli".into(),
+                source: "https://github.com/google-gemini/gemini-cli".into(),
+            }),
+            unverified: true,
+            capabilities: CapabilityFlags {
+                streaming: false,
+                mcp: true, // observed `mcpServers` key documented in ~/.gemini/settings.json
+                lsp: false,
+                tools: true,
+                sessions: false, // docs describe checkpointing (--checkpointing) for recovery, not a classic --resume flag
+                structured_output: true, // --output-format json documented
+            },
+            config_paths: vec![".gemini/settings.json".into()],
+            notes: None,
+        },
+        AgentDefinition {
+            name: "qwen-code".into(),
+            adapter: "qwen-code".into(),
+            command: "qwen".into(),
+            install_method: InstallMethod::PackageManager { detail: "Alibaba's official npm package".into() },
+            bootstrap_install: Some(BootstrapInstall {
+                command: "npm install -g @qwen-code/qwen-code@latest".into(),
+                source: "https://github.com/QwenLM/qwen-code".into(),
+            }),
+            unverified: true,
+            capabilities: CapabilityFlags {
+                streaming: false,
+                mcp: false, // forked from Gemini CLI (which supports MCP), not independently re-confirmed for this fork
+                lsp: false,
+                tools: true,
+                sessions: false,
+                structured_output: false,
+            },
+            config_paths: vec![],
+            notes: Some(
+                "Alibaba's fork of Google's Gemini CLI, adapted for Qwen3-Coder models. \
+                 Capabilities not independently re-verified against upstream — treat as at \
+                 least Gemini CLI's baseline until confirmed."
+                    .into(),
+            ),
+        },
+        AgentDefinition {
+            name: "amp".into(),
+            adapter: "amp".into(),
+            command: "amp".into(),
+            install_method: InstallMethod::StandaloneBinary {
+                detail: "Single-file executable (compiled by Bun), per the vendor's own \
+                         npm-package-changes announcement — not distributed as a plain npm package"
+                    .into(),
+            },
+            bootstrap_install: Some(BootstrapInstall {
+                command: "curl -fsSL https://ampcode.com/install.sh | bash".into(),
+                source: "https://ampcode.com/manual".into(),
+            }),
+            unverified: true,
+            capabilities: CapabilityFlags {
+                streaming: false,
+                mcp: false,
+                lsp: false,
+                tools: true,
+                sessions: false,
+                structured_output: false,
+            },
+            config_paths: vec![],
+            notes: Some("Sourcegraph's newer agent product — distinct from the already-registered `cody`.".into()),
+        },
+        AgentDefinition {
+            name: "openhands".into(),
+            adapter: "openhands".into(),
+            command: "openhands".into(),
+            install_method: InstallMethod::PackageManager { detail: "Official PyPI package".into() },
+            bootstrap_install: Some(BootstrapInstall {
+                command: "pip install openhands-ai".into(),
+                source: "https://docs.openhands.dev/openhands/usage/run-openhands/local-setup".into(),
+            }),
+            unverified: true,
+            capabilities: CapabilityFlags {
+                streaming: false,
+                mcp: false,
+                lsp: false,
+                tools: true,
+                sessions: false,
+                structured_output: false,
+            },
+            config_paths: vec![],
+            notes: Some(
+                "Formerly OpenDevin. A separate `OpenHands-CLI` GitHub project exists but its own \
+                 README says it's no longer actively maintained — this entry uses the maintained \
+                 `openhands-ai` pip package instead."
+                    .into(),
+            ),
+        },
+        AgentDefinition {
+            name: "droid".into(),
+            adapter: "droid".into(),
+            command: "droid".into(),
+            install_method: InstallMethod::StandaloneBinary { detail: "Factory AI's official installer script".into() },
+            bootstrap_install: Some(BootstrapInstall {
+                command: "curl -fsSL https://app.factory.ai/cli | sh".into(),
+                source: "https://docs.factory.ai/cli/getting-started/quickstart".into(),
+            }),
+            unverified: true,
+            capabilities: CapabilityFlags {
+                streaming: false,
+                mcp: true, // `droid mcp add` / `/mcp` command documented
+                lsp: false,
+                tools: true,
+                sessions: true, // a documented "Droid Sessions API" exists; resume UX specifics not confirmed
+                structured_output: true, // `droid exec` headless mode documents structured input/output formats
+            },
+            config_paths: vec![],
+            notes: Some("Requires logging into a Factory account before use (free tier exists).".into()),
+        },
+        AgentDefinition {
+            name: "codebuff".into(),
+            adapter: "codebuff".into(),
+            command: "codebuff".into(),
+            install_method: InstallMethod::PackageManager { detail: "Official npm package".into() },
+            bootstrap_install: Some(BootstrapInstall {
+                command: "npm install -g codebuff".into(),
+                source: "https://www.codebuff.com/docs/help".into(),
+            }),
+            unverified: true,
+            capabilities: CapabilityFlags {
+                streaming: false,
+                mcp: false,
+                lsp: false,
+                tools: true,
+                sessions: false,
+                structured_output: false,
+            },
+            config_paths: vec![],
+            notes: None,
+        },
+        AgentDefinition {
+            name: "plandex".into(),
+            adapter: "plandex".into(),
+            command: "plandex".into(),
+            install_method: InstallMethod::StandaloneBinary { detail: "Official installer script (Go binary)".into() },
+            bootstrap_install: Some(BootstrapInstall {
+                command: "curl -sL https://plandex.ai/install.sh | bash".into(),
+                source: "https://github.com/plandex-ai/plandex/blob/main/docs/docs/install.md".into(),
+            }),
+            unverified: true,
+            capabilities: CapabilityFlags {
+                streaming: false,
+                mcp: false,
+                lsp: false,
+                tools: true,
+                sessions: false,
+                structured_output: false,
+            },
+            config_paths: vec![],
+            notes: Some("Windows only supported via WSL, per the vendor's own docs.".into()),
+        },
+        AgentDefinition {
+            name: "continue-cli".into(),
+            adapter: "continue".into(),
+            // The real binary is `cn`, not `continue-cli` — kept distinct
+            // from `name` the same way `perplexity`/`pplx` and
+            // `cursor`/`cursor-agent` are above.
+            command: "cn".into(),
+            install_method: InstallMethod::StandaloneBinary {
+                detail: "Official installer script; also distributed via npm as @continuedev/cli".into(),
+            },
+            bootstrap_install: Some(BootstrapInstall {
+                command: "curl -fsSL https://raw.githubusercontent.com/continuedev/continue/main/extensions/cli/scripts/install.sh | bash".into(),
+                source: "https://docs.continue.dev/cli/quickstart".into(),
+            }),
+            unverified: true,
+            capabilities: CapabilityFlags {
+                streaming: false,
+                mcp: false,
+                lsp: false,
+                tools: true,
+                sessions: false,
+                structured_output: true, // headless `cn -p "prompt"` runs to completion and prints to stdout for scripting/CI
+            },
+            config_paths: vec![],
+            notes: Some(
+                "Distinct from the Continue.dev IDE extension — `cn` is a separate \
+                 headless/background-job agent binary for async cloud runs (PR review, \
+                 migrations, CI), not an interactive session the way most other entries here are."
+                    .into(),
+            ),
+        },
+        AgentDefinition {
+            name: "grok".into(),
+            adapter: "grok-build".into(),
+            command: "grok".into(),
+            install_method: InstallMethod::StandaloneBinary { detail: "xAI's official installer script".into() },
+            bootstrap_install: Some(BootstrapInstall {
+                command: "curl -fsSL https://x.ai/cli/install.sh | bash".into(),
+                source: "https://docs.x.ai/build/overview".into(),
+            }),
+            unverified: true,
+            capabilities: CapabilityFlags {
+                streaming: false,
+                mcp: true, // vendor docs state "MCP servers work out of the box"
+                lsp: false,
+                tools: true,
+                sessions: false, // subagents/worktrees documented, but resume UX not confirmed
+                structured_output: false,
+            },
+            config_paths: vec![],
+            notes: Some(
+                "xAI's terminal coding agent, \"Grok Build\" (beta as of this writing) — requires \
+                 SuperGrok/X Premium Plus subscription or an XAI_API_KEY. Repo: xai-org/grok-build."
+                    .into(),
+            ),
+        },
+        AgentDefinition {
+            name: "mistral-vibe".into(),
+            adapter: "mistral-vibe".into(),
+            command: "vibe".into(),
+            install_method: InstallMethod::StandaloneBinary {
+                detail: "Official installer script; also distributable via `pip install mistral-vibe`".into(),
+            },
+            bootstrap_install: Some(BootstrapInstall {
+                command: "curl -LsSf https://mistral.ai/vibe/install.sh | sh".into(),
+                source: "https://mistral.ai/news/devstral-2-vibe-cli/".into(),
+            }),
+            unverified: true,
+            capabilities: CapabilityFlags {
+                streaming: false,
+                mcp: false,
+                lsp: false,
+                tools: true,
+                sessions: false,
+                structured_output: false,
+            },
+            config_paths: vec![],
+            notes: Some(
+                "Mistral's official terminal coding agent, built to work against Devstral 2 or \
+                 any OpenAI-compatible local/remote model endpoint."
+                    .into(),
+            ),
+        },
+        AgentDefinition {
+            name: "crush".into(),
+            adapter: "crush".into(),
+            command: "crush".into(),
+            install_method: InstallMethod::PackageManager {
+                detail: "Official npm package (also available via Homebrew, Nix, and Go install)".into(),
+            },
+            bootstrap_install: Some(BootstrapInstall {
+                command: "npm install -g @charmland/crush".into(),
+                source: "https://github.com/charmbracelet/crush".into(),
+            }),
+            unverified: true,
+            capabilities: CapabilityFlags {
+                streaming: false,
+                mcp: true, // vendor docs state MCP extensibility
+                lsp: true, // vendor docs state "LSP-enhanced context"
+                tools: true,
+                sessions: false,
+                structured_output: false,
+            },
+            config_paths: vec![],
+            notes: Some(
+                "Charmbracelet's multi-provider agent — connects to Anthropic, OpenAI, Gemini, \
+                 OpenRouter, Bedrock, Azure OpenAI, Vertex AI, and local model servers by design, \
+                 unlike the single-vendor entries elsewhere in this registry."
+                    .into(),
+            ),
+        },
     ]
 }
 
@@ -336,14 +615,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn builtin_registry_has_eleven_agents() {
+    fn builtin_registry_has_the_original_eleven_agents() {
         let reg = builtin_registry();
-        assert_eq!(reg.len(), 11);
         let names: Vec<_> = reg.iter().map(|a| a.name.as_str()).collect();
-        assert_eq!(
-            names,
+        for name in
             ["claude", "codex", "opencode", "agy", "perplexity", "cursor", "aider", "goose", "copilot", "kiro", "cody"]
-        );
+        {
+            assert!(names.contains(&name), "missing original agent {name}");
+        }
+    }
+
+    #[test]
+    fn v0_1_18_catalog_expansion_added_at_least_11_new_agents_with_unique_names() {
+        let reg = builtin_registry();
+        assert!(reg.len() >= 22, "expected at least 22 total agents (11 original + 11 new), got {}", reg.len());
+
+        let mut names: Vec<&str> = reg.iter().map(|a| a.name.as_str()).collect();
+        let before = names.len();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), before, "duplicate agent name in registry");
     }
 
     #[test]
@@ -355,9 +646,14 @@ mod tests {
                 .as_ref()
                 .unwrap_or_else(|| panic!("agent {} has no bootstrap install", agent.name));
             // Every install command is a real one sourced from the vendor's own
-            // docs — usually a curl script, but `cody`'s only officially
-            // documented install path is an npm global install.
-            assert!(install.command.contains("curl") || install.command.contains("npm install"), "agent {}", agent.name);
+            // docs — usually a curl script, but `cody`/`gemini`/`qwen-code`/
+            // `codebuff`/`crush` document npm as their official path, and
+            // `openhands` documents pip as its official path.
+            assert!(
+                install.command.contains("curl") || install.command.contains("npm install") || install.command.contains("pip install"),
+                "agent {}",
+                agent.name
+            );
             assert!(install.source.starts_with("https://"), "agent {}", agent.name);
         }
     }

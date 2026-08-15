@@ -30,7 +30,7 @@ pub fn run(ctx: &Context) -> DoctorReport {
     }
 
     for agent in &ctx.registry {
-        let Some(adapter) = for_agent_with_custom(&agent.name, &ctx.dirs.agents_dir()) else {
+        let Some(adapter) = for_agent_with_custom(&agent.name, &ctx.dirs.agents_dir(), &ctx.registry) else {
             checks.push(DoctorCheck {
                 name: format!("agent: {}", agent.name),
                 status: CheckStatus::Skipped,

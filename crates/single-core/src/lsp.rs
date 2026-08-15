@@ -281,6 +281,29 @@ pub fn remove(path: &Path, name: &str) -> Result<bool> {
     Ok(removed)
 }
 
+/// Registers every built-in preset not already present in the registry,
+/// forced disabled regardless of `to_spec()`'s default — an LSP server
+/// starts reacting to matching file extensions the moment it's enabled, so
+/// a bulk sync must never turn 100+ servers on at once. Idempotent: safe
+/// to call on every startup. Returns how many were newly added.
+pub fn sync_missing_presets_disabled(path: &Path) -> Result<usize> {
+    let mut servers = load(path)?;
+    let existing: std::collections::HashSet<String> = servers.iter().map(|s| s.name.clone()).collect();
+    let mut added = 0;
+    for preset in presets() {
+        if !existing.contains(preset.name) {
+            let mut spec = preset.to_spec();
+            spec.enabled = false;
+            servers.push(spec);
+            added += 1;
+        }
+    }
+    if added > 0 {
+        save(path, &servers)?;
+    }
+    Ok(added)
+}
+
 pub fn find(path: &Path, name: &str) -> Result<Option<LspServerSpec>> {
     Ok(load(path)?.into_iter().find(|s| s.name == name))
 }
@@ -375,5 +398,54 @@ mod tests {
     fn terraform_preset_also_covers_plain_hcl_files() {
         let spec = preset("terraform").unwrap().to_spec();
         assert!(spec.extensions.contains(&".hcl".to_string()));
+    }
+
+    #[test]
+    fn sync_missing_presets_disabled_registers_every_preset_disabled_and_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("lsp.toml");
+
+        // load() on a missing path seeds default_servers() (the 5
+        // hand-picked, enabled entries), some of which share a name with a
+        // preset — so the sync only adds what's genuinely missing.
+        let baseline: std::collections::HashSet<String> = default_servers().iter().map(|s| s.name.clone()).collect();
+        let expected_added = presets().iter().filter(|p| !baseline.contains(p.name)).count();
+
+        let added_first = sync_missing_presets_disabled(&path).unwrap();
+        assert_eq!(added_first, expected_added);
+
+        let servers = load(&path).unwrap();
+        for preset in presets() {
+            let server = servers.iter().find(|s| s.name == preset.name).unwrap_or_else(|| panic!("missing {}", preset.name));
+            if baseline.contains(preset.name) {
+                continue; // pre-existing default_servers() entry — sync must not have touched it
+            }
+            assert!(!server.enabled, "{} should sync in disabled even though to_spec() defaults enabled", preset.name);
+        }
+
+        let added_second = sync_missing_presets_disabled(&path).unwrap();
+        assert_eq!(added_second, 0, "second run should be a no-op");
+    }
+
+    #[test]
+    fn sync_missing_presets_disabled_never_overwrites_an_already_registered_enabled_server() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("lsp.toml");
+        let first_preset = presets().first().unwrap().name.to_string();
+        add(&path, LspServerSpec {
+            name: first_preset.clone(),
+            command: "custom-command".into(),
+            args: vec![],
+            extensions: vec![".custom".into()],
+            enabled: true,
+        })
+        .unwrap();
+
+        sync_missing_presets_disabled(&path).unwrap();
+
+        let servers = load(&path).unwrap();
+        let server = servers.iter().find(|s| s.name == first_preset).unwrap();
+        assert!(server.enabled, "pre-existing entry must not be touched");
+        assert_eq!(server.command, "custom-command");
     }
 }
