@@ -1654,7 +1654,13 @@ fn auto_capture_after_login(dirs: &SingleDirs, socket_path: &std::path::Path, ho
         Ok(Response::Ok { .. }) => println!("captured as: {}", label.unwrap_or(name)),
         Ok(Response::Error { message }) => {
             eprintln!("note: login succeeded, but auto-capturing an account failed: {message}");
-            eprintln!("      run `single account capture {agent} <name>` manually if you want this login saved as an account.");
+            // Don't suggest a manual retry when the failure is "this agent
+            // has no capture support at all" (see single_core::account::
+            // support) — running the same command by hand would hit the
+            // identical wall, not a transient issue worth retrying.
+            if !message.contains("isn't implemented for") {
+                eprintln!("      run `single account capture {agent} <name>` manually if you want this login saved as an account.");
+            }
         }
         Err(e) => eprintln!("note: login succeeded, but auto-capturing an account failed: {e:#}"),
     }

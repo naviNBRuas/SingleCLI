@@ -72,7 +72,13 @@ fn support(agent: &str) -> Result<bool> {
         "agy" => true,               // best-effort, flagged
         "opencode" => bail!("opencode account switching is unsupported: its login state lives in a live multi-table SQLite database (~/.local/share/opencode/opencode.db) shared with session history — see account.rs module docs for why a safe snapshot mechanism doesn't exist yet"),
         "perplexity" => bail!("pplx has no coding-agent session to switch between; not supported"),
-        other => bail!("unknown agent: {other}"),
+        // Deliberately *not* "unknown agent" — every other registry
+        // entry (cursor, goose, copilot, kiro, cody, the v0.1.19
+        // additions, ...) is perfectly real and may well have a working
+        // `login()`; this module's named multi-account capture/switch
+        // just hasn't had its credential-file location verified for it
+        // yet (see this file's module docs for the ones that have).
+        other => bail!("named multi-account capture/switching isn't implemented for {other} yet (only claude, codex, and agy are supported so far) — the login itself still worked fine, this only affects `single account capture/use`"),
     })
 }
 
