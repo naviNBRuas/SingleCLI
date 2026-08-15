@@ -305,10 +305,17 @@ impl AgentAdapter for CursorAdapter {
         }
     }
 
-    /// `cursor-agent -p "<prompt>"` — confirmed non-interactive print mode
-    /// via `cursor-agent --help` on the reference machine.
+    /// `cursor-agent -p "<prompt>" --trust` — confirmed non-interactive
+    /// print mode via `cursor-agent --help` on the reference machine.
+    /// `--trust` isn't an optional bypass here the way `-f`/`--yolo`
+    /// would be (those also auto-approve every tool call) — without it,
+    /// `cursor-agent` refuses to run at all in a directory it hasn't seen
+    /// before ("Workspace Trust Required"), exiting 1 with no way to
+    /// answer the prompt non-interactively. Same "needed to function at
+    /// all, not an extra permission grant" reasoning already applied to
+    /// codex's `--skip-git-repo-check` and copilot's `--allow-all-tools`.
     fn run_prompt(&self, cwd: &Path, prompt: &str, backend: &ExecBackend, live_output_path: Option<&Path>, timeout: Duration) -> Result<RunOutcome> {
-        run_command_live("cursor-agent", &["-p".to_string(), prompt.to_string()], cwd, backend, live_output_path, timeout)
+        run_command_live("cursor-agent", &["-p".to_string(), prompt.to_string(), "--trust".to_string()], cwd, backend, live_output_path, timeout)
     }
 
     /// `cursor-agent login` — confirmed real via `cursor-agent --help` on
