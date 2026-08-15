@@ -75,7 +75,17 @@ pub fn run(ctx: &Context) -> DoctorReport {
                 AuthState::NotAuthenticated => DoctorCheck {
                     name: format!("agent: {} auth", agent.name),
                     status: CheckStatus::Skipped,
-                    detail: format!("not logged in — run `single agent login {}`", agent.name),
+                    detail: if adapter.login_supported() {
+                        format!("not logged in — run `single agent login {}`", agent.name)
+                    } else {
+                        // `single agent login` would just error here — this
+                        // agent's auth state is detectable (support() says
+                        // so) but no real login command is wired up for it
+                        // (e.g. agy: no auth/login subcommand exists at
+                        // all in `agy --help`). Don't point at a command
+                        // that doesn't work.
+                        format!("not logged in — no `single agent login {}` support yet; run {}'s own login/auth command directly", agent.name, agent.name)
+                    },
                 },
                 AuthState::Unsupported => DoctorCheck {
                     name: format!("agent: {} auth", agent.name),

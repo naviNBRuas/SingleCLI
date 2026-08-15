@@ -328,11 +328,15 @@ pub fn builtin_registry() -> Vec<AgentDefinition> {
                     .into(),
             ),
         },
-        // -- v0.1.18 additions: none of the following were installed on the
-        // reference machine, so every command/capability below is sourced
-        // from the vendor's own current docs (fetched directly, not taken on
-        // an agent's word) rather than confirmed by direct execution — the
-        // same honest-uncertainty precedent `cody` above already set.
+        // -- v0.1.18 additions, several since verified in v0.1.19: these
+        // were originally sourced from vendor docs only (no adapter, no
+        // real execution). gemini/qwen-code/amp/droid/codebuff/
+        // continue-cli/grok/crush have since been installed and driven
+        // with real `--help` output on the reference machine (see
+        // single-agent-sdk::adapters' v0.1.19 additions) — `unverified` is
+        // flipped to `false` for those. openhands/plandex/mistral-vibe
+        // failed to install on the reference machine (pip/curl script
+        // errors unrelated to SingleCLI) and stay unverified/adapter-less.
         AgentDefinition {
             name: "gemini".into(),
             adapter: "gemini".into(),
@@ -344,17 +348,17 @@ pub fn builtin_registry() -> Vec<AgentDefinition> {
                 command: "npm install -g @google/gemini-cli".into(),
                 source: "https://github.com/google-gemini/gemini-cli".into(),
             }),
-            unverified: true,
+            unverified: false, // installed on the reference machine; run/mcp subcommands confirmed via direct --help execution
             capabilities: CapabilityFlags {
                 streaming: false,
-                mcp: true, // observed `mcpServers` key documented in ~/.gemini/settings.json
+                mcp: false, // `gemini mcp add/list/remove` confirmed real via --help, but settings.json's shape wasn't inspected without a logged-in account — see GeminiAdapter::configure_mcp
                 lsp: false,
                 tools: true,
                 sessions: false, // docs describe checkpointing (--checkpointing) for recovery, not a classic --resume flag
                 structured_output: true, // --output-format json documented
             },
             config_paths: vec![".gemini/settings.json".into()],
-            notes: None,
+            notes: Some("No verified login/auth command — `gemini --help` lists no auth/login subcommand; interactive launches trigger their own Google OAuth browser flow.".into()),
         },
         AgentDefinition {
             name: "qwen-code".into(),
@@ -365,10 +369,10 @@ pub fn builtin_registry() -> Vec<AgentDefinition> {
                 command: "npm install -g @qwen-code/qwen-code@latest".into(),
                 source: "https://github.com/QwenLM/qwen-code".into(),
             }),
-            unverified: true,
+            unverified: false, // installed on the reference machine; run/mcp/auth subcommands confirmed via direct --help execution
             capabilities: CapabilityFlags {
                 streaming: false,
-                mcp: false, // forked from Gemini CLI (which supports MCP), not independently re-confirmed for this fork
+                mcp: false, // `qwen mcp` confirmed real via --help (this fork keeps Gemini CLI's MCP support), but its settings file shape wasn't inspected without a logged-in account
                 lsp: false,
                 tools: true,
                 sessions: false,
@@ -377,8 +381,9 @@ pub fn builtin_registry() -> Vec<AgentDefinition> {
             config_paths: vec![],
             notes: Some(
                 "Alibaba's fork of Google's Gemini CLI, adapted for Qwen3-Coder models. \
-                 Capabilities not independently re-verified against upstream — treat as at \
-                 least Gemini CLI's baseline until confirmed."
+                 No login command wired up: `qwen auth --help` describes itself as \
+                 \"Configure authentication (removed)\" on the reference machine — the \
+                 vendor's own help text says the feature is gone."
                     .into(),
             ),
         },
@@ -395,17 +400,17 @@ pub fn builtin_registry() -> Vec<AgentDefinition> {
                 command: "curl -fsSL https://ampcode.com/install.sh | bash".into(),
                 source: "https://ampcode.com/manual".into(),
             }),
-            unverified: true,
+            unverified: false, // installed on the reference machine; login/run/mcp subcommands confirmed via direct --help execution
             capabilities: CapabilityFlags {
                 streaming: false,
-                mcp: false,
+                mcp: false, // `amp mcp add/list/remove` is real and --help documents a flat "amp.mcpServers" settings.json key, but that shape was never round-tripped against a real file — see AmpAdapter::configure_mcp
                 lsp: false,
                 tools: true,
                 sessions: false,
                 structured_output: false,
             },
             config_paths: vec![],
-            notes: Some("Sourcegraph's newer agent product — distinct from the already-registered `cody`.".into()),
+            notes: Some("Sourcegraph's newer agent product — distinct from the already-registered `cody`. `amp login` confirmed real via --help.".into()),
         },
         AgentDefinition {
             name: "openhands".into(),
@@ -442,17 +447,17 @@ pub fn builtin_registry() -> Vec<AgentDefinition> {
                 command: "curl -fsSL https://app.factory.ai/cli | sh".into(),
                 source: "https://docs.factory.ai/cli/getting-started/quickstart".into(),
             }),
-            unverified: true,
+            unverified: false, // installed on the reference machine; run/mcp subcommands confirmed via direct --help execution
             capabilities: CapabilityFlags {
                 streaming: false,
-                mcp: true, // `droid mcp add` / `/mcp` command documented
+                mcp: false, // `droid mcp add/remove/list` confirmed real via --help, but its config file shape wasn't inspected without a logged-in account — see DroidAdapter::configure_mcp
                 lsp: false,
                 tools: true,
                 sessions: true, // a documented "Droid Sessions API" exists; resume UX specifics not confirmed
                 structured_output: true, // `droid exec` headless mode documents structured input/output formats
             },
             config_paths: vec![],
-            notes: Some("Requires logging into a Factory account before use (free tier exists).".into()),
+            notes: Some("Requires logging into a Factory account before use (free tier exists). No verified login command though: neither `droid --help`, `droid auth --help`, nor `droid login --help` show an auth subcommand on the reference machine.".into()),
         },
         AgentDefinition {
             name: "codebuff".into(),
@@ -463,17 +468,17 @@ pub fn builtin_registry() -> Vec<AgentDefinition> {
                 command: "npm install -g codebuff".into(),
                 source: "https://www.codebuff.com/docs/help".into(),
             }),
-            unverified: true,
+            unverified: false, // installed on the reference machine; login subcommand confirmed via direct --help execution
             capabilities: CapabilityFlags {
                 streaming: false,
-                mcp: false,
+                mcp: false, // no mcp subcommand anywhere in --help on the reference machine
                 lsp: false,
                 tools: true,
                 sessions: false,
                 structured_output: false,
             },
             config_paths: vec![],
-            notes: None,
+            notes: Some("`codebuff login` confirmed real via --help. No verified non-interactive run mode: --help doesn't confirm whether a positional prompt exits after one response or continues interactively.".into()),
         },
         AgentDefinition {
             name: "plandex".into(),
@@ -510,10 +515,10 @@ pub fn builtin_registry() -> Vec<AgentDefinition> {
                 command: "curl -fsSL https://raw.githubusercontent.com/continuedev/continue/main/extensions/cli/scripts/install.sh | bash".into(),
                 source: "https://docs.continue.dev/cli/quickstart".into(),
             }),
-            unverified: true,
+            unverified: false, // installed on the reference machine; run mode confirmed via direct --help execution
             capabilities: CapabilityFlags {
                 streaming: false,
-                mcp: false,
+                mcp: false, // only a per-session `--mcp <hub-slug>` flag exists, not a persistent local config to write
                 lsp: false,
                 tools: true,
                 sessions: false,
@@ -523,7 +528,8 @@ pub fn builtin_registry() -> Vec<AgentDefinition> {
             notes: Some(
                 "Distinct from the Continue.dev IDE extension — `cn` is a separate \
                  headless/background-job agent binary for async cloud runs (PR review, \
-                 migrations, CI), not an interactive session the way most other entries here are."
+                 migrations, CI), not an interactive session the way most other entries here are. \
+                 No verified login command: no auth/login subcommand in `cn --help`."
                     .into(),
             ),
         },
@@ -536,10 +542,10 @@ pub fn builtin_registry() -> Vec<AgentDefinition> {
                 command: "curl -fsSL https://x.ai/cli/install.sh | bash".into(),
                 source: "https://docs.x.ai/build/overview".into(),
             }),
-            unverified: true,
+            unverified: false, // installed on the reference machine; login/run/mcp subcommands confirmed via direct --help execution
             capabilities: CapabilityFlags {
                 streaming: false,
-                mcp: true, // vendor docs state "MCP servers work out of the box"
+                mcp: false, // `grok mcp` confirmed real via --help, but its config file shape wasn't inspected without a logged-in account — see GrokAdapter::configure_mcp
                 lsp: false,
                 tools: true,
                 sessions: false, // subagents/worktrees documented, but resume UX not confirmed
@@ -548,7 +554,8 @@ pub fn builtin_registry() -> Vec<AgentDefinition> {
             config_paths: vec![],
             notes: Some(
                 "xAI's terminal coding agent, \"Grok Build\" (beta as of this writing) — requires \
-                 SuperGrok/X Premium Plus subscription or an XAI_API_KEY. Repo: xai-org/grok-build."
+                 SuperGrok/X Premium Plus subscription or an XAI_API_KEY. Repo: xai-org/grok-build. \
+                 `grok login` confirmed real via --help."
                     .into(),
             ),
         },
@@ -590,10 +597,10 @@ pub fn builtin_registry() -> Vec<AgentDefinition> {
                 command: "npm install -g @charmland/crush".into(),
                 source: "https://github.com/charmbracelet/crush".into(),
             }),
-            unverified: true,
+            unverified: false, // installed on the reference machine; login/run subcommands confirmed via direct --help execution
             capabilities: CapabilityFlags {
                 streaming: false,
-                mcp: true, // vendor docs state MCP extensibility
+                mcp: false, // no mcp subcommand appears in --help on the reference machine; vendor docs describe config-file-based MCP but the file wasn't inspected without a logged-in account
                 lsp: true, // vendor docs state "LSP-enhanced context"
                 tools: true,
                 sessions: false,
@@ -603,7 +610,8 @@ pub fn builtin_registry() -> Vec<AgentDefinition> {
             notes: Some(
                 "Charmbracelet's multi-provider agent — connects to Anthropic, OpenAI, Gemini, \
                  OpenRouter, Bedrock, Azure OpenAI, Vertex AI, and local model servers by design, \
-                 unlike the single-vendor entries elsewhere in this registry."
+                 unlike the single-vendor entries elsewhere in this registry. `crush login \
+                 [platform]` confirmed real via --help."
                     .into(),
             ),
         },

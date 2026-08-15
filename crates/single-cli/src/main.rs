@@ -49,6 +49,15 @@ enum Command {
         #[command(subcommand)]
         action: ToolCommand,
     },
+    /// Manage the `single-runtimed` background daemon directly. Mainly for
+    /// `restart`: the daemon inherits its environment (notably `$PATH`)
+    /// once at spawn time, so a CLI installed (or a shell rc file edited)
+    /// after the daemon was already running stays invisible to agent
+    /// detection until it's restarted.
+    Daemon {
+        #[command(subcommand)]
+        action: DaemonCommand,
+    },
     /// Manage secrets (OS keychain-backed; Linux via secret-tool in Phase 2).
     Secret {
         #[command(subcommand)]
@@ -832,6 +841,19 @@ enum ProfileCommand {
     Use { name: String },
 }
 
+#[derive(Subcommand)]
+enum DaemonCommand {
+    /// Report whether single-runtimed is currently running.
+    Status,
+    /// Ask the running daemon to exit gracefully. A no-op if it isn't running.
+    Stop,
+    /// Stop the daemon if running, then start a fresh one that inherits
+    /// this command's current environment — run this after installing a
+    /// new agent CLI or changing PATH/shell rc files so detection picks
+    /// it up without needing a reboot or logout.
+    Restart,
+}
+
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let dirs = SingleDirs::discover()?;
@@ -876,6 +898,27 @@ fn main() -> anyhow::Result<()> {
             let response = client::send(&socket_path, Request::Status)?;
             render::print(response, false);
         }
+        Command::Daemon { action } => match action {
+            DaemonCommand::Status => {
+                if daemon::is_running(&dirs) {
+                    println!("single-runtimed is running ({})", socket_path.display());
+                } else {
+                    println!("single-runtimed is not running");
+                }
+            }
+            DaemonCommand::Stop => {
+                if daemon::stop_running(&dirs)? {
+                    println!("single-runtimed stopped");
+                } else {
+                    println!("single-runtimed was not running");
+                }
+            }
+            DaemonCommand::Restart => {
+                daemon::stop_running(&dirs)?;
+                daemon::ensure_running(&dirs)?;
+                println!("single-runtimed restarted");
+            }
+        },
         Command::Doctor => {
             let response = client::send(&socket_path, Request::Doctor)?;
             render::print(response, false);

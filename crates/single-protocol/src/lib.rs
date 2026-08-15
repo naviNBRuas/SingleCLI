@@ -15,6 +15,12 @@ use std::collections::BTreeMap;
 pub enum Request {
     Status,
     Doctor,
+    /// Asks a running `single-runtimed` to exit after acknowledging this
+    /// request — see `single-cli::daemon::stop_running`. Exists because the
+    /// daemon inherits its environment (notably `$PATH`) once at spawn
+    /// time and keeps it for the life of the process, so a newly installed
+    /// agent CLI is invisible to detection until the daemon is restarted.
+    Shutdown,
     AgentList,
     AgentInspect { name: String },
     McpList,

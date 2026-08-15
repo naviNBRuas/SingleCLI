@@ -39,7 +39,9 @@ async fn handle_connection(stream: UnixStream) -> Result<()> {
     let mut line = String::new();
 
     while reader.read_line(&mut line).await? > 0 {
-        let response = match serde_json::from_str::<Request>(line.trim_end()) {
+        let parsed = serde_json::from_str::<Request>(line.trim_end());
+        let shutdown_requested = matches!(parsed, Ok(Request::Shutdown));
+        let response = match parsed {
             Ok(request) => {
                 // Context is cheap to load (local file reads) and Phase 1
                 // has no long-lived mutable daemon state, so a fresh
@@ -54,7 +56,14 @@ async fn handle_connection(stream: UnixStream) -> Result<()> {
         let mut payload = serde_json::to_string(&response)?;
         payload.push('\n');
         write_half.write_all(payload.as_bytes()).await?;
+        write_half.flush().await?;
         line.clear();
+
+        // Exit only after the ack above is flushed to the client, so
+        // `stop_running`'s response read never races process teardown.
+        if shutdown_requested {
+            std::process::exit(0);
+        }
     }
     Ok(())
 }

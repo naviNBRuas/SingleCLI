@@ -18,6 +18,9 @@ fn dispatch(ctx: &Context, request: Request) -> anyhow::Result<ResponseData> {
     match request {
         Request::Status => Ok(ResponseData::Status(status(ctx))),
         Request::Doctor => Ok(ResponseData::Doctor(doctor::run(ctx))),
+        // Actual process exit happens in server.rs after this response is
+        // flushed to the client — see its handle_connection.
+        Request::Shutdown => Ok(ResponseData::Empty),
         Request::AgentList => {
             let agents = ctx.registry.iter().map(|def| to_agent_info(def, ctx)).collect();
             Ok(ResponseData::Agents(agents))

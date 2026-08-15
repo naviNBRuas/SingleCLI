@@ -19,6 +19,22 @@ pub struct GooseAdapter;
 pub struct CopilotAdapter;
 pub struct KiroAdapter;
 pub struct CodyAdapter;
+// -- v0.1.19 additions: all confirmed by installing the real binary and
+// running `--help` directly on the reference machine (not taken from
+// vendor docs) — see each impl's doc comments for what was actually
+// observed. `configure_mcp`/`remove_mcp` stay unsupported for every one of
+// these: each vendor CLI does have a real `mcp` subcommand, but none of
+// them had a logged-in account to actually run it against and inspect the
+// resulting config file's shape, so writing one directly would be a
+// guess — same reasoning `kiro` above already documents.
+pub struct GeminiAdapter;
+pub struct QwenCodeAdapter;
+pub struct AmpAdapter;
+pub struct DroidAdapter;
+pub struct CodebuffAdapter;
+pub struct ContinueCliAdapter;
+pub struct GrokAdapter;
+pub struct CrushAdapter;
 
 impl AgentAdapter for ClaudeAdapter {
     fn command(&self) -> &str {
@@ -60,6 +76,10 @@ impl AgentAdapter for ClaudeAdapter {
     /// the reference machine ("Sign in to your Anthropic account").
     fn login(&self, home: &Path) -> Result<()> {
         run_interactive_with_home("claude", &["auth".to_string(), "login".to_string()], home)
+    }
+
+    fn login_supported(&self) -> bool {
+        true
     }
 }
 
@@ -116,6 +136,10 @@ impl AgentAdapter for CodexAdapter {
     /// browser OAuth flow).
     fn login(&self, home: &Path) -> Result<()> {
         run_interactive_with_home("codex", &["login".to_string()], home)
+    }
+
+    fn login_supported(&self) -> bool {
+        true
     }
 }
 
@@ -193,6 +217,10 @@ impl AgentAdapter for OpenCodeAdapter {
     fn login(&self, home: &Path) -> Result<()> {
         run_interactive_with_home("opencode", &["auth".to_string(), "login".to_string()], home)
     }
+
+    fn login_supported(&self) -> bool {
+        true
+    }
 }
 
 impl AgentAdapter for AgyAdapter {
@@ -248,6 +276,10 @@ impl AgentAdapter for PerplexityAdapter {
     fn login(&self, home: &Path) -> Result<()> {
         run_interactive_with_home("pplx", &["auth".to_string(), "login".to_string()], home)
     }
+
+    fn login_supported(&self) -> bool {
+        true
+    }
 }
 
 impl AgentAdapter for CursorAdapter {
@@ -284,6 +316,10 @@ impl AgentAdapter for CursorAdapter {
     /// NO_OPEN_BROWSER to disable browser opening.").
     fn login(&self, home: &Path) -> Result<()> {
         run_interactive_with_home("cursor-agent", &["login".to_string()], home)
+    }
+
+    fn login_supported(&self) -> bool {
+        true
     }
 }
 
@@ -360,6 +396,10 @@ impl AgentAdapter for GooseAdapter {
     fn login(&self, home: &Path) -> Result<()> {
         run_interactive_with_home("goose", &["configure".to_string()], home)
     }
+
+    fn login_supported(&self) -> bool {
+        true
+    }
 }
 
 impl AgentAdapter for CopilotAdapter {
@@ -401,6 +441,10 @@ impl AgentAdapter for CopilotAdapter {
     /// reference machine (OAuth device flow).
     fn login(&self, home: &Path) -> Result<()> {
         run_interactive_with_home("copilot", &["login".to_string()], home)
+    }
+
+    fn login_supported(&self) -> bool {
+        true
     }
 
     /// `copilot plugin install <source>` — confirmed real via `copilot
@@ -452,6 +496,10 @@ impl AgentAdapter for KiroAdapter {
     fn login(&self, home: &Path) -> Result<()> {
         run_interactive_with_home("kiro-cli", &["login".to_string()], home)
     }
+
+    fn login_supported(&self) -> bool {
+        true
+    }
 }
 
 impl AgentAdapter for CodyAdapter {
@@ -479,6 +527,255 @@ impl AgentAdapter for CodyAdapter {
     /// `cody auth login --web` — per Sourcegraph's Cody CLI docs.
     fn login(&self, home: &Path) -> Result<()> {
         run_interactive_with_home("cody", &["auth".to_string(), "login".to_string(), "--web".to_string()], home)
+    }
+
+    fn login_supported(&self) -> bool {
+        true
+    }
+}
+
+impl AgentAdapter for GeminiAdapter {
+    fn command(&self) -> &str {
+        "gemini"
+    }
+
+    /// Real `gemini mcp add/remove/list` confirmed via `gemini mcp --help`,
+    /// and a documented `mcpServers` key in `~/.gemini/settings.json` —
+    /// but no account was logged in to actually produce that file and
+    /// confirm its exact shape.
+    fn configure_mcp(&self, home: &Path, _servers: &[McpServerSpec], _dry_run: bool) -> Result<IntegrationWrite> {
+        Ok(unsupported_write("gemini", home, "gemini mcp add/list/remove is real (confirmed via --help) but settings.json's exact shape wasn't inspected without a logged-in account"))
+    }
+
+    fn remove_mcp(&self, home: &Path, _names: &[String], _dry_run: bool) -> Result<IntegrationWrite> {
+        Ok(unsupported_write("gemini", home, "gemini mcp add/list/remove is real (confirmed via --help) but settings.json's exact shape wasn't inspected without a logged-in account"))
+    }
+
+    /// `gemini -p "<prompt>"` — confirmed non-interactive mode via `gemini
+    /// --help` on the reference machine ("Run in non-interactive (headless)
+    /// mode with the given prompt").
+    fn run_prompt(&self, cwd: &Path, prompt: &str, backend: &ExecBackend, live_output_path: Option<&Path>, timeout: Duration) -> Result<RunOutcome> {
+        run_with_prompt_flag("gemini", cwd, prompt, backend, live_output_path, timeout)
+    }
+
+    // No `login`: `gemini --help` lists no `auth`/`login` subcommand —
+    // interactive launches trigger a Google OAuth browser flow on their
+    // own the first time, not a separately invokable command.
+}
+
+impl AgentAdapter for QwenCodeAdapter {
+    fn command(&self) -> &str {
+        "qwen"
+    }
+
+    /// Real `qwen mcp` subcommand confirmed via `--help` (this fork keeps
+    /// Gemini CLI's MCP support), but the settings file shape wasn't
+    /// inspected without a logged-in account.
+    fn configure_mcp(&self, home: &Path, _servers: &[McpServerSpec], _dry_run: bool) -> Result<IntegrationWrite> {
+        Ok(unsupported_write("qwen-code", home, "qwen mcp is real (confirmed via --help) but its settings file shape wasn't inspected without a logged-in account"))
+    }
+
+    fn remove_mcp(&self, home: &Path, _names: &[String], _dry_run: bool) -> Result<IntegrationWrite> {
+        Ok(unsupported_write("qwen-code", home, "qwen mcp is real (confirmed via --help) but its settings file shape wasn't inspected without a logged-in account"))
+    }
+
+    /// `qwen -p "<prompt>"` — confirmed via `qwen --help` (same flag as
+    /// upstream Gemini CLI, which this is forked from).
+    fn run_prompt(&self, cwd: &Path, prompt: &str, backend: &ExecBackend, live_output_path: Option<&Path>, timeout: Duration) -> Result<RunOutcome> {
+        run_with_prompt_flag("qwen", cwd, prompt, backend, live_output_path, timeout)
+    }
+
+    // No `login`: `qwen auth --help` on the reference machine describes
+    // itself as "Configure authentication (removed)" — the subcommand
+    // still parses but the vendor's own help text says the feature is
+    // gone, so it's not wired up as a real login path here.
+}
+
+impl AgentAdapter for AmpAdapter {
+    fn command(&self) -> &str {
+        "amp"
+    }
+
+    /// Real `amp mcp add/list/remove` confirmed via `--help`, and `--help`
+    /// even prints the exact settings.json shape (a flat top-level
+    /// `"amp.mcpServers"` key) — but that's still the vendor's own
+    /// documentation text, not a file this project actually wrote and
+    /// re-read on the reference machine, so it stays unsupported rather
+    /// than risk a subtly wrong merge.
+    fn configure_mcp(&self, home: &Path, _servers: &[McpServerSpec], _dry_run: bool) -> Result<IntegrationWrite> {
+        Ok(unsupported_write("amp", home, "amp mcp add/list/remove is real and --help documents a flat \"amp.mcpServers\" key in settings.json, but that shape was never round-tripped against a real file on the reference machine"))
+    }
+
+    fn remove_mcp(&self, home: &Path, _names: &[String], _dry_run: bool) -> Result<IntegrationWrite> {
+        Ok(unsupported_write("amp", home, "amp mcp add/list/remove is real and --help documents a flat \"amp.mcpServers\" key in settings.json, but that shape was never round-tripped against a real file on the reference machine"))
+    }
+
+    /// `amp -x "<prompt>"` — confirmed non-interactive mode via `amp
+    /// --help` ("Use execute mode ... agent will execute provided
+    /// prompt ... Only last assistant message is printed").
+    fn run_prompt(&self, cwd: &Path, prompt: &str, backend: &ExecBackend, live_output_path: Option<&Path>, timeout: Duration) -> Result<RunOutcome> {
+        run_command_live("amp", &["-x".to_string(), prompt.to_string()], cwd, backend, live_output_path, timeout)
+    }
+
+    /// `amp login` — confirmed real via `amp --help` ("Log in to Amp").
+    fn login(&self, home: &Path) -> Result<()> {
+        run_interactive_with_home("amp", &["login".to_string()], home)
+    }
+
+    fn login_supported(&self) -> bool {
+        true
+    }
+}
+
+impl AgentAdapter for DroidAdapter {
+    fn command(&self) -> &str {
+        "droid"
+    }
+
+    /// Real `droid mcp add/remove/list` confirmed via `droid mcp --help`,
+    /// but no account was logged in to inspect the config file it writes.
+    fn configure_mcp(&self, home: &Path, _servers: &[McpServerSpec], _dry_run: bool) -> Result<IntegrationWrite> {
+        Ok(unsupported_write("droid", home, "droid mcp add/remove/list is real (confirmed via --help) but its config file shape wasn't inspected without a logged-in account"))
+    }
+
+    fn remove_mcp(&self, home: &Path, _names: &[String], _dry_run: bool) -> Result<IntegrationWrite> {
+        Ok(unsupported_write("droid", home, "droid mcp add/remove/list is real (confirmed via --help) but its config file shape wasn't inspected without a logged-in account"))
+    }
+
+    /// `droid exec "<prompt>"` — confirmed non-interactive mode via `droid
+    /// --help` ("Run non-interactively (for scripts/automation)").
+    fn run_prompt(&self, cwd: &Path, prompt: &str, backend: &ExecBackend, live_output_path: Option<&Path>, timeout: Duration) -> Result<RunOutcome> {
+        run_command_live("droid", &["exec".to_string(), prompt.to_string()], cwd, backend, live_output_path, timeout)
+    }
+
+    // No `login`: neither `droid --help`, `droid auth --help`, nor `droid
+    // login --help` show an auth/login subcommand on the reference
+    // machine — Factory's docs describe requiring an account, but the CLI
+    // itself doesn't expose a command to drive that from here.
+}
+
+impl AgentAdapter for CodebuffAdapter {
+    fn command(&self) -> &str {
+        "codebuff"
+    }
+
+    /// No `mcp` subcommand appears anywhere in `codebuff --help` on the
+    /// reference machine — honest gap, not guessed.
+    fn configure_mcp(&self, home: &Path, _servers: &[McpServerSpec], _dry_run: bool) -> Result<IntegrationWrite> {
+        Ok(unsupported_write("codebuff", home, "codebuff has no confirmed MCP config surface (no mcp subcommand in --help)"))
+    }
+
+    fn remove_mcp(&self, home: &Path, _names: &[String], _dry_run: bool) -> Result<IntegrationWrite> {
+        Ok(unsupported_write("codebuff", home, "codebuff has no confirmed MCP config surface (no mcp subcommand in --help)"))
+    }
+
+    // No `run_prompt`: `codebuff --help` takes a prompt as a positional
+    // argument but nothing in --help confirms it exits after one response
+    // rather than continuing interactively — left unsupported rather than
+    // guessed (unlike the `-p`/`exec` agents above, which have an explicit
+    // documented non-interactive flag).
+
+    /// `codebuff login` — confirmed real via `codebuff --help` ("Log in to
+    /// your account").
+    fn login(&self, home: &Path) -> Result<()> {
+        run_interactive_with_home("codebuff", &["login".to_string()], home)
+    }
+
+    fn login_supported(&self) -> bool {
+        true
+    }
+}
+
+impl AgentAdapter for ContinueCliAdapter {
+    fn command(&self) -> &str {
+        "cn"
+    }
+
+    /// `cn --help` only offers a per-session `--mcp <hub-slug>` flag (pulls
+    /// a server from Continue's hub for that one run), not a persistent
+    /// local registry to write into — nothing to configure here.
+    fn configure_mcp(&self, home: &Path, _servers: &[McpServerSpec], _dry_run: bool) -> Result<IntegrationWrite> {
+        Ok(unsupported_write("continue-cli", home, "cn only supports a per-session --mcp <hub-slug> flag, not a persistent local MCP config to write"))
+    }
+
+    fn remove_mcp(&self, home: &Path, _names: &[String], _dry_run: bool) -> Result<IntegrationWrite> {
+        Ok(unsupported_write("continue-cli", home, "cn only supports a per-session --mcp <hub-slug> flag, not a persistent local MCP config to write"))
+    }
+
+    /// `cn -p "<prompt>"` — confirmed via `cn --help` ("-p, --print: Print
+    /// response and exit (useful for pipes)").
+    fn run_prompt(&self, cwd: &Path, prompt: &str, backend: &ExecBackend, live_output_path: Option<&Path>, timeout: Duration) -> Result<RunOutcome> {
+        run_with_prompt_flag("cn", cwd, prompt, backend, live_output_path, timeout)
+    }
+
+    // No `login`: no auth/login subcommand in `cn --help` on the
+    // reference machine.
+}
+
+impl AgentAdapter for GrokAdapter {
+    fn command(&self) -> &str {
+        "grok"
+    }
+
+    /// Real `grok mcp` subcommand confirmed via `--help`, but no account
+    /// was logged in to inspect the config file it writes.
+    fn configure_mcp(&self, home: &Path, _servers: &[McpServerSpec], _dry_run: bool) -> Result<IntegrationWrite> {
+        Ok(unsupported_write("grok", home, "grok mcp is real (confirmed via --help) but its config file shape wasn't inspected without a logged-in account"))
+    }
+
+    fn remove_mcp(&self, home: &Path, _names: &[String], _dry_run: bool) -> Result<IntegrationWrite> {
+        Ok(unsupported_write("grok", home, "grok mcp is real (confirmed via --help) but its config file shape wasn't inspected without a logged-in account"))
+    }
+
+    /// `grok -p "<prompt>"` — confirmed via `grok --help` ("-p, --single
+    /// <PROMPT>: Single-turn prompt. Prints the response to stdout and
+    /// exits").
+    fn run_prompt(&self, cwd: &Path, prompt: &str, backend: &ExecBackend, live_output_path: Option<&Path>, timeout: Duration) -> Result<RunOutcome> {
+        run_with_prompt_flag("grok", cwd, prompt, backend, live_output_path, timeout)
+    }
+
+    /// `grok login` — confirmed real via `grok --help` ("Sign in to
+    /// Grok").
+    fn login(&self, home: &Path) -> Result<()> {
+        run_interactive_with_home("grok", &["login".to_string()], home)
+    }
+
+    fn login_supported(&self) -> bool {
+        true
+    }
+}
+
+impl AgentAdapter for CrushAdapter {
+    fn command(&self) -> &str {
+        "crush"
+    }
+
+    /// No `mcp` subcommand appears in `crush --help` on the reference
+    /// machine (vendor docs describe MCP extensibility via its config
+    /// file, but the file wasn't inspected without a logged-in account).
+    fn configure_mcp(&self, home: &Path, _servers: &[McpServerSpec], _dry_run: bool) -> Result<IntegrationWrite> {
+        Ok(unsupported_write("crush", home, "crush's MCP config file wasn't inspected without a logged-in account, and no mcp subcommand appears in --help"))
+    }
+
+    fn remove_mcp(&self, home: &Path, _names: &[String], _dry_run: bool) -> Result<IntegrationWrite> {
+        Ok(unsupported_write("crush", home, "crush's MCP config file wasn't inspected without a logged-in account, and no mcp subcommand appears in --help"))
+    }
+
+    /// `crush run "<prompt>"` — confirmed non-interactive mode via `crush
+    /// --help` ("Run a single non-interactive prompt").
+    fn run_prompt(&self, cwd: &Path, prompt: &str, backend: &ExecBackend, live_output_path: Option<&Path>, timeout: Duration) -> Result<RunOutcome> {
+        run_command_live("crush", &["run".to_string(), prompt.to_string()], cwd, backend, live_output_path, timeout)
+    }
+
+    /// `crush login [platform]` — confirmed real via `crush --help`
+    /// ("Login Crush to a platform"). Run without a platform argument, it
+    /// prompts interactively for one.
+    fn login(&self, home: &Path) -> Result<()> {
+        run_interactive_with_home("crush", &["login".to_string()], home)
+    }
+
+    fn login_supported(&self) -> bool {
+        true
     }
 }
 
@@ -531,6 +828,14 @@ pub fn for_agent(name: &str) -> Option<Box<dyn AgentAdapter>> {
         "copilot" => Some(Box::new(CopilotAdapter)),
         "kiro" => Some(Box::new(KiroAdapter)),
         "cody" => Some(Box::new(CodyAdapter)),
+        "gemini" => Some(Box::new(GeminiAdapter)),
+        "qwen-code" => Some(Box::new(QwenCodeAdapter)),
+        "amp" => Some(Box::new(AmpAdapter)),
+        "droid" => Some(Box::new(DroidAdapter)),
+        "codebuff" => Some(Box::new(CodebuffAdapter)),
+        "continue-cli" => Some(Box::new(ContinueCliAdapter)),
+        "grok" => Some(Box::new(GrokAdapter)),
+        "crush" => Some(Box::new(CrushAdapter)),
         _ => None,
     }
 }
@@ -641,15 +946,18 @@ mod tests {
 
     #[test]
     fn for_agent_with_custom_falls_back_to_a_registry_derived_generic_adapter() {
-        // A v0.1.18 catalog addition like "gemini" has no dedicated Rust
+        // A v0.1.18 catalog addition like "plandex" has no dedicated Rust
         // adapter (no ClaudeAdapter-style struct) and no custom_agents.toml
         // override — it should still resolve to a working GenericAdapter
-        // built straight from its AgentDefinition, not None.
+        // built straight from its AgentDefinition, not None. (Its sibling
+        // additions gemini/qwen-code/amp/droid/codebuff/continue-cli/grok/
+        // crush graduated to real adapters in v0.1.19 — see the top of
+        // this file — so this test picks one that's still generic.)
         let dir = tempfile::tempdir().unwrap();
         let registry = single_core::builtin_registry();
-        let entry = registry.iter().find(|a| a.name == "gemini").expect("gemini should be in builtin_registry()");
+        let entry = registry.iter().find(|a| a.name == "plandex").expect("plandex should be in builtin_registry()");
 
-        let adapter = for_agent_with_custom("gemini", dir.path(), &registry).expect("expected a generic-adapter fallback");
+        let adapter = for_agent_with_custom("plandex", dir.path(), &registry).expect("expected a generic-adapter fallback");
         assert_eq!(adapter.command(), entry.command);
         // Detection still does something real (checks PATH), it just won't find it in a test sandbox.
         assert!(!adapter.discover().detected);

@@ -95,6 +95,15 @@ pub trait AgentAdapter {
     fn login(&self, _home: &Path) -> Result<()> {
         anyhow::bail!("{} has no verified interactive login command wired up", self.command())
     }
+
+    /// Whether `login()` above is a real, verified command rather than the
+    /// default unsupported stub — lets callers (namely `doctor`) give an
+    /// honest answer instead of pointing at `single agent login <name>`
+    /// for an agent that will just error. Override to `true` alongside any
+    /// real `login()` implementation.
+    fn login_supported(&self) -> bool {
+        false
+    }
 }
 
 pub(crate) fn run_with_prompt_flag(
