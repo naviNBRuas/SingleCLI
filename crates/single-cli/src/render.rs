@@ -328,6 +328,47 @@ fn print_data(data: ResponseData) {
                 }
             }
         }
+        ResponseData::ProviderKeys(keys) => {
+            if keys.is_empty() {
+                println!("(no labeled keys for this provider)");
+            }
+            for k in keys {
+                println!("{:<14} agent: {}", k.label, k.agent.as_deref().unwrap_or("-"));
+            }
+        }
+        ResponseData::BillingProviders(providers) => {
+            for p in providers {
+                let status = if !p.verified { "unverified" } else { "" };
+                let admin = if p.admin_key_configured { "admin key set" } else { "admin key not set" };
+                println!("{:<12} {:<11} {}", p.provider, status, admin);
+                if let Some(notes) = p.notes {
+                    println!("             {notes}");
+                }
+            }
+        }
+        ResponseData::Usage(summary) => {
+            println!("Provider spend (as of {}):", summary.last_refreshed.as_deref().unwrap_or("never refreshed"));
+            if summary.provider_usage.is_empty() {
+                println!("  (no provider usage data — configure a billing admin key with `single provider set-billing-key`)");
+            }
+            for r in &summary.provider_usage {
+                println!(
+                    "  {:<12} {:<10} {:<10} ${:.4}  [{} .. {}]",
+                    r.provider,
+                    r.key_label.as_deref().unwrap_or("-"),
+                    r.agent.as_deref().unwrap_or("-"),
+                    r.cost_usd,
+                    r.period_start,
+                    r.period_end
+                );
+            }
+            println!("  TOTAL: ${:.4}", summary.total_usd);
+            println!();
+            println!("Connected agents (local stats only, no billing API):");
+            for a in &summary.agent_local_stats {
+                println!("  {:<14} runs: {:<5} avg: {}ms  last: {}", a.agent, a.run_count, a.avg_duration_ms, a.last_run_at.as_deref().unwrap_or("never"));
+            }
+        }
         ResponseData::Plugin(p) => {
             println!("name:            {}", p.name);
             println!("target:          {}", p.target);

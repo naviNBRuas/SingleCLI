@@ -12,3 +12,4 @@ crossterm.workspace = true
 serde_json.workspace = true
 single-core = { path = "../single-core" }
 single-protocol = { path = "../single-protocol" }
+age.workspace = true

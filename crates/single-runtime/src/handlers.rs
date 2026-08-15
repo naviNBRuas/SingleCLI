@@ -516,6 +516,66 @@ fn dispatch(ctx: &Context, request: Request) -> anyhow::Result<ResponseData> {
             }
             Ok(ResponseData::ProviderSyncResults(results))
         }
+        Request::ProviderAddKey { provider, label, agent, value } => {
+            let store = single_core::secrets::SecretTool;
+            let secret_name = single_core::provider_keys::secret_name(&provider, &label);
+            single_core::secrets::SecretStore::set(&store, &secret_name, &value)?;
+            single_core::provider_keys::add(
+                &ctx.dirs.provider_keys_registry_file(),
+                single_protocol::ProviderKeySpec { provider, label, agent, secret_name },
+            )?;
+            Ok(ResponseData::Empty)
+        }
+        Request::ProviderListKeys { provider } => {
+            let keys = single_core::provider_keys::list_for_provider(&ctx.dirs.provider_keys_registry_file(), &provider)?;
+            Ok(ResponseData::ProviderKeys(keys))
+        }
+        Request::ProviderRemoveKey { provider, label } => {
+            let key = single_core::provider_keys::find(&ctx.dirs.provider_keys_registry_file(), &provider, &label)?
+                .ok_or_else(|| anyhow::anyhow!("no such key: {provider}:{label}"))?;
+            let store = single_core::secrets::SecretTool;
+            single_core::secrets::SecretStore::delete(&store, &key.secret_name)?;
+            single_core::provider_keys::remove(&ctx.dirs.provider_keys_registry_file(), &provider, &label)?;
+            Ok(ResponseData::Empty)
+        }
+        Request::ProviderKeySync { provider, label, agent, dry_run } => {
+            let provider_spec = single_core::providers::find(&ctx.dirs.providers_registry_file(), &provider)?
+                .ok_or_else(|| anyhow::anyhow!("no such provider: {provider}"))?;
+            let key = single_core::provider_keys::find(&ctx.dirs.provider_keys_registry_file(), &provider, &label)?
+                .ok_or_else(|| anyhow::anyhow!("no such key: {provider}:{label} (add it first with `single provider add-key`)"))?;
+            let store = single_core::secrets::SecretTool;
+            let value = single_core::secrets::SecretStore::get(&store, &key.secret_name)?
+                .ok_or_else(|| anyhow::anyhow!("key '{provider}:{label}' has no value stored"))?;
+            let real_home = integrations::home_dir()?;
+            let home = single_core::agent_home::ensure_bootstrapped(&ctx.dirs.homes_dir(), &real_home, &agent)?;
+            let mut result = single_agent_sdk::provider_sync::sync(&agent, &home, &provider_spec.env_var_name, &value, dry_run)?;
+            result.provider = provider;
+            Ok(ResponseData::ProviderSyncResults(vec![result]))
+        }
+        Request::ProviderSetBillingKey { provider, value } => {
+            let store = single_core::secrets::SecretTool;
+            single_core::secrets::SecretStore::set(&store, &format!("billing:{provider}"), &value)?;
+            Ok(ResponseData::Empty)
+        }
+        Request::BillingProviderList => {
+            let store = single_core::secrets::SecretTool;
+            let infos = single_core::billing::builtin_registry()
+                .into_iter()
+                .map(|p| {
+                    let configured = single_core::secrets::SecretStore::get(&store, &format!("billing:{}", p.provider)).ok().flatten().is_some();
+                    single_protocol::BillingProviderInfo {
+                        provider: p.provider.to_string(),
+                        verified: p.verified,
+                        admin_key_env_hint: p.admin_key_env_hint.to_string(),
+                        admin_key_configured: configured,
+                        notes: if p.notes.is_empty() { None } else { Some(p.notes.to_string()) },
+                    }
+                })
+                .collect();
+            Ok(ResponseData::BillingProviders(infos))
+        }
+        Request::UsageShow { provider } => usage_summary(ctx, provider),
+        Request::UsageRefresh => usage_summary(ctx, None),
         Request::PluginAdd { plugin } => {
             single_core::plugins::add(&ctx.dirs.plugins_registry_file(), plugin)?;
             Ok(ResponseData::Empty)
@@ -680,6 +740,79 @@ fn memory_db(ctx: &Context) -> anyhow::Result<rusqlite::Connection> {
     let conn = crate::state::open(&ctx.dirs.db_path())?;
     memory::ensure_schema(&conn)?;
     Ok(conn)
+}
+
+/// Builds the Usage page's full summary: real `$` from every configured
+/// billing-supported provider key (best-effort — one provider's API
+/// failure doesn't blank out the others, it just gets skipped, since a
+/// billing endpoint being briefly unreachable shouldn't hide every other
+/// provider's real numbers) plus local-only run stats for every agent
+/// that has no billing data at all. `provider_filter` narrows to one
+/// provider's keys when set (used by `single usage show --provider`).
+fn usage_summary(ctx: &Context, provider_filter: Option<String>) -> anyhow::Result<ResponseData> {
+    let store = single_core::secrets::SecretTool;
+    let mut provider_usage = Vec::new();
+
+    let providers = single_core::billing::builtin_registry();
+    for billing_provider in providers.iter().filter(|p| p.supported) {
+        if let Some(filter) = &provider_filter {
+            if filter != billing_provider.provider {
+                continue;
+            }
+        }
+        // A missing/unreachable keychain (e.g. secret-tool not installed)
+        // means "no billing key configured for this provider" here, same
+        // as everywhere else this codebase treats a missing optional
+        // external capability — not a reason to fail the whole Usage
+        // page for every other provider too.
+        let Some(admin_key) = single_core::secrets::SecretStore::get(&store, &format!("billing:{}", billing_provider.provider)).ok().flatten() else {
+            continue;
+        };
+        let keys = single_core::provider_keys::list_for_provider(&ctx.dirs.provider_keys_registry_file(), billing_provider.provider)?;
+        // openrouter has no separate admin key — its "admin key" *is* a
+        // regular inference key, and usage is scoped to whichever key
+        // authenticates the call, so it needs one fetch per labeled key
+        // rather than one org-wide fetch like anthropic/openai.
+        if billing_provider.provider == "openrouter" && !keys.is_empty() {
+            for key in &keys {
+                let Some(value) = single_core::secrets::SecretStore::get(&store, &key.secret_name).ok().flatten() else { continue };
+                if let Ok(mut records) = crate::billing::fetch_usage("openrouter", &value, chrono::Utc::now()) {
+                    for record in &mut records {
+                        record.key_label = Some(key.label.clone());
+                        record.agent = key.agent.clone();
+                    }
+                    provider_usage.extend(records);
+                }
+            }
+            continue;
+        }
+        let since = chrono::Utc::now() - chrono::Duration::days(30);
+        if let Ok(mut records) = crate::billing::fetch_usage(billing_provider.provider, &admin_key, since) {
+            for record in &mut records {
+                if let Some(label) = &record.key_label {
+                    record.agent = keys.iter().find(|k| &k.label == label).and_then(|k| k.agent.clone());
+                }
+            }
+            provider_usage.extend(records);
+        }
+    }
+
+    // `Iterator::sum()` on an empty f64 sequence yields -0.0 (a real IEEE
+    // 754 quirk, confirmed by direct execution, not assumed), which then
+    // prints as the confusing "$-0.0000" — -0.0 == 0.0 is true, so this
+    // normalizes only that case to plain positive zero for display,
+    // without touching a real (non-zero) total.
+    let total_usd: f64 = provider_usage.iter().map(|r| r.cost_usd).sum();
+    let total_usd = if total_usd == 0.0 { 0.0 } else { total_usd };
+    let conn = task_db(ctx)?;
+    let agent_local_stats = crate::task::local_stats_by_agent(&conn)?;
+
+    Ok(ResponseData::Usage(single_protocol::UsageSummary {
+        provider_usage,
+        agent_local_stats,
+        total_usd,
+        last_refreshed: Some(chrono::Utc::now().to_rfc3339()),
+    }))
 }
 
 fn task_db(ctx: &Context) -> anyhow::Result<rusqlite::Connection> {

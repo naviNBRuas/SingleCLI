@@ -92,6 +92,49 @@ pub fn list(conn: &Connection) -> Result<Vec<TaskRecord>> {
     Ok(rows)
 }
 
+/// Per-agent activity for the Usage page's "connected agents" table (see
+/// `single_protocol::AgentLocalStats`) — every OAuth-authenticated agent
+/// has no billing-API `$` data, so this is the only real signal available
+/// for them: how often they've actually run, for how long, and when last.
+/// Computed in Rust from `list()` rather than SQL date arithmetic, since
+/// `created_at`/`updated_at` are RFC3339 strings and task volume here is
+/// small enough that loading them all first is simpler than getting
+/// SQLite's date functions to agree with `chrono`'s formatting.
+pub fn local_stats_by_agent(conn: &Connection) -> Result<Vec<single_protocol::AgentLocalStats>> {
+    use std::collections::BTreeMap;
+
+    let tasks = list(conn)?;
+    let mut by_agent: BTreeMap<String, Vec<&TaskRecord>> = BTreeMap::new();
+    for task in &tasks {
+        by_agent.entry(task.agent.clone()).or_default().push(task);
+    }
+
+    let mut stats = Vec::new();
+    for (agent, records) in by_agent {
+        let run_count = records.len() as u64;
+        let mut total_ms: u64 = 0;
+        let mut counted = 0u64;
+        let mut last_run_at: Option<String> = None;
+        for record in &records {
+            if let (Ok(created), Ok(updated)) =
+                (chrono::DateTime::parse_from_rfc3339(&record.created_at), chrono::DateTime::parse_from_rfc3339(&record.updated_at))
+            {
+                let delta = (updated - created).num_milliseconds();
+                if delta >= 0 {
+                    total_ms += delta as u64;
+                    counted += 1;
+                }
+            }
+            if last_run_at.as_deref().is_none_or(|last| record.updated_at.as_str() > last) {
+                last_run_at = Some(record.updated_at.clone());
+            }
+        }
+        let avg_duration_ms = if counted > 0 { total_ms / counted } else { 0 };
+        stats.push(single_protocol::AgentLocalStats { agent, run_count, avg_duration_ms, last_run_at });
+    }
+    Ok(stats)
+}
+
 fn create(conn: &Connection, description: &str, agent: &str) -> Result<i64> {
     let now = chrono::Utc::now().to_rfc3339();
     conn.execute(

@@ -2,7 +2,7 @@ use crate::client::call;
 use single_core::SingleDirs;
 use single_protocol::{
     AccountProfileInfo, AgentInfo, LspServerSpec, McpServerInfo, PluginSpec, ProviderPresetInfo,
-    ProviderSpec, Request, Response, ResponseData, RuntimeStatus, SetupAction, TaskRecord, TaskStatus, ToolSpec,
+    ProviderSpec, Request, Response, ResponseData, RuntimeStatus, SetupAction, TaskRecord, TaskStatus, ToolSpec, UsageSummary,
 };
 use std::path::PathBuf;
 use std::sync::mpsc;
@@ -18,13 +18,16 @@ pub enum Tab {
     Tools,
     Providers,
     Accounts,
+    Usage,
+    Backup,
     Memory,
     Help,
 }
 
 impl Tab {
-    pub const ALL: [Tab; 10] = [
-        Tab::Agents, Tab::Tasks, Tab::Mcp, Tab::Lsp, Tab::Plugins, Tab::Tools, Tab::Providers, Tab::Accounts, Tab::Memory, Tab::Help,
+    pub const ALL: [Tab; 12] = [
+        Tab::Agents, Tab::Tasks, Tab::Mcp, Tab::Lsp, Tab::Plugins, Tab::Tools, Tab::Providers, Tab::Accounts,
+        Tab::Usage, Tab::Backup, Tab::Memory, Tab::Help,
     ];
 
     pub fn title(&self) -> &'static str {
@@ -37,6 +40,8 @@ impl Tab {
             Tab::Tools => "Tools",
             Tab::Providers => "Providers",
             Tab::Accounts => "Accounts",
+            Tab::Usage => "Usage",
+            Tab::Backup => "Backup",
             Tab::Memory => "Memory",
             Tab::Help => "Help",
         }
@@ -79,6 +84,39 @@ pub enum ProviderAddFlow {
     Submitting { preset_name: String, rx: mpsc::Receiver<anyhow::Result<()>> },
     Done { preset_name: String },
     Failed { preset_name: String, error: String },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BackupMode {
+    Export,
+    Import,
+}
+
+/// What actually happened, shown on the flow's `Done` screen. Distinct
+/// from `single_core::backup::BackupReport` (import-only) since export
+/// has nothing to report but warnings.
+pub enum BackupOutcome {
+    Exported { path: String, warnings: Vec<String> },
+    Imported { report: single_core::backup::BackupReport },
+}
+
+/// State of the in-TUI backup export/import flow — path, then a masked
+/// passphrase (typed twice for export, to catch typos before they get
+/// baked into an unreadable archive; once for import), then a background
+/// thread runs the real `single_core::backup::export`/`import` call.
+/// Deliberately never goes through `Request`/`ResponseData` or the daemon
+/// socket — see `single_core::backup`'s module doc for why the passphrase
+/// specifically must stay in-process.
+pub enum BackupFlow {
+    Idle,
+    EnteringPath { mode: BackupMode, input: String },
+    EnteringPassphrase { mode: BackupMode, path: String, input: String },
+    /// Export only — a second entry to catch a typo before it's baked
+    /// into an archive nobody can decrypt.
+    ConfirmingPassphrase { path: String, first: String, input: String },
+    Submitting { mode: BackupMode, rx: mpsc::Receiver<anyhow::Result<BackupOutcome>> },
+    Done { mode: BackupMode, outcome: BackupOutcome },
+    Failed { mode: BackupMode, error: String },
 }
 
 /// State of the in-TUI "create a task" flow: description, workspace path,
@@ -165,6 +203,7 @@ pub struct App {
     pub tools: Vec<ToolSpec>,
     pub providers: Vec<ProviderSpec>,
     pub accounts: Vec<AccountProfileInfo>,
+    pub usage: Option<UsageSummary>,
     pub kg_entity_count: Option<usize>,
     pub cache_configured: bool,
     pub cache_reachable: bool,
@@ -176,6 +215,7 @@ pub struct App {
     pub task_add: TaskAddFlow,
     pub quick_add: QuickAddFlow,
     pub task_detail: TaskDetailFlow,
+    pub backup: BackupFlow,
     pub last_refresh: Instant,
 }
 
@@ -196,6 +236,7 @@ impl App {
             tools: Vec::new(),
             providers: Vec::new(),
             accounts: Vec::new(),
+            usage: None,
             kg_entity_count: None,
             cache_configured: false,
             cache_reachable: false,
@@ -207,6 +248,7 @@ impl App {
             task_add: TaskAddFlow::Idle,
             quick_add: QuickAddFlow::Idle,
             task_detail: TaskDetailFlow::Idle,
+            backup: BackupFlow::Idle,
             last_refresh: Instant::now(),
         };
         app.refresh();
@@ -224,6 +266,15 @@ impl App {
         self.tools = self.fetch(Request::ToolList, |d| match d { ResponseData::Tools(t) => Some(t), _ => None }).unwrap_or_default();
         self.providers = self.fetch(Request::ProviderList, |d| match d { ResponseData::Providers(p) => Some(p), _ => None }).unwrap_or_default();
         self.accounts = self.fetch(Request::AccountList { agent: None }, |d| match d { ResponseData::AccountProfiles(p) => Some(p), _ => None }).unwrap_or_default();
+        // Real billing-API calls are comparatively slow/rate-limited (the
+        // Anthropic Usage & Cost API's own docs recommend at most once a
+        // minute) — unlike every other tab's data, this deliberately
+        // isn't refetched on every generic refresh(), only when the
+        // Usage tab is actually being looked at (tab entry, or an
+        // explicit 'r' while already on it — see next_tab/prev_tab).
+        if self.tab == Tab::Usage {
+            self.usage = self.fetch(Request::UsageShow { provider: None }, |d| match d { ResponseData::Usage(u) => Some(u), _ => None });
+        }
         self.kg_entity_count = self
             .fetch(Request::KgReadGraph, |d| match d { ResponseData::KgGraph(g) => Some(g), _ => None })
             .map(|g| g.entities.len());
@@ -278,7 +329,7 @@ impl App {
             Tab::Tools => self.tools.len(),
             Tab::Providers => self.providers.len(),
             Tab::Accounts => self.accounts.len(),
-            Tab::Memory | Tab::Help => 0,
+            Tab::Usage | Tab::Backup | Tab::Memory | Tab::Help => 0,
         }
     }
 
@@ -294,11 +345,17 @@ impl App {
     pub fn next_tab(&mut self) {
         self.tab = self.tab.next();
         self.selected = 0;
+        if self.tab == Tab::Usage {
+            self.refresh();
+        }
     }
 
     pub fn prev_tab(&mut self) {
         self.tab = self.tab.prev();
         self.selected = 0;
+        if self.tab == Tab::Usage {
+            self.refresh();
+        }
     }
 
     pub fn move_selection(&mut self, delta: i32) {
@@ -746,6 +803,136 @@ impl App {
         let output = self.read_task_output(&updated);
         self.task_detail = TaskDetailFlow::Viewing { task: updated, output, last_polled: Instant::now() };
         true
+    }
+
+    pub fn begin_backup_export(&mut self) {
+        if self.tab != Tab::Backup {
+            return;
+        }
+        self.backup = BackupFlow::EnteringPath { mode: BackupMode::Export, input: String::new() };
+    }
+
+    pub fn begin_backup_import(&mut self) {
+        if self.tab != Tab::Backup {
+            return;
+        }
+        self.backup = BackupFlow::EnteringPath { mode: BackupMode::Import, input: String::new() };
+    }
+
+    pub fn cancel_backup(&mut self) {
+        self.backup = BackupFlow::Idle;
+    }
+
+    pub fn backup_path_input(&mut self, c: char) {
+        if let BackupFlow::EnteringPath { input, .. } = &mut self.backup {
+            input.push(c);
+        }
+    }
+
+    pub fn backup_path_backspace(&mut self) {
+        if let BackupFlow::EnteringPath { input, .. } = &mut self.backup {
+            input.pop();
+        }
+    }
+
+    pub fn backup_path_submit(&mut self) {
+        let BackupFlow::EnteringPath { mode, input } = &self.backup else { return };
+        if input.is_empty() {
+            self.error = Some("path cannot be empty".into());
+            return;
+        }
+        self.backup = BackupFlow::EnteringPassphrase { mode: *mode, path: input.clone(), input: String::new() };
+    }
+
+    pub fn backup_passphrase_input(&mut self, c: char) {
+        match &mut self.backup {
+            BackupFlow::EnteringPassphrase { input, .. } | BackupFlow::ConfirmingPassphrase { input, .. } => input.push(c),
+            _ => {}
+        }
+    }
+
+    pub fn backup_passphrase_backspace(&mut self) {
+        match &mut self.backup {
+            BackupFlow::EnteringPassphrase { input, .. } | BackupFlow::ConfirmingPassphrase { input, .. } => {
+                input.pop();
+            }
+            _ => {}
+        }
+    }
+
+    /// For export, the first passphrase entry advances to a confirmation
+    /// step (typo protection — nothing catches a mistyped passphrase
+    /// afterward, since encryption always "succeeds" even with a typo,
+    /// it just produces an archive nobody can decrypt). Import only asks
+    /// once — decryption itself is the check.
+    pub fn backup_passphrase_submit(&mut self) {
+        match &self.backup {
+            BackupFlow::EnteringPassphrase { mode: BackupMode::Export, path, input } => {
+                if input.is_empty() {
+                    self.error = Some("passphrase cannot be empty".into());
+                    return;
+                }
+                self.backup = BackupFlow::ConfirmingPassphrase { path: path.clone(), first: input.clone(), input: String::new() };
+            }
+            BackupFlow::EnteringPassphrase { mode: BackupMode::Import, path, input } => {
+                if input.is_empty() {
+                    self.error = Some("passphrase cannot be empty".into());
+                    return;
+                }
+                self.start_backup_import(path.clone(), input.clone());
+            }
+            BackupFlow::ConfirmingPassphrase { path, first, input } => {
+                if first != input {
+                    self.error = Some("passphrases didn't match — try again".into());
+                    self.backup = BackupFlow::EnteringPassphrase { mode: BackupMode::Export, path: path.clone(), input: String::new() };
+                    return;
+                }
+                self.start_backup_export(path.clone(), first.clone());
+            }
+            _ => {}
+        }
+    }
+
+    fn start_backup_export(&mut self, path: String, passphrase: String) {
+        let dirs = self.dirs.clone();
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let result = single_core::backup::export(&dirs, std::path::Path::new(&path), &age::secrecy::SecretString::from(passphrase))
+                .map(|warnings| BackupOutcome::Exported { path: path.clone(), warnings });
+            let _ = tx.send(result);
+        });
+        self.backup = BackupFlow::Submitting { mode: BackupMode::Export, rx };
+    }
+
+    fn start_backup_import(&mut self, path: String, passphrase: String) {
+        let dirs = self.dirs.clone();
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            // Deliberately always a dry-run preview from the TUI —
+            // actually restoring files and re-inserting keychain secrets
+            // is a real, hard-to-fully-undo action, and this flow has no
+            // in-TUI equivalent of the CLI's explicit `--yes` gate yet.
+            // The Done screen tells the user to run `single backup
+            // import <path> --yes` to actually apply it — an honest v1
+            // scope limit, not an oversight.
+            let result = single_core::backup::import(&dirs, std::path::Path::new(&path), &age::secrecy::SecretString::from(passphrase), true)
+                .map(|report| BackupOutcome::Imported { report });
+            let _ = tx.send(result);
+        });
+        self.backup = BackupFlow::Submitting { mode: BackupMode::Import, rx };
+    }
+
+    pub fn poll_backup(&mut self) -> bool {
+        if let BackupFlow::Submitting { mode, rx } = &self.backup {
+            if let Ok(result) = rx.try_recv() {
+                self.backup = match result {
+                    Ok(outcome) => BackupFlow::Done { mode: *mode, outcome },
+                    Err(e) => BackupFlow::Failed { mode: *mode, error: e.to_string() },
+                };
+                return true;
+            }
+        }
+        false
     }
 }
 

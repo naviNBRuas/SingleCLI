@@ -1,5 +1,7 @@
 pub mod account;
 pub mod agent_home;
+pub mod backup;
+pub mod billing;
 pub mod config;
 pub mod custom_agents;
 pub mod docker;
@@ -13,6 +15,7 @@ pub mod plugins;
 pub mod preferences;
 pub mod profile;
 pub mod project_context;
+pub mod provider_keys;
 pub mod providers;
 pub mod registry;
 pub mod secrets;

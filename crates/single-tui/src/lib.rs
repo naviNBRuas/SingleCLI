@@ -3,7 +3,7 @@ pub mod client;
 pub mod ui;
 
 use anyhow::Result;
-use app::{App, InstallFlow, ProviderAddFlow, QuickAddFlow, Tab, TaskAddFlow, TaskDetailFlow};
+use app::{App, BackupFlow, InstallFlow, ProviderAddFlow, QuickAddFlow, Tab, TaskAddFlow, TaskDetailFlow};
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use crossterm::execute;
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
@@ -32,7 +32,7 @@ fn event_loop(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> Result<
     loop {
         terminal.draw(|frame| ui::draw(frame, app))?;
 
-        if app.poll_install() || app.poll_provider_add() || app.poll_task_add() || app.poll_quick_add() || app.poll_task_detail() {
+        if app.poll_install() || app.poll_provider_add() || app.poll_task_add() || app.poll_quick_add() || app.poll_task_detail() || app.poll_backup() {
             continue; // redraw immediately on state change
         }
 
@@ -71,6 +71,10 @@ fn handle_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> bool {
         handle_task_detail_key(app, code);
         return false;
     }
+    if !matches!(app.backup, BackupFlow::Idle) {
+        handle_backup_key(app, code);
+        return false;
+    }
 
     match code {
         KeyCode::Char('q') => return true,
@@ -90,6 +94,8 @@ fn handle_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> bool {
         KeyCode::Char('d') if matches!(app.tab, Tab::Mcp | Tab::Lsp | Tab::Plugins | Tab::Providers | Tab::Accounts) => app.delete_selected(),
         KeyCode::Char('e') if matches!(app.tab, Tab::Mcp | Tab::Tools) => app.toggle_selected(),
         KeyCode::Char('s') if app.tab == Tab::Plugins => app.sync_selected_plugin(),
+        KeyCode::Char('x') if app.tab == Tab::Backup => app.begin_backup_export(),
+        KeyCode::Char('i') if app.tab == Tab::Backup => app.begin_backup_import(),
         _ => {}
     }
     false
@@ -191,5 +197,30 @@ fn handle_quick_add_key(app: &mut App, code: KeyCode) {
             }
         }
         QuickAddFlow::Submitting { .. } | QuickAddFlow::Idle => {}
+    }
+}
+
+fn handle_backup_key(app: &mut App, code: KeyCode) {
+    match &app.backup {
+        BackupFlow::EnteringPath { .. } => match code {
+            KeyCode::Char(c) => app.backup_path_input(c),
+            KeyCode::Backspace => app.backup_path_backspace(),
+            KeyCode::Enter => app.backup_path_submit(),
+            KeyCode::Esc => app.cancel_backup(),
+            _ => {}
+        },
+        BackupFlow::EnteringPassphrase { .. } | BackupFlow::ConfirmingPassphrase { .. } => match code {
+            KeyCode::Char(c) => app.backup_passphrase_input(c),
+            KeyCode::Backspace => app.backup_passphrase_backspace(),
+            KeyCode::Enter => app.backup_passphrase_submit(),
+            KeyCode::Esc => app.cancel_backup(),
+            _ => {}
+        },
+        BackupFlow::Done { .. } | BackupFlow::Failed { .. } => {
+            if matches!(code, KeyCode::Enter | KeyCode::Esc) {
+                app.cancel_backup();
+            }
+        }
+        BackupFlow::Submitting { .. } | BackupFlow::Idle => {}
     }
 }

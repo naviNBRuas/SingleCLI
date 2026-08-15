@@ -113,6 +113,23 @@ impl SingleDirs {
         self.root.join("providers.toml")
     }
 
+    /// Labeled per-agent provider keys (`single_core::provider_keys`) — a
+    /// separate registry from `providers.toml`'s single shared key per
+    /// provider, so existing single-key setups are untouched by this file
+    /// not existing yet.
+    pub fn provider_keys_registry_file(&self) -> PathBuf {
+        self.root.join("provider_keys.toml")
+    }
+
+    /// The billing-provider registry's admin/org-scoped key labels live
+    /// in the same secret store as everything else (`billing:<provider>`
+    /// namespace) — this file just tracks which providers have one set,
+    /// so `single usage show` can report "no admin key configured" per
+    /// provider instead of guessing from a failed API call.
+    pub fn billing_registry_file(&self) -> PathBuf {
+        self.root.join("billing.toml")
+    }
+
     pub fn plugins_registry_file(&self) -> PathBuf {
         self.root.join("plugins.toml")
     }

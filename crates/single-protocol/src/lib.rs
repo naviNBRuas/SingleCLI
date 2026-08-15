@@ -175,6 +175,22 @@ pub enum Request {
     ProviderInspect { name: String },
     ProviderSetKey { name: String, value: String },
     ProviderSync { name: String, agents: Vec<String>, dry_run: bool },
+    /// Stores one *labeled* key for a provider (see `ProviderKeySpec`),
+    /// distinct from `ProviderSetKey`'s single shared key.
+    ProviderAddKey { provider: String, label: String, agent: Option<String>, value: String },
+    ProviderListKeys { provider: String },
+    ProviderRemoveKey { provider: String, label: String },
+    /// Same as `ProviderSync` but syncs one specific labeled key (not the
+    /// shared `providers.toml` one) into one specific agent.
+    ProviderKeySync { provider: String, label: String, agent: String, dry_run: bool },
+    /// The org/admin-scoped key used only to *query* a provider's usage
+    /// API — separate from any inference key in `ProviderSpec`/
+    /// `ProviderKeySpec`, since billing endpoints typically need a
+    /// different credential scope than making model calls.
+    ProviderSetBillingKey { provider: String, value: String },
+    BillingProviderList,
+    UsageShow { provider: Option<String> },
+    UsageRefresh,
     KgCreateEntity { name: String, entity_type: String },
     KgAddObservation { entity: String, content: String },
     KgCreateRelation { from: String, to: String, relation_type: String },
@@ -260,6 +276,9 @@ pub enum ResponseData {
     Providers(Vec<ProviderSpec>),
     ProviderPresets(Vec<ProviderPresetInfo>),
     ProviderSyncResults(Vec<ProviderSyncResult>),
+    ProviderKeys(Vec<ProviderKeySpec>),
+    BillingProviders(Vec<BillingProviderInfo>),
+    Usage(UsageSummary),
     KgEntityId(i64),
     KgEntity(KgEntity),
     KgEntities(Vec<KgEntity>),
@@ -837,6 +856,21 @@ pub struct ProviderSpec {
     pub base_url: Option<String>,
 }
 
+/// One labeled API key for a provider, distinct from `ProviderSpec`'s
+/// single shared key (`providers.toml`) — lets the same provider have
+/// several real keys, one per agent, so `single usage show` can attribute
+/// billing-API spend to a specific agent instead of one undifferentiated
+/// provider total. `secret_name` is always `"provider-key:{provider}:{label}"`.
+/// `label` defaults to `"default"` for the common single-key case, keeping
+/// `single provider set-key`'s existing behavior unchanged.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProviderKeySpec {
+    pub provider: String,
+    pub label: String,
+    pub agent: Option<String>,
+    pub secret_name: String,
+}
+
 /// The result of trying to sync one provider's key into one agent's real
 /// config. Mirrors `IntegrationWrite`'s shape/spirit.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -847,6 +881,56 @@ pub struct ProviderSyncResult {
     pub backup_path: Option<String>,
     pub applied: bool,
     pub detail: String,
+}
+
+/// One billing-provider registry entry (`single_core::billing`) — mirrors
+/// `registry::AgentDefinition`'s honesty convention: `verified` is only
+/// `true` once that provider's real usage endpoint has actually been
+/// called successfully, not assumed from reading its docs.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BillingProviderInfo {
+    pub provider: String,
+    pub verified: bool,
+    pub admin_key_env_hint: String,
+    pub admin_key_configured: bool,
+    pub notes: Option<String>,
+}
+
+/// One line item from a provider's real usage/billing API — the `$`
+/// SingleCLI didn't compute itself, just relayed. `key_label` is `Some`
+/// only where that provider's API exposes a per-key breakdown *and* the
+/// key matches a locally-registered `ProviderKeySpec::label`; otherwise
+/// it's `None` and the amount is an undifferentiated provider total.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UsageRecord {
+    pub provider: String,
+    pub key_label: Option<String>,
+    pub agent: Option<String>,
+    pub model: Option<String>,
+    pub cost_usd: f64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub period_start: String,
+    pub period_end: String,
+}
+
+/// Local-only activity for an agent with no billing-API `$` data (every
+/// OAuth-authenticated agent — claude, codex, cursor, copilot, kiro,
+/// cody, ...) — sourced from `TaskRecord`, not a provider API.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentLocalStats {
+    pub agent: String,
+    pub run_count: u64,
+    pub avg_duration_ms: u64,
+    pub last_run_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct UsageSummary {
+    pub provider_usage: Vec<UsageRecord>,
+    pub agent_local_stats: Vec<AgentLocalStats>,
+    pub total_usd: f64,
+    pub last_refreshed: Option<String>,
 }
 
 /// Repository/git state + project doc discovery for a working directory

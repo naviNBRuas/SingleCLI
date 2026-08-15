@@ -1,4 +1,4 @@
-use crate::app::{App, InstallFlow, ProviderAddFlow, QuickAddFlow, Tab, TaskAddFlow, TaskDetailFlow};
+use crate::app::{App, BackupFlow, BackupMode, BackupOutcome, InstallFlow, ProviderAddFlow, QuickAddFlow, Tab, TaskAddFlow, TaskDetailFlow};
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -40,6 +40,9 @@ pub fn draw(frame: &mut Frame, app: &App) {
     }
     if !matches!(app.task_detail, TaskDetailFlow::Idle) {
         draw_task_detail_modal(frame, area, app);
+    }
+    if !matches!(app.backup, BackupFlow::Idle) {
+        draw_backup_modal(frame, area, app);
     }
 }
 
@@ -91,6 +94,8 @@ fn draw_content(frame: &mut Frame, area: Rect, app: &App) {
         Tab::Tools => draw_tools(frame, area, app),
         Tab::Providers => draw_providers(frame, area, app),
         Tab::Accounts => draw_accounts(frame, area, app),
+        Tab::Usage => draw_usage(frame, area, app),
+        Tab::Backup => draw_backup(frame, area, app),
         Tab::Memory => draw_memory(frame, area, app),
         Tab::Help => draw_help(frame, area),
     }
@@ -308,6 +313,78 @@ fn draw_accounts(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(list, area);
 }
 
+fn draw_usage(frame: &mut Frame, area: Rect, app: &App) {
+    let chunks = Layout::vertical([Constraint::Percentage(60), Constraint::Percentage(40)]).split(area);
+
+    let Some(usage) = &app.usage else {
+        let p = Paragraph::new("Loading usage… (press 'r' to retry)").block(Block::default().borders(Borders::ALL).title(" Usage "));
+        frame.render_widget(p, area);
+        return;
+    };
+
+    let rows: Vec<Row> = usage
+        .provider_usage
+        .iter()
+        .map(|r| {
+            Row::new(vec![
+                Cell::from(r.provider.clone()),
+                Cell::from(r.key_label.clone().unwrap_or_else(|| "-".into())),
+                Cell::from(r.agent.clone().unwrap_or_else(|| "-".into())),
+                Cell::from(format!("${:.4}", r.cost_usd)),
+                Cell::from(format!("{} .. {}", r.period_start, r.period_end)),
+            ])
+        })
+        .collect();
+    let widths = [Constraint::Length(12), Constraint::Length(10), Constraint::Length(12), Constraint::Length(12), Constraint::Min(20)];
+    let title = format!(
+        " Provider spend — total: ${:.4}  (as of {}) ",
+        usage.total_usd,
+        usage.last_refreshed.as_deref().unwrap_or("never")
+    );
+    let table = Table::new(rows, widths)
+        .header(Row::new(vec!["provider", "key", "agent", "cost", "period"]).style(Style::default().add_modifier(Modifier::BOLD)))
+        .block(Block::default().borders(Borders::ALL).title(title));
+    frame.render_widget(table, chunks[0]);
+
+    let items: Vec<ListItem> = usage
+        .agent_local_stats
+        .iter()
+        .map(|a| {
+            ListItem::new(Line::from(vec![
+                Span::styled(format!("{:<14}", a.agent), Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(format!("runs: {:<5} ", a.run_count)),
+                Span::raw(format!("avg: {}ms  ", a.avg_duration_ms)),
+                Span::styled(format!("last: {}", a.last_run_at.as_deref().unwrap_or("never")), Style::default().fg(MUTED)),
+            ]))
+        })
+        .collect();
+    let list = List::new(items).block(Block::default().borders(Borders::ALL).title(" Connected agents — local stats only, no billing API "));
+    frame.render_widget(list, chunks[1]);
+}
+
+fn draw_backup(frame: &mut Frame, area: Rect, _app: &App) {
+    let lines = vec![
+        Line::from(Span::styled("Full-setup backup/restore", Style::default().add_modifier(Modifier::BOLD))),
+        Line::from(""),
+        Line::from("  Captures: config, every agent's real credentials, keychain secrets"),
+        Line::from("  (provider keys, billing keys, anything set via `single secret set`),"),
+        Line::from("  and task/memory/knowledge-graph history — encrypted with a passphrase."),
+        Line::from(""),
+        Line::from(vec![Span::styled("  [x]", Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)), Span::raw(" export to a new archive")]),
+        Line::from(vec![
+            Span::styled("  [i]", Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)),
+            Span::raw(" preview an import from an existing archive (dry run only — apply for real with `single backup import <path> --yes`)"),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled(
+            "  If single-runtimed is running, stop it first (`single daemon stop`) so state/single.db isn't captured mid-write.",
+            Style::default().fg(MUTED),
+        )),
+    ];
+    let p = Paragraph::new(lines).wrap(Wrap { trim: false }).block(Block::default().borders(Borders::ALL).title(" Backup "));
+    frame.render_widget(p, area);
+}
+
 fn draw_memory(frame: &mut Frame, area: Rect, app: &App) {
     let mut lines = vec![
         Line::from(Span::styled("Knowledge graph (SQLite)", Style::default().add_modifier(Modifier::BOLD))),
@@ -359,6 +436,14 @@ fn draw_help(frame: &mut Frame, area: Rect) {
         Line::from("  e                    toggle enabled/disabled (MCP/Tools)"),
         Line::from("  s                    sync the selected plugin into every registered agent (Plugins tab)"),
         Line::from(""),
+        Line::from(Span::styled("Usage tab", Style::default().add_modifier(Modifier::BOLD))),
+        Line::from("  refetches on tab entry / r    real $ spend needs a billing admin key: `single provider set-billing-key <name> <key>`"),
+        Line::from("                                agents with no billing API (claude, codex, cursor, ...) show local run stats only."),
+        Line::from(""),
+        Line::from(Span::styled("Backup tab", Style::default().add_modifier(Modifier::BOLD))),
+        Line::from("  x                    export your entire setup (config, credentials, keychain secrets) to a password-encrypted archive"),
+        Line::from("  i                    preview restoring from an archive (dry run only — apply for real with `single backup import <path> --yes`)"),
+        Line::from(""),
         Line::from(Span::styled("Everything else", Style::default().add_modifier(Modifier::BOLD))),
         Line::from("  Use the `single` CLI for actions not yet in the TUI: mcp add, provider add/sync,"),
         Line::from("  account capture/use, task run, memory graph/cache/vector — see `single --help`."),
@@ -371,7 +456,7 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
     let text = if let Some(err) = &app.error {
         Line::from(Span::styled(format!("error: {err}"), Style::default().fg(BAD)))
     } else {
-        Line::from(Span::styled("[tab] switch  [↑↓] move  [a] add  [d] remove  [e] toggle  [s] sync  [i] install agent  [n] new task  [r] refresh  [q] quit", Style::default().fg(MUTED)))
+        Line::from(Span::styled("[tab] switch  [↑↓] move  [a] add  [d] remove  [e] toggle  [s] sync  [i] install/import  [x] backup export  [n] new task  [r] refresh  [q] quit", Style::default().fg(MUTED)))
     };
     frame.render_widget(Paragraph::new(text), area);
 }
@@ -453,6 +538,82 @@ fn draw_provider_add_modal(frame: &mut Frame, area: Rect, app: &App) {
 
     let block = Block::default().borders(Borders::ALL).title(title).border_style(Style::default().fg(ACCENT));
     frame.render_widget(Paragraph::new(lines).block(block), modal_area);
+}
+
+fn draw_backup_modal(frame: &mut Frame, area: Rect, app: &App) {
+    let modal_area = centered_rect(70, 60, area);
+    frame.render_widget(Clear, modal_area);
+
+    let (title, lines): (&str, Vec<Line>) = match &app.backup {
+        BackupFlow::EnteringPath { mode, input } => {
+            let verb = if *mode == BackupMode::Export { "Export to" } else { "Import from" };
+            (
+                " Backup path ",
+                vec![
+                    Line::from(format!("{verb}: {input}")),
+                    Line::from(""),
+                    Line::from("[enter] continue  [esc] cancel"),
+                ],
+            )
+        }
+        BackupFlow::EnteringPassphrase { input, .. } => (
+            " Passphrase ",
+            vec![
+                Line::from(format!("Passphrase: {}", "*".repeat(input.chars().count()))),
+                Line::from(""),
+                Line::from(Span::styled("never sent over the daemon socket, never logged", Style::default().fg(MUTED))),
+                Line::from(""),
+                Line::from("[enter] continue  [esc] cancel"),
+            ],
+        ),
+        BackupFlow::ConfirmingPassphrase { input, .. } => (
+            " Confirm passphrase ",
+            vec![
+                Line::from(format!("Confirm: {}", "*".repeat(input.chars().count()))),
+                Line::from(""),
+                Line::from("[enter] continue  [esc] cancel"),
+            ],
+        ),
+        BackupFlow::Submitting { mode, .. } => {
+            let verb = if *mode == BackupMode::Export { "Encrypting and writing archive" } else { "Decrypting and previewing archive" };
+            (" Working… ", vec![Line::from(format!("{verb}..."))])
+        }
+        BackupFlow::Done { mode: BackupMode::Export, outcome: BackupOutcome::Exported { path, warnings } } => {
+            let mut lines = vec![Line::from(Span::styled(format!("Backup written to {path}"), Style::default().fg(OK))), Line::from("")];
+            for w in warnings {
+                lines.push(Line::from(Span::styled(format!("warning: {w}"), Style::default().fg(WARN))));
+            }
+            lines.push(Line::from(""));
+            lines.push(Line::from("[enter/esc] close"));
+            (" Backup complete ", lines)
+        }
+        BackupFlow::Done { mode: BackupMode::Import, outcome: BackupOutcome::Imported { report } } => {
+            let ok = report.files.iter().chain(&report.secrets).filter(|i| i.success).count();
+            let total = report.files.len() + report.secrets.len();
+            let mut lines = vec![
+                Line::from(Span::styled(format!("Preview: {ok}/{total} items would restore cleanly"), Style::default().add_modifier(Modifier::BOLD))),
+                Line::from(""),
+                Line::from(Span::styled("This was a preview only — nothing was written.", Style::default().fg(MUTED))),
+                Line::from(Span::styled("Run `single backup import <path> --yes` to actually apply it.", Style::default().fg(MUTED))),
+                Line::from(""),
+            ];
+            for item in report.files.iter().chain(&report.secrets).filter(|i| !i.success).take(8) {
+                lines.push(Line::from(Span::styled(format!("✗ {}: {}", item.path, item.detail), Style::default().fg(BAD))));
+            }
+            lines.push(Line::from(""));
+            lines.push(Line::from("[enter/esc] close"));
+            (" Import preview ", lines)
+        }
+        BackupFlow::Done { .. } => (" ", vec![]), // unreachable: mode/outcome always match
+        BackupFlow::Failed { error, .. } => (
+            " Failed ",
+            vec![Line::from(Span::styled(error.clone(), Style::default().fg(BAD))), Line::from(""), Line::from("[enter/esc] close")],
+        ),
+        BackupFlow::Idle => (" ", vec![]),
+    };
+
+    let block = Block::default().borders(Borders::ALL).title(title).border_style(Style::default().fg(ACCENT));
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }).block(block), modal_area);
 }
 
 fn draw_task_detail_modal(frame: &mut Frame, area: Rect, app: &App) {

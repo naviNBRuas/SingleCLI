@@ -157,6 +157,20 @@ enum Command {
         #[command(subcommand)]
         action: ProviderCommand,
     },
+    /// Real $ spend across connected providers (from billing admin keys)
+    /// plus local run stats for every other agent.
+    Usage {
+        #[command(subcommand)]
+        action: UsageCommand,
+    },
+    /// Export/import your entire SingleCLI setup — config, agent
+    /// credentials, keychain secrets, task history — as one
+    /// password-encrypted archive, to move to another machine. Runs
+    /// entirely locally: the passphrase never touches the daemon socket.
+    Backup {
+        #[command(subcommand)]
+        action: BackupCommand,
+    },
     /// Manage plugins and sync installs into agents that have a real
     /// plugin-install command (claude, codex, opencode, agy).
     Plugin {
@@ -719,6 +733,57 @@ enum ProviderCommand {
     Presets,
     /// Register a provider from a built-in preset (name, env var, base URL already filled in).
     AddPreset { name: String },
+    /// Store a *labeled* key for a provider (e.g. one key per agent), distinct from `set-key`'s single shared key.
+    AddKey {
+        provider: String,
+        #[arg(long)]
+        label: String,
+        /// Which agent this key is for, so the Usage page can attribute billing-API spend to it.
+        #[arg(long)]
+        agent: Option<String>,
+        value: String,
+    },
+    /// List labeled keys for a provider (labels/agent tags only, never the key value).
+    ListKeys { provider: String },
+    RemoveKey { provider: String, label: String },
+    /// Sync one specific labeled key into one specific agent's real config.
+    KeySync {
+        provider: String,
+        label: String,
+        agent: String,
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Store the org/admin-scoped key used only to query a provider's usage/billing API — separate from any inference key.
+    SetBillingKey { provider: String, value: String },
+}
+
+#[derive(Subcommand)]
+enum UsageCommand {
+    /// Show real $ spend (from configured billing admin keys) plus local run stats for every other agent.
+    Show {
+        #[arg(long)]
+        provider: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Force a live re-fetch from every configured billing provider, bypassing the cache.
+    Refresh {
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum BackupCommand {
+    /// Export SingleCLI's entire setup (config, agent credentials, keychain secrets, task history) into one encrypted archive.
+    Export { path: String },
+    /// Restore from an encrypted archive produced by `export`. Dry-run by default; pass --yes to actually write.
+    Import {
+        path: String,
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1394,7 +1459,41 @@ fn main() -> anyhow::Result<()> {
                 let response = client::send(&socket_path, Request::ProviderAddPreset { name })?;
                 render::print(response, false);
             }
+            ProviderCommand::AddKey { provider, label, agent, value } => {
+                let response = client::send(&socket_path, Request::ProviderAddKey { provider, label, agent, value })?;
+                render::print(response, false);
+            }
+            ProviderCommand::ListKeys { provider } => {
+                let response = client::send(&socket_path, Request::ProviderListKeys { provider })?;
+                render::print(response, false);
+            }
+            ProviderCommand::RemoveKey { provider, label } => {
+                let response = client::send(&socket_path, Request::ProviderRemoveKey { provider, label })?;
+                render::print(response, false);
+            }
+            ProviderCommand::KeySync { provider, label, agent, yes } => {
+                if !yes {
+                    eprintln!("Dry run (pass --yes to actually write the key into the agent's config file; backups are made either way).");
+                }
+                let response = client::send(&socket_path, Request::ProviderKeySync { provider, label, agent, dry_run: !yes })?;
+                render::print(response, false);
+            }
+            ProviderCommand::SetBillingKey { provider, value } => {
+                let response = client::send(&socket_path, Request::ProviderSetBillingKey { provider, value })?;
+                render::print(response, false);
+            }
         },
+        Command::Usage { action } => match action {
+            UsageCommand::Show { provider, json } => {
+                let response = client::send(&socket_path, Request::UsageShow { provider })?;
+                render::print(response, json);
+            }
+            UsageCommand::Refresh { json } => {
+                let response = client::send(&socket_path, Request::UsageRefresh)?;
+                render::print(response, json);
+            }
+        },
+        Command::Backup { action } => run_backup_command(&dirs, action)?,
         Command::Plugin { action } => match action {
             PluginCommand::Add { name, target, opencode_module } => {
                 let response = client::send(&socket_path, Request::PluginAdd { plugin: single_protocol::PluginSpec { name, target, opencode_module } })?;
@@ -1600,6 +1699,58 @@ fn run_update(channel: &str, check_only: bool, yes: bool) -> anyhow::Result<()> 
     println!("downloading and installing...");
     let install_dir = update::apply(&release)?;
     println!("updated in {}", install_dir.display());
+    Ok(())
+}
+
+/// Runs entirely in-process against `single_core::backup` — deliberately
+/// never sends a request over the daemon socket, since the passphrase
+/// here protects every live credential SingleCLI knows about (see that
+/// module's doc comment for the full reasoning). Prompts with
+/// `rpassword::prompt_password` (hidden input, not `--flag <value>`) so
+/// the passphrase never lands in shell history or `ps` output.
+fn run_backup_command(dirs: &SingleDirs, action: BackupCommand) -> anyhow::Result<()> {
+    match action {
+        BackupCommand::Export { path } => {
+            let passphrase = rpassword::prompt_password("Backup passphrase: ")?;
+            let confirm = rpassword::prompt_password("Confirm passphrase: ")?;
+            if passphrase != confirm {
+                anyhow::bail!("passphrases didn't match");
+            }
+            if passphrase.is_empty() {
+                anyhow::bail!("passphrase cannot be empty");
+            }
+            eprintln!(
+                "note: if single-runtimed is currently running, stop it first with `single daemon stop` \
+                 so state/single.db isn't captured mid-write."
+            );
+            let warnings = single_core::backup::export(dirs, std::path::Path::new(&path), &age::secrecy::SecretString::from(passphrase))?;
+            println!("backup written to {path}");
+            for warning in warnings {
+                eprintln!("warning: {warning}");
+            }
+        }
+        BackupCommand::Import { path, yes } => {
+            let passphrase = rpassword::prompt_password("Backup passphrase: ")?;
+            let report = single_core::backup::import(dirs, std::path::Path::new(&path), &age::secrecy::SecretString::from(passphrase), !yes)?;
+            if !yes {
+                eprintln!("Dry run (pass --yes to actually write files and restore secrets).");
+            }
+            println!("files:");
+            for item in &report.files {
+                let mark = if item.success { "✓" } else { "✗" };
+                println!("  {mark} {} — {}", item.path, item.detail);
+            }
+            println!("secrets:");
+            for item in &report.secrets {
+                let mark = if item.success { "✓" } else { "✗" };
+                println!("  {mark} {} — {}", item.path, item.detail);
+            }
+            let failed = report.files.iter().chain(&report.secrets).filter(|i| !i.success).count();
+            if failed > 0 {
+                eprintln!("{failed} item(s) failed to restore — see above.");
+            }
+        }
+    }
     Ok(())
 }
 

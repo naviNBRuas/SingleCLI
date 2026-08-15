@@ -19,6 +19,8 @@ directories.workspace = true
 reqwest.workspace = true
 rusqlite.workspace = true
 tempfile = "3"
+rpassword = "7"
+age.workspace = true
 single-agent-sdk = { path = "../single-agent-sdk" }
 single-core = { path = "../single-core" }
 single-protocol = { path = "../single-protocol" }
