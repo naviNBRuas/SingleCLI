@@ -204,6 +204,8 @@ pub struct App {
     pub providers: Vec<ProviderSpec>,
     pub accounts: Vec<AccountProfileInfo>,
     pub usage: Option<UsageSummary>,
+    pub usage_loading: bool,
+    usage_rx: Option<mpsc::Receiver<Option<UsageSummary>>>,
     pub kg_entity_count: Option<usize>,
     pub cache_configured: bool,
     pub cache_reachable: bool,
@@ -237,6 +239,8 @@ impl App {
             providers: Vec::new(),
             accounts: Vec::new(),
             usage: None,
+            usage_loading: false,
+            usage_rx: None,
             kg_entity_count: None,
             cache_configured: false,
             cache_reachable: false,
@@ -268,12 +272,16 @@ impl App {
         self.accounts = self.fetch(Request::AccountList { agent: None }, |d| match d { ResponseData::AccountProfiles(p) => Some(p), _ => None }).unwrap_or_default();
         // Real billing-API calls are comparatively slow/rate-limited (the
         // Anthropic Usage & Cost API's own docs recommend at most once a
-        // minute) — unlike every other tab's data, this deliberately
-        // isn't refetched on every generic refresh(), only when the
-        // Usage tab is actually being looked at (tab entry, or an
-        // explicit 'r' while already on it — see next_tab/prev_tab).
+        // minute) and, once a billing key is configured, involve a live
+        // HTTP round trip the daemon makes on this request's behalf —
+        // unlike every other tab's data, this is never fetched inline
+        // here. It's kicked off on a background thread (see
+        // begin_usage_fetch/poll_usage) so a slow provider API can't
+        // freeze the whole event loop the way a blocking call here would,
+        // the same discipline every other slow/background action in this
+        // file already follows (install, provider add, task add, backup).
         if self.tab == Tab::Usage {
-            self.usage = self.fetch(Request::UsageShow { provider: None }, |d| match d { ResponseData::Usage(u) => Some(u), _ => None });
+            self.begin_usage_fetch();
         }
         self.kg_entity_count = self
             .fetch(Request::KgReadGraph, |d| match d { ResponseData::KgGraph(g) => Some(g), _ => None })
@@ -346,7 +354,7 @@ impl App {
         self.tab = self.tab.next();
         self.selected = 0;
         if self.tab == Tab::Usage {
-            self.refresh();
+            self.begin_usage_fetch();
         }
     }
 
@@ -354,7 +362,7 @@ impl App {
         self.tab = self.tab.prev();
         self.selected = 0;
         if self.tab == Tab::Usage {
-            self.refresh();
+            self.begin_usage_fetch();
         }
     }
 
@@ -933,6 +941,43 @@ impl App {
             }
         }
         false
+    }
+
+    /// Fetches the Usage tab's data on a background thread — never inline
+    /// on the event-loop thread, since once a real billing admin key is
+    /// configured this involves a live HTTP round trip to a provider's
+    /// API (see `single_runtime::billing`), which must not be able to
+    /// freeze keyboard input / redraws the way a blocking call here
+    /// would. Safe to call repeatedly (e.g. re-entering the tab while a
+    /// previous fetch is still in flight): a fetch already running is
+    /// left alone rather than piling up a second one.
+    fn begin_usage_fetch(&mut self) {
+        if self.usage_loading {
+            return;
+        }
+        self.usage_loading = true;
+        let socket_path = self.socket_path.clone();
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let result = match call(&socket_path, &Request::UsageShow { provider: None }) {
+                Ok(Response::Ok { data: ResponseData::Usage(u) }) => Some(u),
+                _ => None,
+            };
+            let _ = tx.send(result);
+        });
+        self.usage_rx = Some(rx);
+    }
+
+    /// Returns true if new usage data arrived this tick (so the caller
+    /// knows to redraw immediately, same convention as every other
+    /// `poll_*` here).
+    pub fn poll_usage(&mut self) -> bool {
+        let Some(rx) = &self.usage_rx else { return false };
+        let Ok(result) = rx.try_recv() else { return false };
+        self.usage = result;
+        self.usage_loading = false;
+        self.usage_rx = None;
+        true
     }
 }
 

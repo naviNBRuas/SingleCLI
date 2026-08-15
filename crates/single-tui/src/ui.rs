@@ -317,7 +317,8 @@ fn draw_usage(frame: &mut Frame, area: Rect, app: &App) {
     let chunks = Layout::vertical([Constraint::Percentage(60), Constraint::Percentage(40)]).split(area);
 
     let Some(usage) = &app.usage else {
-        let p = Paragraph::new("Loading usage… (press 'r' to retry)").block(Block::default().borders(Borders::ALL).title(" Usage "));
+        let text = if app.usage_loading { "Loading usage…" } else { "No usage data yet — press 'r' to fetch" };
+        let p = Paragraph::new(text).block(Block::default().borders(Borders::ALL).title(" Usage "));
         frame.render_widget(p, area);
         return;
     };
