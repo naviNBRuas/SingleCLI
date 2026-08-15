@@ -106,6 +106,19 @@ pub trait AgentAdapter {
     }
 }
 
+/// `<command> -p -- <prompt>` — for agents where `-p` is a bare mode-switch
+/// flag and the prompt is a separate positional argument (confirmed for
+/// claude by direct execution). The `--` is load-bearing, not decorative:
+/// `single task run`'s memory/notes preamble (`task::context_preamble`)
+/// starts with a literal `"---"`, and without a `--` separator these
+/// agents' clap-style parsers reject that value as an unrecognized option
+/// rather than binding it as the positional prompt. **Not every agent
+/// works this way** — some (goose, grok, gemini, qwen-code, agy) define
+/// their prompt as a named flag's *value* instead, where `--` breaks
+/// parsing differently and `--flag=value` is the fix instead; those get
+/// their own `run_prompt` rather than using this helper. Confirmed by
+/// direct execution on the reference machine for every current caller —
+/// don't assume it's safe for a new one without checking the same way.
 pub(crate) fn run_with_prompt_flag(
     command: &str,
     cwd: &Path,
@@ -114,7 +127,7 @@ pub(crate) fn run_with_prompt_flag(
     live_output_path: Option<&Path>,
     timeout: Duration,
 ) -> Result<RunOutcome> {
-    crate::run::run_command_live(command, &["-p".to_string(), prompt.to_string()], cwd, backend, live_output_path, timeout)
+    crate::run::run_command_live(command, &["-p".to_string(), "--".to_string(), prompt.to_string()], cwd, backend, live_output_path, timeout)
 }
 
 fn unsupported_lsp(agent: &str, home: &Path) -> IntegrationWrite {

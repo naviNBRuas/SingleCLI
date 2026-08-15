@@ -106,18 +106,31 @@ impl AgentAdapter for CodexAdapter {
         }
     }
 
-    /// `codex exec "<prompt>"` — confirmed non-interactive mode via
-    /// `codex exec --help` on the reference machine. `--skip-git-repo-check`
-    /// is also real (confirmed the same way): without it, `codex exec`
-    /// refuses to run in a directory that isn't a trusted git repo, which
-    /// would otherwise break `single task run --agent codex` for any `cwd`
-    /// that isn't already a repo. This doesn't bypass a SingleCLI-level
-    /// trust decision — `cwd` here is already whatever directory the
-    /// caller (a plain `task run`, or `orchestrate`'s shared worktree)
-    /// deliberately chose; it just stops codex from re-litigating that
-    /// choice with its own redundant check.
+    /// `codex exec --skip-git-repo-check -- "<prompt>"` — confirmed
+    /// non-interactive mode via `codex exec --help` on the reference
+    /// machine. `--skip-git-repo-check` is also real (confirmed the same
+    /// way): without it, `codex exec` refuses to run in a directory that
+    /// isn't a trusted git repo, which would otherwise break `single task
+    /// run --agent codex` for any `cwd` that isn't already a repo. This
+    /// doesn't bypass a SingleCLI-level trust decision — `cwd` here is
+    /// already whatever directory the caller (a plain `task run`, or
+    /// `orchestrate`'s shared worktree) deliberately chose; it just stops
+    /// codex from re-litigating that choice with its own redundant check.
+    ///
+    /// The `--` before `prompt` is load-bearing too, confirmed live:
+    /// `single task run`'s memory/notes preamble starts with a literal
+    /// `"---"`, and codex's own parser rejected that as an unrecognized
+    /// argument without it — its error message even suggests this exact
+    /// fix ("tip: to pass ... as a value, use '-- ...'").
     fn run_prompt(&self, cwd: &Path, prompt: &str, backend: &ExecBackend, live_output_path: Option<&Path>, timeout: Duration) -> Result<RunOutcome> {
-        run_command_live("codex", &["exec".to_string(), "--skip-git-repo-check".to_string(), prompt.to_string()], cwd, backend, live_output_path, timeout)
+        run_command_live(
+            "codex",
+            &["exec".to_string(), "--skip-git-repo-check".to_string(), "--".to_string(), prompt.to_string()],
+            cwd,
+            backend,
+            live_output_path,
+            timeout,
+        )
     }
 
     /// `codex plugin add <plugin[@marketplace]>` — confirmed real via
@@ -187,13 +200,16 @@ impl AgentAdapter for OpenCodeAdapter {
         }
     }
 
-    /// `opencode run "<prompt>" --dir <cwd>` — confirmed non-interactive
+    /// `opencode run -- "<prompt>" --dir <cwd>` — confirmed non-interactive
     /// mode and `--dir` flag via `opencode run --help` on the reference
-    /// machine.
+    /// machine. The `--` is load-bearing: `single task run`'s memory/notes
+    /// preamble starts with a literal `"---"`, and without a `--`
+    /// separator `opencode run` misparsed that as a flag and dumped its
+    /// own help instead of running — confirmed live.
     fn run_prompt(&self, cwd: &Path, prompt: &str, backend: &ExecBackend, live_output_path: Option<&Path>, timeout: Duration) -> Result<RunOutcome> {
         run_command_live(
             "opencode",
-            &["run".to_string(), prompt.to_string(), "--dir".to_string(), cwd.display().to_string()],
+            &["run".to_string(), "--".to_string(), prompt.to_string(), "--dir".to_string(), cwd.display().to_string()],
             cwd,
             backend,
             live_output_path,
@@ -236,10 +252,16 @@ impl AgentAdapter for AgyAdapter {
         Ok(unsupported_write("agy", home, "no on-disk MCP config location has been identified for agy"))
     }
 
-    /// `agy -p "<prompt>"` — confirmed non-interactive print mode via
-    /// `agy --help` on the reference machine.
+    /// `agy --print=<prompt>` — confirmed non-interactive print mode via
+    /// `agy --help` on the reference machine. `--print` (`-p`'s long form)
+    /// takes the prompt as its own value rather than a separate
+    /// positional, so a `--` separator doesn't help here the way it does
+    /// for claude — confirmed live: `agy -p -- "---..."` still dumped
+    /// help, while `agy --print="---..."` correctly ran the prompt.
+    /// (`single task run`'s memory/notes preamble literally starts with
+    /// `"---"`, which is what surfaced this.)
     fn run_prompt(&self, cwd: &Path, prompt: &str, backend: &ExecBackend, live_output_path: Option<&Path>, timeout: Duration) -> Result<RunOutcome> {
-        run_with_prompt_flag("agy", cwd, prompt, backend, live_output_path, timeout)
+        run_command_live("agy", &[format!("--print={prompt}")], cwd, backend, live_output_path, timeout)
     }
 
     /// `agy plugin install <plugin[@marketplace]>` — confirmed real via
@@ -305,7 +327,7 @@ impl AgentAdapter for CursorAdapter {
         }
     }
 
-    /// `cursor-agent -p "<prompt>" --trust` — confirmed non-interactive
+    /// `cursor-agent --trust -p -- "<prompt>"` — confirmed non-interactive
     /// print mode via `cursor-agent --help` on the reference machine.
     /// `--trust` isn't an optional bypass here the way `-f`/`--yolo`
     /// would be (those also auto-approve every tool call) — without it,
@@ -314,8 +336,16 @@ impl AgentAdapter for CursorAdapter {
     /// answer the prompt non-interactively. Same "needed to function at
     /// all, not an extra permission grant" reasoning already applied to
     /// codex's `--skip-git-repo-check` and copilot's `--allow-all-tools`.
+    ///
+    /// The `--` before `prompt` is load-bearing, confirmed by hitting the
+    /// failure live: `single task run` prepends a memory/notes preamble
+    /// (`task::context_preamble`) that starts with a literal `"---"`, and
+    /// `cursor-agent -p "<that text>"` rejects it as an unrecognized
+    /// option rather than treating it as `-p`'s value — clap-style
+    /// parsers only accept a value that looks like a flag when it's
+    /// explicitly separated from option parsing this way.
     fn run_prompt(&self, cwd: &Path, prompt: &str, backend: &ExecBackend, live_output_path: Option<&Path>, timeout: Duration) -> Result<RunOutcome> {
-        run_command_live("cursor-agent", &["-p".to_string(), prompt.to_string(), "--trust".to_string()], cwd, backend, live_output_path, timeout)
+        run_command_live("cursor-agent", &["--trust".to_string(), "-p".to_string(), "--".to_string(), prompt.to_string()], cwd, backend, live_output_path, timeout)
     }
 
     /// `cursor-agent login` — confirmed real via `cursor-agent --help` on
@@ -380,14 +410,19 @@ impl AgentAdapter for GooseAdapter {
         }
     }
 
-    /// `goose run --text "<prompt>" --no-session --quiet` — confirmed
+    /// `goose run --text=<prompt> --no-session --quiet` — confirmed
     /// non-interactive mode via `goose run --help` on the reference
     /// machine (`--no-session` skips creating a session file, `--quiet`
-    /// prints only the model's response).
+    /// prints only the model's response). `--text=value` (not a `--`
+    /// separator) is load-bearing: `single task run`'s memory/notes
+    /// preamble starts with a literal `"---"`, and `goose run --text
+    /// "---..."` (as a separate argv token) rejected it as an unexpected
+    /// argument even with `--` inserted before it — confirmed live that
+    /// only binding the value directly to `--text` with `=` works.
     fn run_prompt(&self, cwd: &Path, prompt: &str, backend: &ExecBackend, live_output_path: Option<&Path>, timeout: Duration) -> Result<RunOutcome> {
         run_command_live(
             "goose",
-            &["run".to_string(), "--text".to_string(), prompt.to_string(), "--no-session".to_string(), "--quiet".to_string()],
+            &["run".to_string(), format!("--text={prompt}"), "--no-session".to_string(), "--quiet".to_string()],
             cwd,
             backend,
             live_output_path,
@@ -558,11 +593,15 @@ impl AgentAdapter for GeminiAdapter {
         Ok(unsupported_write("gemini", home, "gemini mcp add/list/remove is real (confirmed via --help) but settings.json's exact shape wasn't inspected without a logged-in account"))
     }
 
-    /// `gemini -p "<prompt>"` — confirmed non-interactive mode via `gemini
-    /// --help` on the reference machine ("Run in non-interactive (headless)
-    /// mode with the given prompt").
+    /// `gemini --prompt=<prompt>` — confirmed non-interactive mode via
+    /// `gemini --help` ("Run in non-interactive (headless) mode with the
+    /// given prompt"). `--prompt` takes the value directly rather than a
+    /// separate positional, so `--` doesn't help here (confirmed live:
+    /// `gemini -p -- "---..."` dumped help; `gemini --prompt="---..."`
+    /// ran correctly) — `single task run`'s memory/notes preamble starts
+    /// with a literal `"---"`, which is what surfaced this.
     fn run_prompt(&self, cwd: &Path, prompt: &str, backend: &ExecBackend, live_output_path: Option<&Path>, timeout: Duration) -> Result<RunOutcome> {
-        run_with_prompt_flag("gemini", cwd, prompt, backend, live_output_path, timeout)
+        run_command_live("gemini", &[format!("--prompt={prompt}")], cwd, backend, live_output_path, timeout)
     }
 
     // No `login`: `gemini --help` lists no `auth`/`login` subcommand —
@@ -586,10 +625,12 @@ impl AgentAdapter for QwenCodeAdapter {
         Ok(unsupported_write("qwen-code", home, "qwen mcp is real (confirmed via --help) but its settings file shape wasn't inspected without a logged-in account"))
     }
 
-    /// `qwen -p "<prompt>"` — confirmed via `qwen --help` (same flag as
-    /// upstream Gemini CLI, which this is forked from).
+    /// `qwen --prompt=<prompt>` — confirmed via `qwen --help` (same flag
+    /// behavior as upstream Gemini CLI, which this is forked from —
+    /// `--prompt` takes the value directly, `--` doesn't help; see
+    /// `GeminiAdapter::run_prompt`'s doc comment for the confirmation).
     fn run_prompt(&self, cwd: &Path, prompt: &str, backend: &ExecBackend, live_output_path: Option<&Path>, timeout: Duration) -> Result<RunOutcome> {
-        run_with_prompt_flag("qwen", cwd, prompt, backend, live_output_path, timeout)
+        run_command_live("qwen", &[format!("--prompt={prompt}")], cwd, backend, live_output_path, timeout)
     }
 
     // No `login`: `qwen auth --help` on the reference machine describes
@@ -617,11 +658,19 @@ impl AgentAdapter for AmpAdapter {
         Ok(unsupported_write("amp", home, "amp mcp add/list/remove is real and --help documents a flat \"amp.mcpServers\" key in settings.json, but that shape was never round-tripped against a real file on the reference machine"))
     }
 
-    /// `amp -x "<prompt>"` — confirmed non-interactive mode via `amp
+    /// `amp -x -- "<prompt>"` — confirmed non-interactive mode via `amp
     /// --help` ("Use execute mode ... agent will execute provided
-    /// prompt ... Only last assistant message is printed").
+    /// prompt ... Only last assistant message is printed"). `--` before
+    /// `prompt`: `single task run`'s memory/notes preamble starts with a
+    /// literal `"---"`, which `amp -x "---..."` (no `--`) rejected as an
+    /// unknown option — confirmed live. Unlike the other agents fixed the
+    /// same way, `amp -x -- "..."` couldn't be confirmed *succeeding*
+    /// (no AMP_API_KEY / login on the reference machine, so it just hung
+    /// rather than returning a clean auth error) — but it did stop
+    /// producing the parse error, matching the same fix pattern verified
+    /// end-to-end for codex/opencode/droid/crush.
     fn run_prompt(&self, cwd: &Path, prompt: &str, backend: &ExecBackend, live_output_path: Option<&Path>, timeout: Duration) -> Result<RunOutcome> {
-        run_command_live("amp", &["-x".to_string(), prompt.to_string()], cwd, backend, live_output_path, timeout)
+        run_command_live("amp", &["-x".to_string(), "--".to_string(), prompt.to_string()], cwd, backend, live_output_path, timeout)
     }
 
     /// `amp login` — confirmed real via `amp --help` ("Log in to Amp").
@@ -649,10 +698,15 @@ impl AgentAdapter for DroidAdapter {
         Ok(unsupported_write("droid", home, "droid mcp add/remove/list is real (confirmed via --help) but its config file shape wasn't inspected without a logged-in account"))
     }
 
-    /// `droid exec "<prompt>"` — confirmed non-interactive mode via `droid
-    /// --help` ("Run non-interactively (for scripts/automation)").
+    /// `droid exec -- "<prompt>"` — confirmed non-interactive mode via
+    /// `droid --help` ("Run non-interactively (for scripts/automation)").
+    /// The `--` is load-bearing: `single task run`'s memory/notes preamble
+    /// starts with a literal `"---"`, which `droid exec "---..."` (no
+    /// `--`) rejected as an unknown option — confirmed live, including
+    /// that the fixed form correctly reaches droid's own auth check
+    /// instead (a clean, expected error rather than a parse failure).
     fn run_prompt(&self, cwd: &Path, prompt: &str, backend: &ExecBackend, live_output_path: Option<&Path>, timeout: Duration) -> Result<RunOutcome> {
-        run_command_live("droid", &["exec".to_string(), prompt.to_string()], cwd, backend, live_output_path, timeout)
+        run_command_live("droid", &["exec".to_string(), "--".to_string(), prompt.to_string()], cwd, backend, live_output_path, timeout)
     }
 
     // No `login`: neither `droid --help`, `droid auth --help`, nor `droid
@@ -734,11 +788,14 @@ impl AgentAdapter for GrokAdapter {
         Ok(unsupported_write("grok", home, "grok mcp is real (confirmed via --help) but its config file shape wasn't inspected without a logged-in account"))
     }
 
-    /// `grok -p "<prompt>"` — confirmed via `grok --help` ("-p, --single
-    /// <PROMPT>: Single-turn prompt. Prints the response to stdout and
-    /// exits").
+    /// `grok --single=<prompt>` — confirmed via `grok --help` ("-p,
+    /// --single <PROMPT>: Single-turn prompt. Prints the response to
+    /// stdout and exits"). `--single` takes the value directly, so a `--`
+    /// separator doesn't help — confirmed live: `grok -p -- "---..."`
+    /// errored "a value is required for '--single <PROMPT>' but none was
+    /// supplied", while `grok --single="---..."` ran correctly.
     fn run_prompt(&self, cwd: &Path, prompt: &str, backend: &ExecBackend, live_output_path: Option<&Path>, timeout: Duration) -> Result<RunOutcome> {
-        run_with_prompt_flag("grok", cwd, prompt, backend, live_output_path, timeout)
+        run_command_live("grok", &[format!("--single={prompt}")], cwd, backend, live_output_path, timeout)
     }
 
     /// `grok login` — confirmed real via `grok --help` ("Sign in to
@@ -768,10 +825,15 @@ impl AgentAdapter for CrushAdapter {
         Ok(unsupported_write("crush", home, "crush's MCP config file wasn't inspected without a logged-in account, and no mcp subcommand appears in --help"))
     }
 
-    /// `crush run "<prompt>"` — confirmed non-interactive mode via `crush
-    /// --help` ("Run a single non-interactive prompt").
+    /// `crush run -- "<prompt>"` — confirmed non-interactive mode via
+    /// `crush --help` ("Run a single non-interactive prompt"). The `--` is
+    /// load-bearing: `single task run`'s memory/notes preamble starts
+    /// with a literal `"---"`, which `crush run "---..."` (no `--`)
+    /// rejected as bad flag syntax — confirmed live, including that the
+    /// fixed form correctly reaches crush's own provider check instead
+    /// (a clean, expected error rather than a parse failure).
     fn run_prompt(&self, cwd: &Path, prompt: &str, backend: &ExecBackend, live_output_path: Option<&Path>, timeout: Duration) -> Result<RunOutcome> {
-        run_command_live("crush", &["run".to_string(), prompt.to_string()], cwd, backend, live_output_path, timeout)
+        run_command_live("crush", &["run".to_string(), "--".to_string(), prompt.to_string()], cwd, backend, live_output_path, timeout)
     }
 
     /// `crush login [platform]` — confirmed real via `crush --help`
