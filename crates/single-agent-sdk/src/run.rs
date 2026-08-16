@@ -95,8 +95,19 @@ pub fn run_command_live(
             let mut cmd = Command::new("docker");
             cmd.arg("exec").arg("-w").arg(workdir);
             if let Some(extra_env) = extra_env {
+                // `-e KEY` (bare name, no `=value`) tells docker exec to
+                // source that variable's value from *this* docker CLI
+                // process's own environment rather than taking it as a
+                // literal argv token — confirmed live against a real
+                // container on this machine. Putting a secret value
+                // directly in `-e KEY=value` would land it in `docker`'s
+                // argv, visible to any local user via `ps`/`/proc/<pid>/
+                // cmdline`; setting it via `cmd.env()` here instead keeps
+                // it exactly as exposed as the Host backend's env vars
+                // above, not more.
                 for (key, value) in extra_env.iter() {
-                    cmd.arg("-e").arg(format!("{key}={value}"));
+                    cmd.env(key, value);
+                    cmd.arg("-e").arg(key);
                 }
             }
             cmd.arg(container).arg(command).args(args);
@@ -266,5 +277,57 @@ mod tests {
         let outcome = run_command("sh", &["-c".into(), "sleep 5".into()], dir.path(), Duration::from_millis(200)).unwrap();
         assert!(outcome.timed_out);
         assert!(!outcome.success);
+    }
+
+    fn docker_available() -> bool {
+        Command::new("docker").arg("info").output().map(|o| o.status.success()).unwrap_or(false)
+    }
+
+    /// Regression test for a real finding: `-e KEY=value` on `docker
+    /// exec`'s argv would put a secret's plaintext value directly in the
+    /// `docker` process's command line, visible to any local user via
+    /// `ps`/`/proc/<pid>/cmdline`. The fix (bare `-e KEY`, value set via
+    /// `Command::env()` instead) is confirmed here against a real
+    /// container: the value must still reach the container correctly.
+    /// Skips cleanly if docker isn't available, same as
+    /// `single-runtime::docker`'s own tests.
+    #[test]
+    fn docker_backend_env_var_reaches_the_container_without_the_value_touching_argv() {
+        if !docker_available() {
+            eprintln!("skipping: docker not available");
+            return;
+        }
+        let container = "singlecli-test-run-rs-env-passthrough";
+        let _ = Command::new("docker").args(["rm", "-f", container]).output();
+        let status = Command::new("docker")
+            .args(["run", "-d", "--name", container, "alpine", "sleep", "60"])
+            .status()
+            .unwrap();
+        assert!(status.success(), "failed to start test container");
+
+        let mut extra_env = std::collections::BTreeMap::new();
+        extra_env.insert("SINGLECLI_TEST_SECRET".to_string(), "argv-must-not-contain-this-literal".to_string());
+
+        // `workdir` must exist *inside the container* (docker exec -w does
+        // a real chdir there) — a host tempdir path wouldn't, since this
+        // test doesn't bind-mount anything (unlike the real task-run path,
+        // which mounts the isolated home/cwd — see docker::ensure_started).
+        let in_container_workdir = Path::new("/");
+        let host_cwd = tempfile::tempdir().unwrap();
+        let backend = ExecBackend::Docker { container, workdir: in_container_workdir, extra_env: Some(&extra_env) };
+        let outcome = run_command_live(
+            "sh",
+            &["-c".to_string(), "echo $SINGLECLI_TEST_SECRET".to_string()],
+            host_cwd.path(),
+            &backend,
+            None,
+            Duration::from_secs(10),
+        )
+        .unwrap();
+
+        assert!(outcome.success);
+        assert_eq!(outcome.stdout.trim(), "argv-must-not-contain-this-literal", "the value must still reach the container correctly");
+
+        let _ = Command::new("docker").args(["rm", "-f", container]).output();
     }
 }
