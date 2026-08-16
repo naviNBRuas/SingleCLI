@@ -711,6 +711,9 @@ enum ProviderCommand {
     },
     Remove { name: String },
     List {
+        /// Only show providers that actually have a key stored (shared set-key or any labeled add-key) — every built-in preset shows without this.
+        #[arg(long)]
+        configured: bool,
         #[arg(long)]
         json: bool,
     },
@@ -1432,8 +1435,9 @@ fn main() -> anyhow::Result<()> {
                 let response = client::send(&socket_path, Request::ProviderRemove { name })?;
                 render::print(response, false);
             }
-            ProviderCommand::List { json } => {
-                let response = client::send(&socket_path, Request::ProviderList)?;
+            ProviderCommand::List { configured, json } => {
+                let request = if configured { Request::ConfiguredProviderList } else { Request::ProviderList };
+                let response = client::send(&socket_path, request)?;
                 render::print(response, json);
             }
             ProviderCommand::Inspect { name, json } => {

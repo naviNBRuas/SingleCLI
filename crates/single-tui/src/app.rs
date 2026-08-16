@@ -268,7 +268,14 @@ impl App {
         self.lsp_servers = self.fetch(Request::LspList, |d| match d { ResponseData::LspServers(s) => Some(s), _ => None }).unwrap_or_default();
         self.plugins = self.fetch(Request::PluginList, |d| match d { ResponseData::Plugins(p) => Some(p), _ => None }).unwrap_or_default();
         self.tools = self.fetch(Request::ToolList, |d| match d { ResponseData::Tools(t) => Some(t), _ => None }).unwrap_or_default();
-        self.providers = self.fetch(Request::ProviderList, |d| match d { ResponseData::Providers(p) => Some(p), _ => None }).unwrap_or_default();
+        // Configured-only, not the full preset catalog: `providers.toml`
+        // carries every built-in preset unconditionally (ProviderSpec has
+        // no `enabled` field, unlike MCP/LSP/Tools), so plain
+        // Request::ProviderList can't tell "known preset name" apart from
+        // "actually has a key stored" — the full catalog is still what
+        // the [a] add-provider flow shows (ProviderPresetList, a
+        // separate fetch, unaffected by this).
+        self.providers = self.fetch(Request::ConfiguredProviderList, |d| match d { ResponseData::Providers(p) => Some(p), _ => None }).unwrap_or_default();
         self.accounts = self.fetch(Request::AccountList { agent: None }, |d| match d { ResponseData::AccountProfiles(p) => Some(p), _ => None }).unwrap_or_default();
         // Real billing-API calls are comparatively slow/rate-limited (the
         // Anthropic Usage & Cost API's own docs recommend at most once a

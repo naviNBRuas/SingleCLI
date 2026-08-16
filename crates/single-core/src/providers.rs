@@ -54,6 +54,28 @@ pub fn find(path: &Path, name: &str) -> Result<Option<ProviderSpec>> {
     Ok(load(path)?.into_iter().find(|p| p.name == name))
 }
 
+/// Providers that actually have a key stored — a shared key (`set-key`)
+/// or any labeled per-agent key (`add-key`, see `provider_keys.rs`) —
+/// distinct from `load()`'s full registry, which unconditionally carries
+/// every built-in preset regardless of whether it's ever been configured
+/// (`sync_missing_presets` below; `ProviderSpec` has no `enabled` field,
+/// unlike MCP/LSP/Tools). This is what answers "which of these did I
+/// actually set up," used by the TUI's Providers tab and `single
+/// provider list --configured`.
+pub fn configured(providers_path: &Path, provider_keys_path: &Path) -> Result<Vec<ProviderSpec>> {
+    let all = load(providers_path)?;
+    let store = crate::secrets::SecretTool;
+    Ok(all
+        .into_iter()
+        .filter(|provider| {
+            let has_shared_key = crate::secrets::SecretStore::get(&store, &provider.secret_name).ok().flatten().is_some();
+            let has_labeled_key =
+                crate::provider_keys::list_for_provider(provider_keys_path, &provider.name).map(|keys| !keys.is_empty()).unwrap_or(false);
+            has_shared_key || has_labeled_key
+        })
+        .collect())
+}
+
 /// Registers every built-in preset not already present in the registry.
 /// Safe to bulk-add: a `ProviderSpec` is just metadata (env var name, base
 /// URL, and a pointer to a secret-store entry) — no key material moves and
@@ -266,5 +288,85 @@ mod tests {
     #[test]
     fn preset_returns_none_for_unknown_name() {
         assert!(preset("does-not-exist").is_none());
+    }
+
+    /// Real OS keychain round trips (not mocked), same discipline
+    /// `provider_keys.rs`'s own `resolve_env_for_agent` tests use — clearly
+    /// test-scoped provider names so nothing here can collide with a real
+    /// stored key, with cleanup at the end of each test.
+    mod configured_tests {
+        use super::*;
+        use crate::secrets::{SecretStore, SecretTool};
+
+        #[test]
+        fn a_preset_with_no_key_at_all_is_not_configured() {
+            let dir = tempfile::tempdir().unwrap();
+            let providers_path = dir.path().join("providers.toml");
+            let keys_path = dir.path().join("provider_keys.toml");
+            add(&providers_path, ProviderSpec {
+                name: "singlecli-test-unconfigured".into(),
+                env_var_name: "SINGLECLI_TEST_UNCONFIGURED_KEY".into(),
+                secret_name: "provider:singlecli-test-unconfigured".into(),
+                base_url: None,
+            })
+            .unwrap();
+
+            let result = configured(&providers_path, &keys_path).unwrap();
+            assert!(result.is_empty(), "a preset with no stored key anywhere must not appear as configured");
+        }
+
+        #[test]
+        fn a_shared_key_marks_the_provider_configured() {
+            let dir = tempfile::tempdir().unwrap();
+            let providers_path = dir.path().join("providers.toml");
+            let keys_path = dir.path().join("provider_keys.toml");
+            let secret_name = "provider:singlecli-test-shared-configured".to_string();
+            add(&providers_path, ProviderSpec {
+                name: "singlecli-test-shared-configured".into(),
+                env_var_name: "SINGLECLI_TEST_SHARED_CONFIGURED_KEY".into(),
+                secret_name: secret_name.clone(),
+                base_url: None,
+            })
+            .unwrap();
+            let store = SecretTool;
+            SecretStore::set(&store, &secret_name, "some-value").unwrap();
+
+            let result = configured(&providers_path, &keys_path).unwrap();
+            assert_eq!(result.len(), 1);
+            assert_eq!(result[0].name, "singlecli-test-shared-configured");
+
+            SecretStore::delete(&store, &secret_name).unwrap();
+        }
+
+        #[test]
+        fn a_labeled_key_with_no_shared_key_also_marks_the_provider_configured() {
+            let dir = tempfile::tempdir().unwrap();
+            let providers_path = dir.path().join("providers.toml");
+            let keys_path = dir.path().join("provider_keys.toml");
+            let provider = "singlecli-test-labeled-configured";
+            add(&providers_path, ProviderSpec {
+                name: provider.into(),
+                env_var_name: "SINGLECLI_TEST_LABELED_CONFIGURED_KEY".into(),
+                secret_name: format!("provider:{provider}"),
+                base_url: None,
+            })
+            .unwrap();
+            let key_secret_name = crate::provider_keys::secret_name(provider, "mylabel");
+            let store = SecretTool;
+            SecretStore::set(&store, &key_secret_name, "labeled-value").unwrap();
+            crate::provider_keys::add(&keys_path, single_protocol::ProviderKeySpec {
+                provider: provider.into(),
+                label: "mylabel".into(),
+                agent: Some("some-agent".into()),
+                secret_name: key_secret_name.clone(),
+            })
+            .unwrap();
+
+            let result = configured(&providers_path, &keys_path).unwrap();
+            assert_eq!(result.len(), 1);
+            assert_eq!(result[0].name, provider);
+
+            SecretStore::delete(&store, &key_secret_name).unwrap();
+        }
     }
 }

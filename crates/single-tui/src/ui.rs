@@ -273,18 +273,24 @@ fn draw_tools(frame: &mut Frame, area: Rect, app: &App) {
 }
 
 fn draw_providers(frame: &mut Frame, area: Rect, app: &App) {
-    let items: Vec<ListItem> = app
-        .providers
-        .iter()
-        .map(|p| {
-            ListItem::new(Line::from(vec![
-                Span::styled(format!("{:<16}", p.name), Style::default().add_modifier(Modifier::BOLD)),
-                Span::raw(format!("{:<22} ", p.env_var_name)),
-                Span::styled(p.base_url.clone().unwrap_or_else(|| "-".into()), Style::default().fg(MUTED)),
-            ]))
-        })
-        .collect();
-    let list = List::new(items).block(Block::default().borders(Borders::ALL).title(" Providers — [a] add "));
+    let items: Vec<ListItem> = if app.providers.is_empty() {
+        vec![ListItem::new(Span::styled(
+            "(no providers configured yet — press [a] to add one from the full preset catalog)",
+            Style::default().fg(MUTED),
+        ))]
+    } else {
+        app.providers
+            .iter()
+            .map(|p| {
+                ListItem::new(Line::from(vec![
+                    Span::styled(format!("{:<16}", p.name), Style::default().add_modifier(Modifier::BOLD)),
+                    Span::raw(format!("{:<22} ", p.env_var_name)),
+                    Span::styled(p.base_url.clone().unwrap_or_else(|| "-".into()), Style::default().fg(MUTED)),
+                ]))
+            })
+            .collect()
+    };
+    let list = List::new(items).block(Block::default().borders(Borders::ALL).title(" Providers (configured) — [a] add "));
     frame.render_widget(list, area);
 }
 

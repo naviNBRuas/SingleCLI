@@ -487,6 +487,11 @@ fn dispatch(ctx: &Context, request: Request) -> anyhow::Result<ResponseData> {
         Request::ProviderList => {
             Ok(ResponseData::Providers(single_core::providers::load(&ctx.dirs.providers_registry_file())?))
         }
+        Request::ConfiguredProviderList => {
+            let configured =
+                single_core::providers::configured(&ctx.dirs.providers_registry_file(), &ctx.dirs.provider_keys_registry_file())?;
+            Ok(ResponseData::Providers(configured))
+        }
         Request::ProviderInspect { name } => {
             let provider = single_core::providers::find(&ctx.dirs.providers_registry_file(), &name)?
                 .ok_or_else(|| anyhow::anyhow!("no such provider: {name}"))?;

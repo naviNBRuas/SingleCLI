@@ -172,6 +172,13 @@ pub enum Request {
     ProviderPresetList,
     ProviderRemove { name: String },
     ProviderList,
+    /// Same shape as `ProviderList`, filtered to providers that actually
+    /// have a key stored (shared `set-key` or any labeled `add-key`) —
+    /// `providers.toml` itself carries every built-in preset unconditionally
+    /// (see `single_core::providers::sync_missing_presets`; unlike MCP/LSP/
+    /// Tools, `ProviderSpec` has no `enabled` field), so plain `ProviderList`
+    /// can't answer "which of these did I actually configure."
+    ConfiguredProviderList,
     ProviderInspect { name: String },
     ProviderSetKey { name: String, value: String },
     ProviderSync { name: String, agents: Vec<String>, dry_run: bool },
