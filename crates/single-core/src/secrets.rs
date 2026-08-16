@@ -72,13 +72,21 @@ impl SecretStore for SecretTool {
 
     fn list(&self) -> Result<Vec<String>> {
         let output = Command::new("secret-tool")
-            .args(["search", "--all", "service", SERVICE])
+            .args(["search", "--all", "--unlock", "service", SERVICE])
             .output()
             .context("spawning secret-tool search")?;
         if !output.status.success() {
             return Ok(Vec::new());
         }
-        let text = String::from_utf8_lossy(&output.stdout);
+        // secret-tool (libsecret 0.21.x, observed on this machine) writes
+        // the "attribute.name = " lines this parser needs to stderr, not
+        // stdout, for `search --all` specifically (label/secret/created/
+        // modified/schema go to stdout as expected) — a real quirk of this
+        // version, not assumed. Concatenating both streams is the robust
+        // fix rather than depending on which stream a given secret-tool
+        // build happens to use.
+        let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
+        text.push_str(&String::from_utf8_lossy(&output.stderr));
         let mut names = Vec::new();
         for line in text.lines() {
             if let Some(rest) = line.trim().strip_prefix("attribute.name = ") {
