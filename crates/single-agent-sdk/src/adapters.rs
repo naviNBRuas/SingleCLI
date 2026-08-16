@@ -593,15 +593,23 @@ impl AgentAdapter for GeminiAdapter {
         Ok(unsupported_write("gemini", home, "gemini mcp add/list/remove is real (confirmed via --help) but settings.json's exact shape wasn't inspected without a logged-in account"))
     }
 
-    /// `gemini --prompt=<prompt>` — confirmed non-interactive mode via
-    /// `gemini --help` ("Run in non-interactive (headless) mode with the
-    /// given prompt"). `--prompt` takes the value directly rather than a
-    /// separate positional, so `--` doesn't help here (confirmed live:
-    /// `gemini -p -- "---..."` dumped help; `gemini --prompt="---..."`
-    /// ran correctly) — `single task run`'s memory/notes preamble starts
-    /// with a literal `"---"`, which is what surfaced this.
+    /// `gemini --prompt=<prompt> --skip-trust` — confirmed non-interactive
+    /// mode via `gemini --help` ("Run in non-interactive (headless) mode
+    /// with the given prompt"). `--prompt` takes the value directly
+    /// rather than a separate positional, so `--` doesn't help here
+    /// (confirmed live: `gemini -p -- "---..."` dumped help; `gemini
+    /// --prompt="---..."` ran correctly) — `single task run`'s
+    /// memory/notes preamble starts with a literal `"---"`, which is what
+    /// surfaced this. `--skip-trust` isn't an optional bypass here the
+    /// way `--yolo` would be (that also auto-approves every tool call) —
+    /// without it, `gemini` refuses to run at all in a directory it
+    /// hasn't seen before ("Gemini CLI is not running in a trusted
+    /// directory"), exiting 55 with no way to answer non-interactively —
+    /// confirmed live. Same "needed to function at all, not an extra
+    /// permission grant" reasoning already applied to codex's
+    /// `--skip-git-repo-check` and cursor's `--trust`.
     fn run_prompt(&self, cwd: &Path, prompt: &str, backend: &ExecBackend, live_output_path: Option<&Path>, timeout: Duration) -> Result<RunOutcome> {
-        run_command_live("gemini", &[format!("--prompt={prompt}")], cwd, backend, live_output_path, timeout)
+        run_command_live("gemini", &[format!("--prompt={prompt}"), "--skip-trust".to_string()], cwd, backend, live_output_path, timeout)
     }
 
     // No `login`: `gemini --help` lists no `auth`/`login` subcommand —

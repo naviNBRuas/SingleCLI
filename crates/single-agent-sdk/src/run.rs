@@ -74,23 +74,32 @@ pub fn run_command_live(
 ) -> Result<RunOutcome> {
     let start = Instant::now();
     let mut cmd = match backend {
-        ExecBackend::Host { home } => {
+        ExecBackend::Host { home, extra_env } => {
             let mut cmd = Command::new(command);
             cmd.args(args).current_dir(cwd);
             if let Some(home) = home {
                 cmd.env("HOME", home);
                 pin_real_config_dir(&mut cmd);
             }
+            if let Some(extra_env) = extra_env {
+                cmd.envs(extra_env.iter());
+            }
             cmd
         }
-        ExecBackend::Docker { container, workdir } => {
+        ExecBackend::Docker { container, workdir, extra_env } => {
             // No $HOME override, no current_dir: the container's home was
             // fixed when it was created (the isolated home bind-mounted
             // in — see single-runtime::docker::ensure_started), and
             // `docker exec -w` sets the working directory inside the
             // container, not this host process's cwd.
             let mut cmd = Command::new("docker");
-            cmd.arg("exec").arg("-w").arg(workdir).arg(container).arg(command).args(args);
+            cmd.arg("exec").arg("-w").arg(workdir);
+            if let Some(extra_env) = extra_env {
+                for (key, value) in extra_env.iter() {
+                    cmd.arg("-e").arg(format!("{key}={value}"));
+                }
+            }
+            cmd.arg(container).arg(command).args(args);
             cmd
         }
     };

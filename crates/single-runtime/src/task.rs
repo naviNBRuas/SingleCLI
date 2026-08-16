@@ -401,9 +401,15 @@ pub fn run(conn: &Connection, ctx: &Context, opts: RunTaskOptions) -> Result<Tas
     } else {
         None
     };
+    // Provider API keys (single_core::provider_keys) an agent that
+    // authenticates via a plain env var — not OAuth — needs to actually
+    // see. Resolved fresh per run rather than cached: cheap (local
+    // keychain lookups only), and picks up a key the user just added
+    // without needing a daemon restart.
+    let extra_env = single_core::provider_keys::resolve_env_for_agent(&ctx.dirs, opts.agent);
     let backend = match &docker_container {
-        Some(container) => single_agent_sdk::backend::ExecBackend::Docker { container, workdir: &run_cwd },
-        None => single_agent_sdk::backend::ExecBackend::host(home.as_deref()),
+        Some(container) => single_agent_sdk::backend::ExecBackend::Docker { container, workdir: &run_cwd, extra_env: Some(&extra_env) },
+        None => single_agent_sdk::backend::ExecBackend::host_with_env(home.as_deref(), &extra_env),
     };
 
     std::fs::create_dir_all(ctx.dirs.artifacts_dir())?;

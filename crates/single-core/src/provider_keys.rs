@@ -79,6 +79,56 @@ pub fn list_for_provider(path: &Path, provider: &str) -> Result<Vec<ProviderKeyS
     Ok(load(path)?.into_iter().filter(|k| k.provider == provider).collect())
 }
 
+/// Resolves which provider API keys `agent` should see as environment
+/// variables for a real run — the missing link between "a key is stored
+/// in SingleCLI" and "the agent process that authenticates via a plain
+/// env var, not OAuth, actually has it." Consumed by
+/// `single-agent-sdk::backend::ExecBackend`'s `extra_env`.
+///
+/// Two sources, in this order:
+/// 1. Labeled per-agent keys (`ProviderKeySpec::agent == Some(agent)`) —
+///    the precise mechanism: `single provider add-key <provider> --label
+///    <label> --agent <agent> <value>`.
+/// 2. A shared single-key provider (`providers.toml`/`set-key`) whose
+///    *name* exactly matches `agent` — covers the common case of a
+///    standalone agent CLI that's also its own provider name (e.g. the
+///    `gemini` agent authenticating with the `gemini` provider's key)
+///    without injecting every configured provider's key into every
+///    agent regardless of relevance. Skipped for a provider already
+///    covered by a labeled key in (1), so an explicit per-agent
+///    assignment always wins over the shared fallback.
+///
+/// Best-effort: a missing/unreachable keychain resolves to "nothing to
+/// inject" rather than failing the caller — same discipline
+/// `single_core::backup::export` already applies to the same failure
+/// mode (secret-tool absent shouldn't block an otherwise-runnable task).
+pub fn resolve_env_for_agent(dirs: &crate::paths::SingleDirs, agent: &str) -> BTreeMap<String, String> {
+    use crate::secrets::{SecretStore, SecretTool};
+
+    let mut env = BTreeMap::new();
+    let store = SecretTool;
+    let mut covered_providers = std::collections::HashSet::new();
+
+    if let Ok(keys) = load(&dirs.provider_keys_registry_file()) {
+        for key in keys.into_iter().filter(|k| k.agent.as_deref() == Some(agent)) {
+            let Ok(Some(provider_spec)) = crate::providers::find(&dirs.providers_registry_file(), &key.provider) else { continue };
+            let Ok(Some(value)) = SecretStore::get(&store, &key.secret_name) else { continue };
+            env.insert(provider_spec.env_var_name, value);
+            covered_providers.insert(key.provider);
+        }
+    }
+
+    if !covered_providers.contains(agent) {
+        if let Ok(Some(provider_spec)) = crate::providers::find(&dirs.providers_registry_file(), agent) {
+            if let Ok(Some(value)) = SecretStore::get(&store, &provider_spec.secret_name) {
+                env.insert(provider_spec.env_var_name, value);
+            }
+        }
+    }
+
+    env
+}
+
 fn composite_key(provider: &str, label: &str) -> String {
     format!("{provider}:{label}")
 }
@@ -149,5 +199,92 @@ mod tests {
         add(&path, sample("anthropic", "default", None)).unwrap();
         add(&path, sample("openai", "default", None)).unwrap();
         assert_eq!(load(&path).unwrap().len(), 2);
+    }
+
+    /// Real OS keychain round trips (not mocked) — `resolve_env_for_agent`
+    /// only means anything as an end-to-end test against the real
+    /// `secret-tool` backend, same as `secrets.rs`'s own test. Uses
+    /// clearly test-scoped provider/agent/secret names so nothing here
+    /// can collide with a real stored key, and cleans up what it wrote.
+    mod resolve_env_for_agent_tests {
+        use super::*;
+        use crate::paths::SingleDirs;
+        use crate::secrets::{SecretStore, SecretTool};
+
+        fn test_dirs() -> (tempfile::TempDir, SingleDirs) {
+            let dir = tempfile::tempdir().unwrap();
+            let dirs = SingleDirs::from_root(dir.path().to_path_buf());
+            (dir, dirs)
+        }
+
+        #[test]
+        fn labeled_per_agent_key_resolves_to_the_providers_env_var_name() {
+            let (_tmp, dirs) = test_dirs();
+            let provider = "singlecli-test-provider-labeled";
+            let agent = "singlecli-test-agent-labeled";
+            crate::providers::add(&dirs.providers_registry_file(), single_protocol::ProviderSpec {
+                name: provider.into(),
+                env_var_name: "SINGLECLI_TEST_LABELED_KEY".into(),
+                secret_name: format!("provider:{provider}"),
+                base_url: None,
+            })
+            .unwrap();
+            let key_secret_name = secret_name(provider, "mylabel");
+            let store = SecretTool;
+            SecretStore::set(&store, &key_secret_name, "labeled-value").unwrap();
+            add(&dirs.provider_keys_registry_file(), ProviderKeySpec {
+                provider: provider.into(),
+                label: "mylabel".into(),
+                agent: Some(agent.into()),
+                secret_name: key_secret_name.clone(),
+            })
+            .unwrap();
+
+            let env = resolve_env_for_agent(&dirs, agent);
+            assert_eq!(env.get("SINGLECLI_TEST_LABELED_KEY").map(String::as_str), Some("labeled-value"));
+
+            SecretStore::delete(&store, &key_secret_name).unwrap();
+        }
+
+        #[test]
+        fn shared_key_falls_back_when_provider_name_matches_agent_name() {
+            let (_tmp, dirs) = test_dirs();
+            let provider_and_agent = "singlecli-test-agent-shared";
+            let secret_name = format!("provider:{provider_and_agent}");
+            crate::providers::add(&dirs.providers_registry_file(), single_protocol::ProviderSpec {
+                name: provider_and_agent.into(),
+                env_var_name: "SINGLECLI_TEST_SHARED_KEY".into(),
+                secret_name: secret_name.clone(),
+                base_url: None,
+            })
+            .unwrap();
+            let store = SecretTool;
+            SecretStore::set(&store, &secret_name, "shared-value").unwrap();
+
+            let env = resolve_env_for_agent(&dirs, provider_and_agent);
+            assert_eq!(env.get("SINGLECLI_TEST_SHARED_KEY").map(String::as_str), Some("shared-value"));
+
+            SecretStore::delete(&store, &secret_name).unwrap();
+        }
+
+        #[test]
+        fn unrelated_agent_gets_nothing_injected() {
+            let (_tmp, dirs) = test_dirs();
+            let provider = "singlecli-test-provider-unrelated";
+            crate::providers::add(&dirs.providers_registry_file(), single_protocol::ProviderSpec {
+                name: provider.into(),
+                env_var_name: "SINGLECLI_TEST_UNRELATED_KEY".into(),
+                secret_name: format!("provider:{provider}"),
+                base_url: None,
+            })
+            .unwrap();
+            let store = SecretTool;
+            SecretStore::set(&store, &format!("provider:{provider}"), "unrelated-value").unwrap();
+
+            let env = resolve_env_for_agent(&dirs, "some-other-agent-entirely");
+            assert!(env.is_empty(), "a provider whose name doesn't match the agent, with no labeled key, must not be injected");
+
+            SecretStore::delete(&store, &format!("provider:{provider}")).unwrap();
+        }
     }
 }
