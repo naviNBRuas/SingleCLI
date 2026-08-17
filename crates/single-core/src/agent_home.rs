@@ -57,12 +57,58 @@ fn real_paths_for(agent: &str) -> &'static [&'static str] {
 /// settings). Only claude and codex have a confirmed single-file credential
 /// location inside those paths — see `single-core::account`'s per-agent
 /// doc comments for the same paths used by `has_live_login`/`capture`.
+/// Cursor's login lives as a *field* inside a shared prefs file instead of
+/// its own file — see `strip_embedded_credential_fields` for that case.
 fn credential_paths_for(agent: &str) -> &'static [&'static str] {
     match agent {
         "claude" => &[".claude/.credentials.json"],
         "codex" => &[".codex/auth.json"],
         _ => &[],
     }
+}
+
+/// Same purpose as `credential_paths_for`, for agents whose login state is
+/// a field inside a config file `real_paths_for` otherwise copies
+/// wholesale, rather than a dedicated credential file. Removing the whole
+/// file would also drop legitimate non-auth prefs (editor/display
+/// settings), so this strips just the named field(s) in place instead.
+///
+/// copilot is here for a sharper reason than cursor: its actual token
+/// lives in the system OS keyring, not under `$HOME` at all, so a bare
+/// file copy can't leak the secret itself — but `config.json`'s
+/// `lastLoggedInUser`/`loggedInUsers` fields are the *pointer* copilot
+/// uses to look that keyring entry up. Since the keyring is shared
+/// system-wide (not namespaced per isolated home), leaving that pointer
+/// in place would let a freshly-bootstrapped isolated home silently
+/// authenticate as whoever is logged in on the real machine — see
+/// `single-core::account`'s `copilot_identity`/`keyring_lookup` docs.
+fn strip_embedded_credential_fields(dest: &Path, agent: &str) -> Result<()> {
+    let (rel, fields): (&str, &[&str]) = match agent {
+        "cursor" => (".cursor/cli-config.json", &["authInfo"]),
+        "copilot" => (".copilot/config.json", &["lastLoggedInUser", "loggedInUsers"]),
+        _ => return Ok(()),
+    };
+    let path = dest.join(rel);
+    if !path.exists() {
+        return Ok(());
+    }
+    let text = std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+    // copilot's config.json starts with `//`-prefixed comment lines,
+    // which strict JSON parsing rejects — see the matching strip in
+    // `single-core::account::extract_json_fields`. No-op for cursor's
+    // plain-JSON file.
+    let text: String = text.lines().filter(|line| !line.trim_start().starts_with("//")).collect::<Vec<_>>().join("\n");
+    let mut value: serde_json::Value = serde_json::from_str(&text).with_context(|| format!("parsing {} as JSON", path.display()))?;
+    if let Some(obj) = value.as_object_mut() {
+        let mut changed = false;
+        for field in fields {
+            changed |= obj.remove(*field).is_some();
+        }
+        if changed {
+            std::fs::write(&path, serde_json::to_string_pretty(&value)?).with_context(|| format!("writing {}", path.display()))?;
+        }
+    }
+    Ok(())
 }
 
 /// Ensures `homes_root/<agent>` exists, bootstrapping it from `real_home`
@@ -96,6 +142,7 @@ pub fn ensure_bootstrapped(homes_root: &Path, real_home: &Path, agent: &str) -> 
             std::fs::remove_file(&path).with_context(|| format!("removing seeded credential {}", path.display()))?;
         }
     }
+    strip_embedded_credential_fields(&dest, agent)?;
     Ok(dest)
 }
 
@@ -165,6 +212,44 @@ mod tests {
         let codex_isolated = ensure_bootstrapped(homes_root.path(), real_home.path(), "codex").unwrap();
         assert!(!codex_isolated.join(".codex/auth.json").exists());
         assert_eq!(std::fs::read_to_string(codex_isolated.join(".codex/config.toml")).unwrap(), "profile = \"default\"");
+    }
+
+    #[test]
+    fn bootstrap_strips_cursor_auth_info_field_but_keeps_other_prefs() {
+        let real_home = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(real_home.path().join(".cursor")).unwrap();
+        std::fs::write(
+            real_home.path().join(".cursor/cli-config.json"),
+            r#"{"editor":{"vimMode":true},"authInfo":{"email":"a@example.com","authId":"secretA"}}"#,
+        )
+        .unwrap();
+
+        let homes_root = tempfile::tempdir().unwrap();
+        let isolated = ensure_bootstrapped(homes_root.path(), real_home.path(), "cursor").unwrap();
+
+        let config: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(isolated.join(".cursor/cli-config.json")).unwrap()).unwrap();
+        assert!(config.get("authInfo").is_none(), "authInfo must be stripped from a freshly bootstrapped isolated home");
+        assert_eq!(config["editor"]["vimMode"], true, "non-auth prefs must survive the strip");
+    }
+
+    #[test]
+    fn bootstrap_strips_copilot_login_pointer_despite_comment_header() {
+        let real_home = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(real_home.path().join(".copilot")).unwrap();
+        std::fs::write(
+            real_home.path().join(".copilot/config.json"),
+            "// User settings belong in settings.json.\n// This file is managed automatically.\n{\"lastLoggedInUser\":{\"host\":\"https://github.com\",\"login\":\"navinbruas\"},\"loggedInUsers\":[{\"host\":\"https://github.com\",\"login\":\"navinbruas\"}]}\n",
+        )
+        .unwrap();
+
+        let homes_root = tempfile::tempdir().unwrap();
+        let isolated = ensure_bootstrapped(homes_root.path(), real_home.path(), "copilot").unwrap();
+
+        let config: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(isolated.join(".copilot/config.json")).unwrap()).unwrap();
+        assert!(config.get("lastLoggedInUser").is_none(), "a freshly bootstrapped isolated home must not inherit the real login pointer");
+        assert!(config.get("loggedInUsers").is_none());
     }
 
     #[test]

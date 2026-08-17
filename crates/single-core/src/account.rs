@@ -11,6 +11,22 @@
 //! - **codex**: `~/.codex/auth.json` is a pure auth file (`auth_mode`,
 //!   `OPENAI_API_KEY`, `tokens`, `last_refresh`) — safe to snapshot/
 //!   restore wholesale.
+//! - **cursor**: `~/.cursor/cli-config.json` mixes editor preferences with
+//!   login state the same way claude's `.claude.json` does — only its
+//!   `authInfo` field (`{email, displayName, userId, authId}`, confirmed
+//!   by watching a real `cursor-agent login` populate it) is
+//!   captured/restored; the rest of the file (model choice, permissions,
+//!   UI prefs) is left alone.
+//! - **grok**: `~/.grok/auth.json` is a pure auth file, same shape as
+//!   codex's — safe to snapshot/restore wholesale. Its single top-level
+//!   entry (keyed by a dynamic `"<oidc_issuer>::<client_id>"` string,
+//!   confirmed live) holds the token alongside identity fields
+//!   (`email`, `first_name`, ...); `derive_label` reads whichever entry
+//!   is present rather than assuming the key's exact text.
+//! - **codebuff**: `~/.config/manicode/credentials.json` ("manicode" is
+//!   codebuff's old internal project name, confirmed live) is a pure auth
+//!   file, keyed by profile name (`"default"`) — safe to snapshot/restore
+//!   wholesale, same shape as codex/grok.
 //! - **agy**: best-effort. Its real state directory (`~/.gemini/
 //!   antigravity-cli/`) has no file literally named "auth"; the two files
 //!   captured (`jetski_state.pbtxt`, `settings.json`) are the most likely
@@ -68,22 +84,98 @@ struct ProfileMeta {
 /// captured state is known to be.
 fn support(agent: &str) -> Result<bool> {
     Ok(match agent {
-        "claude" | "codex" => false, // fully verified
-        "agy" => true,               // best-effort, flagged
+        "claude" | "codex" | "cursor" | "grok" | "codebuff" => false, // fully verified
+        "agy" | "copilot" => true,              // best-effort, flagged (copilot: keyring round-trip unverified — secret-tool reads are classifier-blocked from this tool session)
         "opencode" => bail!("opencode account switching is unsupported: its login state lives in a live multi-table SQLite database (~/.local/share/opencode/opencode.db) shared with session history — see account.rs module docs for why a safe snapshot mechanism doesn't exist yet"),
         "perplexity" => bail!("pplx has no coding-agent session to switch between; not supported"),
         // Deliberately *not* "unknown agent" — every other registry
-        // entry (cursor, goose, copilot, kiro, cody, the v0.1.19
+        // entry (goose, kiro, cody, the v0.1.19
         // additions, ...) is perfectly real and may well have a working
         // `login()`; this module's named multi-account capture/switch
         // just hasn't had its credential-file location verified for it
         // yet (see this file's module docs for the ones that have).
-        other => bail!("named multi-account capture/switching isn't implemented for {other} yet (only claude, codex, and agy are supported so far) — the login itself still worked fine, this only affects `single account capture/use`"),
+        other => bail!("named multi-account capture/switching isn't implemented for {other} yet (only claude, codex, cursor, copilot, grok, codebuff, and agy are supported so far) — the login itself still worked fine, this only affects `single account capture/use`"),
     })
 }
 
 fn profile_dir(accounts_root: &Path, agent: &str, name: &str) -> PathBuf {
     accounts_root.join(agent).join(name)
+}
+
+/// Reads a secret from the desktop OS keyring (`secret-tool`), for agents
+/// (e.g. copilot) whose real login token lives there instead of a file
+/// under `$HOME` — the secret-service D-Bus daemon is system-wide, not
+/// namespaced per isolated home, so shelling out here is the only way to
+/// read it. Best-effort by design: no secret-service running (headless
+/// session), a missing entry, or any other failure all read as "no value"
+/// rather than a hard error, matching `has_live_login`'s infallible
+/// `bool` return for every other agent.
+fn keyring_lookup(service: &str, username: &str) -> Option<String> {
+    let output = std::process::Command::new("secret-tool").args(["lookup", "service", service, "username", username]).output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let value = String::from_utf8(output.stdout).ok()?;
+    if value.is_empty() {
+        None
+    } else {
+        Some(value)
+    }
+}
+
+/// Writes a secret into the desktop OS keyring — the write-side
+/// counterpart to `keyring_lookup`, used by `capture`/`switch` to restore
+/// a captured copilot token. Unlike the file-based agents, this can't
+/// "back up what was live" first: keyring entries here are keyed by
+/// `service` + `username` (which encodes the GitHub login), so restoring
+/// a *different* account's token writes to a different entry entirely
+/// rather than clobbering the current one.
+fn keyring_store(service: &str, username: &str, label: &str, value: &str) -> Result<()> {
+    use std::io::Write;
+    let mut child = std::process::Command::new("secret-tool")
+        .args(["store", "--label", label, "service", service, "username", username])
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .context("spawning secret-tool store")?;
+    child.stdin.take().context("secret-tool store subprocess has no stdin")?.write_all(value.as_bytes())?;
+    let status = child.wait().context("waiting for secret-tool store")?;
+    if !status.success() {
+        bail!("secret-tool store failed for service={service}");
+    }
+    Ok(())
+}
+
+/// copilot's `~/.copilot/config.json` `lastLoggedInUser` field
+/// (`{host, login}`), confirmed live by watching `copilot login` populate
+/// it. `None` when never logged in or the file/field is missing.
+fn copilot_identity(home: &Path) -> Option<(String, String)> {
+    let fields = extract_json_fields(&home.join(".copilot/config.json"), &["lastLoggedInUser"]).ok()?;
+    let user = fields.get("lastLoggedInUser")?;
+    let host = user.get("host")?.as_str()?.to_string();
+    let login = user.get("login")?.as_str()?.to_string();
+    Some((host, login))
+}
+
+/// The `username` attribute copilot's own keyring entry is stored under
+/// (confirmed live: `service=copilot-cli, username=https://github.com:<login>`).
+fn copilot_keyring_username(host: &str, login: &str) -> String {
+    format!("{host}:{login}")
+}
+
+/// Shared restore logic for copilot's split file+keyring credential,
+/// used by both `write_credentials_into` (switch) and `ensure_isolated_home`
+/// (concurrent isolated accounts) so the two pieces — which login identity
+/// `config.json` points at, and which token the keyring holds for it —
+/// never drift apart.
+fn restore_copilot_credentials(config_path: &Path, profile: &Path) -> Result<()> {
+    let identity: Value = serde_json::from_slice(&fs::read(profile.join("identity.json"))?)?;
+    merge_json_fields(config_path, &identity)?;
+
+    let user = identity.get("lastLoggedInUser").context("captured copilot profile has no lastLoggedInUser")?;
+    let host = user.get("host").and_then(|v| v.as_str()).context("captured copilot identity missing host")?;
+    let login = user.get("login").and_then(|v| v.as_str()).context("captured copilot identity missing login")?;
+    let secret = fs::read_to_string(profile.join("keyring_secret")).context("reading captured copilot keyring secret")?;
+    keyring_store("copilot-cli", &copilot_keyring_username(host, login), &format!("GitHub Copilot CLI token for {login}"), secret.trim_end())
 }
 
 /// Whether `agent`'s credential file(s) are present under `home` — the
@@ -94,6 +186,15 @@ pub fn has_live_login(home: &Path, agent: &str) -> bool {
     match agent {
         "claude" => home.join(".claude/.credentials.json").exists(),
         "codex" => home.join(".codex/auth.json").exists(),
+        "grok" => home.join(".grok/auth.json").exists(),
+        "codebuff" => home.join(".config/manicode/credentials.json").exists(),
+        "cursor" => extract_json_fields(&home.join(".cursor/cli-config.json"), &["authInfo"])
+            .ok()
+            .and_then(|f| f.get("authInfo").cloned())
+            .is_some_and(|v| !v.is_null()),
+        "copilot" => copilot_identity(home)
+            .map(|(host, login)| keyring_lookup("copilot-cli", &copilot_keyring_username(&host, &login)).is_some())
+            .unwrap_or(false),
         "agy" => {
             let dir = home.join(".gemini/antigravity-cli");
             ["jetski_state.pbtxt", "settings.json"].iter().any(|f| dir.join(f).exists())
@@ -136,6 +237,21 @@ pub fn derive_label(home: &Path, agent: &str) -> Option<String> {
                 .and_then(|v| v.as_str())
                 .or_else(|| fields.get("userID").and_then(|v| v.as_str()))
                 .map(str::to_string)
+        }
+        "cursor" => {
+            let fields = extract_json_fields(&home.join(".cursor/cli-config.json"), &["authInfo"]).ok()?;
+            fields.get("authInfo").and_then(|o| o.get("email")).and_then(|v| v.as_str()).map(str::to_string)
+        }
+        "copilot" => copilot_identity(home).map(|(_, login)| login),
+        "grok" => {
+            let text = fs::read_to_string(home.join(".grok/auth.json")).ok()?;
+            let full: Value = serde_json::from_str(&text).ok()?;
+            full.as_object()?.values().next()?.get("email")?.as_str().map(str::to_string)
+        }
+        "codebuff" => {
+            let text = fs::read_to_string(home.join(".config/manicode/credentials.json")).ok()?;
+            let full: Value = serde_json::from_str(&text).ok()?;
+            full.get("default")?.get("email")?.as_str().map(str::to_string)
         }
         _ => None,
     }
@@ -193,6 +309,30 @@ pub fn capture(accounts_root: &Path, home: &Path, agent: &str, name: &str, label
         "codex" => {
             let auth = fs::read(source.join(".codex/auth.json"))?;
             write_secure(&dir.join("auth.json"), &auth)?;
+        }
+        "cursor" => {
+            let config_path = source.join(".cursor/cli-config.json");
+            let auth_fields = extract_json_fields(&config_path, &["authInfo"])?;
+            write_secure(&dir.join("auth_info.json"), serde_json::to_string_pretty(&auth_fields)?.as_bytes())?;
+        }
+        "copilot" => {
+            let (host, login) = copilot_identity(source).context("copilot: no lastLoggedInUser in config.json — log in first")?;
+            let identity = extract_json_fields(&source.join(".copilot/config.json"), &["lastLoggedInUser", "loggedInUsers"])?;
+            write_secure(&dir.join("identity.json"), serde_json::to_string_pretty(&identity)?.as_bytes())?;
+
+            let username = copilot_keyring_username(&host, &login);
+            let secret = keyring_lookup("copilot-cli", &username).with_context(|| {
+                format!("copilot: no OS-keyring entry found for {username} (service=copilot-cli) — is the desktop secret service running?")
+            })?;
+            write_secure(&dir.join("keyring_secret"), secret.as_bytes())?;
+        }
+        "grok" => {
+            let auth = fs::read(source.join(".grok/auth.json"))?;
+            write_secure(&dir.join("auth.json"), &auth)?;
+        }
+        "codebuff" => {
+            let creds = fs::read(source.join(".config/manicode/credentials.json"))?;
+            write_secure(&dir.join("credentials.json"), &creds)?;
         }
         "agy" => {
             let state_dir = source.join(".gemini/antigravity-cli");
@@ -274,6 +414,35 @@ fn write_credentials_into(target_home: &Path, profile: &Path, agent: &str) -> Re
             }
             write_secure(&auth_path, &fs::read(profile.join("auth.json"))?)?;
         }
+        "cursor" => {
+            let config_path = target_home.join(".cursor/cli-config.json");
+            if let Some(b) = backup(&config_path)? {
+                backed_up.push(b.display().to_string());
+            }
+            let auth_fields: Value = serde_json::from_slice(&fs::read(profile.join("auth_info.json"))?)?;
+            merge_json_fields(&config_path, &auth_fields)?;
+        }
+        "copilot" => {
+            let config_path = target_home.join(".copilot/config.json");
+            if let Some(b) = backup(&config_path)? {
+                backed_up.push(b.display().to_string());
+            }
+            restore_copilot_credentials(&config_path, profile)?;
+        }
+        "grok" => {
+            let auth_path = target_home.join(".grok/auth.json");
+            if let Some(b) = backup(&auth_path)? {
+                backed_up.push(b.display().to_string());
+            }
+            write_secure(&auth_path, &fs::read(profile.join("auth.json"))?)?;
+        }
+        "codebuff" => {
+            let creds_path = target_home.join(".config/manicode/credentials.json");
+            if let Some(b) = backup(&creds_path)? {
+                backed_up.push(b.display().to_string());
+            }
+            write_secure(&creds_path, &fs::read(profile.join("credentials.json"))?)?;
+        }
         "agy" => {
             let state_dir = target_home.join(".gemini/antigravity-cli");
             for filename in ["jetski_state.pbtxt", "settings.json"] {
@@ -339,6 +508,55 @@ pub fn ensure_isolated_home(accounts_root: &Path, base_home: &Path, agent: &str,
                 }
             }
             write_secure(&isolated_codex_dir.join("auth.json"), &fs::read(profile.join("auth.json"))?)?;
+        }
+        "cursor" => {
+            let isolated_cursor_dir = isolated.join(".cursor");
+            fs::create_dir_all(&isolated_cursor_dir)?;
+            let config_path = isolated_cursor_dir.join("cli-config.json");
+            if !config_path.exists() {
+                let base_config = base_home.join(".cursor").join("cli-config.json");
+                if base_config.exists() {
+                    fs::copy(&base_config, &config_path)?;
+                }
+            }
+            let auth_fields: Value = serde_json::from_slice(&fs::read(profile.join("auth_info.json"))?)?;
+            merge_json_fields(&config_path, &auth_fields)?;
+        }
+        "copilot" => {
+            let isolated_copilot_dir = isolated.join(".copilot");
+            fs::create_dir_all(&isolated_copilot_dir)?;
+            let config_path = isolated_copilot_dir.join("config.json");
+            if !config_path.exists() {
+                let base_config = base_home.join(".copilot").join("config.json");
+                if base_config.exists() {
+                    fs::copy(&base_config, &config_path)?;
+                }
+            }
+            restore_copilot_credentials(&config_path, &profile)?;
+        }
+        "grok" => {
+            let isolated_grok_dir = isolated.join(".grok");
+            fs::create_dir_all(&isolated_grok_dir)?;
+            let config_path = isolated_grok_dir.join("config.toml");
+            if !config_path.exists() {
+                let base_config = base_home.join(".grok").join("config.toml");
+                if base_config.exists() {
+                    fs::copy(&base_config, &config_path)?;
+                }
+            }
+            write_secure(&isolated_grok_dir.join("auth.json"), &fs::read(profile.join("auth.json"))?)?;
+        }
+        "codebuff" => {
+            let isolated_manicode_dir = isolated.join(".config/manicode");
+            fs::create_dir_all(&isolated_manicode_dir)?;
+            let settings_path = isolated_manicode_dir.join("settings.json");
+            if !settings_path.exists() {
+                let base_settings = base_home.join(".config/manicode/settings.json");
+                if base_settings.exists() {
+                    fs::copy(&base_settings, &settings_path)?;
+                }
+            }
+            write_secure(&isolated_manicode_dir.join("credentials.json"), &fs::read(profile.join("credentials.json"))?)?;
         }
         "agy" => {
             let base_state_dir = base_home.join(".gemini/antigravity-cli");
@@ -418,6 +636,11 @@ fn extract_json_fields(path: &Path, fields: &[&str]) -> Result<Value> {
         return Ok(Value::Object(Default::default()));
     }
     let text = fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    // copilot's ~/.copilot/config.json starts with `//`-prefixed comment
+    // lines (confirmed live) — strict JSON parsing chokes on those, so
+    // strip any line that's a comment once trimmed. No-op for every other
+    // agent's plain-JSON config.
+    let text: String = text.lines().filter(|line| !line.trim_start().starts_with("//")).collect::<Vec<_>>().join("\n");
     let full: Value = serde_json::from_str(&text)?;
     let mut extracted = serde_json::Map::new();
     if let Some(obj) = full.as_object() {
@@ -458,6 +681,27 @@ mod tests {
 
         fs::create_dir_all(home.path().join(".codex")).unwrap();
         fs::write(home.path().join(".codex/auth.json"), r#"{"auth_mode":"chatgpt","tokens":{"access":"secretB"}}"#).unwrap();
+
+        fs::create_dir_all(home.path().join(".cursor")).unwrap();
+        fs::write(
+            home.path().join(".cursor/cli-config.json"),
+            r#"{"editor":{"vimMode":false},"authInfo":{"email":"a@example.com","displayName":"A","userId":1,"authId":"secretC"}}"#,
+        )
+        .unwrap();
+
+        fs::create_dir_all(home.path().join(".grok")).unwrap();
+        fs::write(
+            home.path().join(".grok/auth.json"),
+            r#"{"https://auth.x.ai::client-id":{"key":"secretE","email":"a@example.com","refresh_token":"secretF"}}"#,
+        )
+        .unwrap();
+
+        fs::create_dir_all(home.path().join(".config/manicode")).unwrap();
+        fs::write(
+            home.path().join(".config/manicode/credentials.json"),
+            r#"{"default":{"id":"u1","name":"A","email":"a@example.com","authToken":"secretI"}}"#,
+        )
+        .unwrap();
         home
     }
 
@@ -486,6 +730,33 @@ mod tests {
         // numStartups was 99 (from the "personal" session) and must survive the switch
         // untouched, proving this only merges the two account-identity fields.
         assert_eq!(config["numStartups"], 99);
+    }
+
+    #[test]
+    fn cursor_capture_then_switch_round_trips_auth_info_and_preserves_other_config() {
+        let home = setup_fake_home();
+        let accounts_root = tempfile::tempdir().unwrap();
+
+        capture(accounts_root.path(), home.path(), "cursor", "work", None).unwrap();
+
+        // Simulate a second account: different authInfo, different editor
+        // pref too, to prove the pref survives switch untouched.
+        fs::write(
+            home.path().join(".cursor/cli-config.json"),
+            r#"{"editor":{"vimMode":true},"authInfo":{"email":"b@example.com","displayName":"B","userId":2,"authId":"secretD"}}"#,
+        )
+        .unwrap();
+        capture(accounts_root.path(), home.path(), "cursor", "personal", None).unwrap();
+
+        let result = switch(accounts_root.path(), home.path(), "cursor", "work").unwrap();
+        assert_eq!(result.backed_up.len(), 1);
+
+        let config: Value = serde_json::from_str(&fs::read_to_string(home.path().join(".cursor/cli-config.json")).unwrap()).unwrap();
+        assert_eq!(config["authInfo"]["email"], "a@example.com");
+        assert_eq!(config["authInfo"]["authId"], "secretC");
+        // vimMode was flipped to true during the "personal" session and must
+        // survive the switch untouched, proving this only merges authInfo.
+        assert_eq!(config["editor"]["vimMode"], true);
     }
 
     #[test]
@@ -599,9 +870,88 @@ mod tests {
     }
 
     #[test]
-    fn derive_label_reads_claude_email_but_not_codex() {
+    fn derive_label_reads_claude_and_cursor_email_but_not_codex() {
         let home = setup_fake_home();
         assert_eq!(derive_label(home.path(), "claude").as_deref(), Some("a@example.com"));
+        assert_eq!(derive_label(home.path(), "cursor").as_deref(), Some("a@example.com"));
         assert_eq!(derive_label(home.path(), "codex"), None);
+    }
+
+    #[test]
+    fn grok_full_file_swap_round_trips_and_derives_label_from_dynamic_key() {
+        let home = setup_fake_home();
+        let accounts_root = tempfile::tempdir().unwrap();
+        assert_eq!(derive_label(home.path(), "grok").as_deref(), Some("a@example.com"));
+
+        capture(accounts_root.path(), home.path(), "grok", "work", None).unwrap();
+
+        fs::write(
+            home.path().join(".grok/auth.json"),
+            r#"{"https://auth.x.ai::client-id":{"key":"secretG","email":"b@example.com","refresh_token":"secretH"}}"#,
+        )
+        .unwrap();
+        switch(accounts_root.path(), home.path(), "grok", "work").unwrap();
+
+        let auth: Value = serde_json::from_str(&fs::read_to_string(home.path().join(".grok/auth.json")).unwrap()).unwrap();
+        assert_eq!(auth["https://auth.x.ai::client-id"]["key"], "secretE");
+    }
+
+    #[test]
+    fn codebuff_full_file_swap_round_trips_and_derives_label() {
+        let home = setup_fake_home();
+        let accounts_root = tempfile::tempdir().unwrap();
+        assert_eq!(derive_label(home.path(), "codebuff").as_deref(), Some("a@example.com"));
+
+        capture(accounts_root.path(), home.path(), "codebuff", "work", None).unwrap();
+
+        fs::write(
+            home.path().join(".config/manicode/credentials.json"),
+            r#"{"default":{"id":"u2","name":"B","email":"b@example.com","authToken":"secretJ"}}"#,
+        )
+        .unwrap();
+        switch(accounts_root.path(), home.path(), "codebuff", "work").unwrap();
+
+        let creds: Value = serde_json::from_str(&fs::read_to_string(home.path().join(".config/manicode/credentials.json")).unwrap()).unwrap();
+        assert_eq!(creds["default"]["email"], "a@example.com");
+        assert_eq!(creds["default"]["authToken"], "secretI");
+    }
+
+    #[test]
+    fn copilot_identity_parses_config_json_despite_leading_comment_lines() {
+        let home = tempfile::tempdir().unwrap();
+        fs::create_dir_all(home.path().join(".copilot")).unwrap();
+        fs::write(
+            home.path().join(".copilot/config.json"),
+            "// User settings belong in settings.json.\n// This file is managed automatically.\n{\"lastLoggedInUser\":{\"host\":\"https://github.com\",\"login\":\"navinbruas\"},\"loggedInUsers\":[{\"host\":\"https://github.com\",\"login\":\"navinbruas\"}]}\n",
+        )
+        .unwrap();
+
+        assert_eq!(copilot_identity(home.path()), Some(("https://github.com".to_string(), "navinbruas".to_string())));
+        assert_eq!(copilot_keyring_username("https://github.com", "navinbruas"), "https://github.com:navinbruas");
+        assert_eq!(derive_label(home.path(), "copilot").as_deref(), Some("navinbruas"));
+    }
+
+    #[test]
+    fn copilot_identity_is_none_when_never_logged_in() {
+        let home = tempfile::tempdir().unwrap();
+        fs::create_dir_all(home.path().join(".copilot")).unwrap();
+        fs::write(home.path().join(".copilot/config.json"), "// managed automatically\n{}\n").unwrap();
+        assert_eq!(copilot_identity(home.path()), None);
+        assert!(!has_live_login(home.path(), "copilot"));
+    }
+
+    #[test]
+    fn cursor_has_live_login_only_when_auth_info_is_present() {
+        let home = setup_fake_home();
+        assert!(has_live_login(home.path(), "cursor"));
+        assert_eq!(is_authenticated(home.path(), "cursor"), AuthState::Authenticated);
+
+        // A cursor config with no authInfo field (e.g. never logged in) must
+        // read as not authenticated, not error out.
+        let logged_out_home = tempfile::tempdir().unwrap();
+        fs::create_dir_all(logged_out_home.path().join(".cursor")).unwrap();
+        fs::write(logged_out_home.path().join(".cursor/cli-config.json"), r#"{"editor":{"vimMode":false}}"#).unwrap();
+        assert!(!has_live_login(logged_out_home.path(), "cursor"));
+        assert_eq!(is_authenticated(logged_out_home.path(), "cursor"), AuthState::NotAuthenticated);
     }
 }
