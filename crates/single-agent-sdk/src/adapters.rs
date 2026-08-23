@@ -238,12 +238,23 @@ impl AgentAdapter for OpenCodeAdapter {
         }
     }
 
-    /// `opencode run -- "<prompt>" --dir <cwd>` — confirmed non-interactive
-    /// mode and `--dir` flag via `opencode run --help` on the reference
-    /// machine. The `--` is load-bearing: `single task run`'s memory/notes
-    /// preamble starts with a literal `"---"`, and without a `--`
-    /// separator `opencode run` misparsed that as a flag and dumped its
-    /// own help instead of running — confirmed live.
+    /// `opencode run --auto -- "<prompt>" --dir <cwd>` — confirmed
+    /// non-interactive mode and `--dir` flag via `opencode run --help` on
+    /// the reference machine. The `--` is load-bearing: `single task
+    /// run`'s memory/notes preamble starts with a literal `"---"`, and
+    /// without a `--` separator `opencode run` misparsed that as a flag
+    /// and dumped its own help instead of running — confirmed live.
+    ///
+    /// `--auto` is load-bearing too, found the hard way: without it,
+    /// `opencode run` asks for permission before editing any file —
+    /// there's no TTY to ask through in a headless run, so it just exits
+    /// having made no changes at all, reporting success (exit code 0,
+    /// empty output). Confirmed live: a real task assigned to opencode
+    /// through `orchestrate-graph` "completed" with an untouched worktree.
+    /// opencode's own help calls this "dangerous" since it also
+    /// auto-approves anything not explicitly denied — no more granular
+    /// "approve edits only" flag exists here the way codex's `-s
+    /// workspace-write` does.
     #[allow(clippy::too_many_arguments)]
     fn run_prompt(
         &self,
@@ -256,7 +267,7 @@ impl AgentAdapter for OpenCodeAdapter {
     ) -> Result<RunOutcome> {
         run_command_live(
             "opencode",
-            &["run".to_string(), "--".to_string(), prompt.to_string(), "--dir".to_string(), cwd.display().to_string()],
+            &["run".to_string(), "--auto".to_string(), "--".to_string(), prompt.to_string(), "--dir".to_string(), cwd.display().to_string()],
             cwd,
             backend,
             live_output_path,
@@ -954,12 +965,26 @@ impl AgentAdapter for GrokAdapter {
         Ok(unsupported_write("grok", home, "grok mcp is real (confirmed via --help) but its config file shape wasn't inspected without a logged-in account"))
     }
 
-    /// `grok --single=<prompt>` — confirmed via `grok --help` ("-p,
-    /// --single <PROMPT>: Single-turn prompt. Prints the response to
-    /// stdout and exits"). `--single` takes the value directly, so a `--`
-    /// separator doesn't help — confirmed live: `grok -p -- "---..."`
-    /// errored "a value is required for '--single <PROMPT>' but none was
-    /// supplied", while `grok --single="---..."` ran correctly.
+    /// `grok --single=<prompt> --always-approve` — confirmed via `grok
+    /// --help` ("-p, --single <PROMPT>: Single-turn prompt. Prints the
+    /// response to stdout and exits"). `--single` takes the value
+    /// directly, so a `--` separator doesn't help — confirmed live: `grok
+    /// -p -- "---..."` errored "a value is required for '--single
+    /// <PROMPT>' but none was supplied", while `grok --single="---..."`
+    /// ran correctly.
+    ///
+    /// `--always-approve` is load-bearing, found the hard way: grok's
+    /// default asks before editing a file, which silently goes nowhere in
+    /// a headless run — confirmed live, a real task assigned to grok
+    /// through `orchestrate-graph` "completed" with an untouched
+    /// worktree, printing only "I'll create X..." and stopping there.
+    /// `--permission-mode acceptEdits` (a *different*, top-level flag)
+    /// was tried first as the narrower option, matching the
+    /// least-privilege choice made for codex's `-s workspace-write` over
+    /// `danger-full-access` — it did not fix this, confirmed by the same
+    /// live no-op repro; `--always-approve` ("Auto-approve all tool
+    /// executions") does, confirmed by running it directly outside
+    /// SingleCLI. No narrower "edits only" flag was found for grok.
     #[allow(clippy::too_many_arguments)]
     fn run_prompt(
         &self,
@@ -970,7 +995,15 @@ impl AgentAdapter for GrokAdapter {
         timeout: Duration,
         cancel: Option<&std::sync::atomic::AtomicBool>,
     ) -> Result<RunOutcome> {
-        run_command_live("grok", &[format!("--single={prompt}")], cwd, backend, live_output_path, timeout, cancel)
+        run_command_live(
+            "grok",
+            &[format!("--single={prompt}"), "--always-approve".to_string()],
+            cwd,
+            backend,
+            live_output_path,
+            timeout,
+            cancel,
+        )
     }
 
     /// `grok login` — confirmed real via `grok --help` ("Sign in to
