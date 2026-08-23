@@ -34,7 +34,7 @@ use age::secrecy::SecretString;
 use anyhow::{Context, Result};
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 /// Reserved tar entry name for the secrets manifest — not a real relative
 /// path under `SingleDirs::root()`, so it can never collide with an
@@ -162,6 +162,15 @@ pub fn import(dirs: &SingleDirs, src_path: &Path, passphrase: &SecretString, dry
         let mut entry = entry?;
         let entry_path = entry.path()?.into_owned();
 
+        if !is_safe_entry_name(&entry_path) {
+            report.files.push(BackupItemResult {
+                path: entry_path.display().to_string(),
+                success: false,
+                detail: "rejected: unsafe archive entry name (must be a relative path with no '..')".into(),
+            });
+            continue;
+        }
+
         if entry_path == Path::new(SECRETS_MANIFEST_NAME) {
             let mut contents = String::new();
             entry.read_to_string(&mut contents).context("reading secrets manifest")?;
@@ -182,6 +191,18 @@ pub fn import(dirs: &SingleDirs, src_path: &Path, passphrase: &SecretString, dry
         }
     }
     Ok(report)
+}
+
+/// True only for entry names that can be safely joined under
+/// `SingleDirs::root()`: plain relative paths. Rejects absolute names
+/// (which `Path::join` would treat as a full replacement of the root) and
+/// any archive name containing prefix/root/parent components, so a hostile
+/// tar can never make restore write outside the config root.
+fn is_safe_entry_name(name: &Path) -> bool {
+    !name.is_absolute()
+        && name.components().all(|component| {
+            matches!(component, Component::Normal(_) | Component::CurDir)
+        })
 }
 
 fn restore_one_file<R: Read>(entry: &mut tar::Entry<R>, target: &Path) -> Result<()> {
@@ -316,5 +337,122 @@ mod tests {
             .filter(|e| e.file_name().to_string_lossy().contains(".bak-"))
             .collect();
         assert_eq!(backups.len(), 1, "the pre-existing config.toml should have been backed up before being overwritten");
+    }
+
+    #[test]
+    fn entry_name_validation_rejects_absolute_parent_root_and_prefix_paths() {
+        for safe in ["config.toml", "profiles/default.toml", "./nested/ok.toml"] {
+            assert!(is_safe_entry_name(Path::new(safe)), "{safe:?} should be accepted");
+        }
+        for hostile in ["/", "/etc/passwd", "/absolute.txt", "..", "../up.txt", "profiles/../../escape.txt"] {
+            assert!(!is_safe_entry_name(Path::new(hostile)), "{hostile:?} should be rejected");
+        }
+        // Drive prefixes only parse as `Component::Prefix` on Windows.
+        #[cfg(windows)]
+        assert!(!is_safe_entry_name(Path::new(r"C:\evil.txt")));
+    }
+
+    /// Appends one ustar entry carrying a completely raw name. Unlike
+    /// `tar::Builder` — which refuses non-relative names on write — this
+    /// mirrors what a hand-crafted hostile archive actually contains.
+    fn append_raw_ustar_entry(out: &mut Vec<u8>, name: &str, contents: &[u8]) {
+        assert!(name.len() <= 100, "test names must fit the ustar name field");
+        let mut header = [0u8; 512];
+        header[..name.len()].copy_from_slice(name.as_bytes());
+        let octal = |field: &mut [u8], value: usize| {
+            let digits = field.len() - 1;
+            let rendered = format!("{:0width$o}", value, width = digits);
+            field[..digits].copy_from_slice(rendered.as_bytes());
+            field[digits] = b'\0';
+        };
+        octal(&mut header[100..108], 0o600);
+        octal(&mut header[108..116], 0);
+        octal(&mut header[116..124], 0);
+        octal(&mut header[124..136], contents.len());
+        octal(&mut header[136..148], 0);
+        header[156] = b'0';
+        header[257..263].copy_from_slice(b"ustar\0");
+        header[263..265].copy_from_slice(b"00");
+        let checksum: u32 = header
+            .iter()
+            .enumerate()
+            .map(|(i, b)| if (148..156).contains(&i) { u32::from(b' ') } else { u32::from(*b) })
+            .sum();
+        header[148..154].copy_from_slice(format!("{checksum:06o}").as_bytes());
+        header[154] = b'\0';
+        header[155] = b' ';
+        out.extend_from_slice(&header);
+        out.extend_from_slice(contents);
+        out.extend(std::iter::repeat(0u8).take((512 - contents.len() % 512) % 512));
+    }
+
+    /// Builds an age-encrypted tar by hand — bypassing `export`, which can
+    /// only ever emit sanitized relative names — so hostile entry names can
+    /// be smuggled into `import`.
+    fn write_encrypted_archive(dest_path: &Path, passphrase: &SecretString, entries: &[(&str, &[u8])]) {
+        let mut tar_bytes = Vec::new();
+        for (name, contents) in entries {
+            append_raw_ustar_entry(&mut tar_bytes, name, contents);
+        }
+        tar_bytes.extend_from_slice(&[0u8; 1024]);
+        let encryptor = age::Encryptor::with_user_passphrase(passphrase.clone());
+        let mut encrypted = Vec::new();
+        let mut writer = encryptor.wrap_output(&mut encrypted).unwrap();
+        writer.write_all(&tar_bytes).unwrap();
+        writer.finish().unwrap();
+        std::fs::write(dest_path, &encrypted).unwrap();
+    }
+
+    #[test]
+    fn malicious_archive_entries_cannot_write_outside_root() {
+        let scratch = tempfile::tempdir().unwrap();
+        // Root sits three levels deep so "../.." from it lands back inside
+        // `scratch`, letting the traversal case be asserted on real paths.
+        let root = scratch.path().join("a/b/root");
+        let dirs = SingleDirs::from_root(root);
+        std::fs::create_dir_all(dirs.root()).unwrap();
+
+        let absolute_target = scratch.path().join("absolute-escape.txt");
+        let passphrase = SecretString::from("hostile-archive-pass".to_string());
+        let archive_dir = tempfile::tempdir().unwrap();
+        let archive_path = archive_dir.path().join("hostile.age");
+        write_encrypted_archive(
+            &archive_path,
+            &passphrase,
+            &[
+                ("config.toml", b"answer = 42\n".as_slice()),
+                (absolute_target.to_str().unwrap(), b"pwned\n"),
+                ("../../traversal-escape.txt", b"pwned\n"),
+                ("/etc/passwd", b"pwned\n"),
+                ("..", b"pwned\n"),
+            ],
+        );
+
+        let report = import(&dirs, &archive_path, &passphrase, false).unwrap();
+
+        let by_label = |name: &str| {
+            report
+                .files
+                .iter()
+                .find(|f| f.path == name)
+                .unwrap_or_else(|| panic!("entry {name:?} missing from report: {:?}", report.files))
+        };
+        assert!(by_label("config.toml").success, "benign entries must still restore: {:?}", report.files);
+        for hostile in [
+            absolute_target.to_str().unwrap(),
+            "../../traversal-escape.txt",
+            "/etc/passwd",
+            "..",
+        ] {
+            assert!(!by_label(hostile).success, "entry {hostile:?} must be rejected: {:?}", report.files);
+        }
+
+        assert_eq!(std::fs::read_to_string(dirs.config_file()).unwrap(), "answer = 42\n");
+        assert!(!absolute_target.exists());
+        for escaped in ["traversal-escape.txt"] {
+            for base in [scratch.path().to_path_buf(), scratch.path().join("a"), scratch.path().join("a/b")] {
+                assert!(!base.join(escaped).exists(), "{} must not exist anywhere above root", base.join(escaped).display());
+            }
+        }
     }
 }
