@@ -115,16 +115,28 @@ impl AgentAdapter for CodexAdapter {
         }
     }
 
-    /// `codex exec --skip-git-repo-check -- "<prompt>"` — confirmed
-    /// non-interactive mode via `codex exec --help` on the reference
-    /// machine. `--skip-git-repo-check` is also real (confirmed the same
-    /// way): without it, `codex exec` refuses to run in a directory that
-    /// isn't a trusted git repo, which would otherwise break `single task
-    /// run --agent codex` for any `cwd` that isn't already a repo. This
-    /// doesn't bypass a SingleCLI-level trust decision — `cwd` here is
-    /// already whatever directory the caller (a plain `task run`, or
-    /// `orchestrate`'s shared worktree) deliberately chose; it just stops
-    /// codex from re-litigating that choice with its own redundant check.
+    /// `codex exec -s workspace-write --skip-git-repo-check -- "<prompt>"`
+    /// — confirmed non-interactive mode via `codex exec --help` on the
+    /// reference machine. `--skip-git-repo-check` is also real (confirmed
+    /// the same way): without it, `codex exec` refuses to run in a
+    /// directory that isn't a trusted git repo, which would otherwise
+    /// break `single task run --agent codex` for any `cwd` that isn't
+    /// already a repo. This doesn't bypass a SingleCLI-level trust
+    /// decision — `cwd` here is already whatever directory the caller (a
+    /// plain `task run`, or `orchestrate`'s shared worktree) deliberately
+    /// chose; it just stops codex from re-litigating that choice with its
+    /// own redundant check.
+    ///
+    /// `-s workspace-write` is load-bearing, found the hard way: codex
+    /// exec's *default* sandbox is `read-only` (confirmed via `codex exec
+    /// --help`'s `[possible values: read-only, workspace-write,
+    /// danger-full-access]`) — every task ever run through this adapter
+    /// before this was added could only inspect the repo, never actually
+    /// change anything, and failed silently rather than erroring (codex
+    /// just reports it's blocked by the sandbox in its own output, exit
+    /// code still looked like success). `workspace-write` scopes writes
+    /// to `cwd` (the worktree/directory the caller already chose) without
+    /// granting the full host access `danger-full-access` would.
     ///
     /// The `--` before `prompt` is load-bearing too, confirmed live:
     /// `single task run`'s memory/notes preamble starts with a literal
@@ -143,7 +155,14 @@ impl AgentAdapter for CodexAdapter {
     ) -> Result<RunOutcome> {
         run_command_live(
             "codex",
-            &["exec".to_string(), "--skip-git-repo-check".to_string(), "--".to_string(), prompt.to_string()],
+            &[
+                "exec".to_string(),
+                "-s".to_string(),
+                "workspace-write".to_string(),
+                "--skip-git-repo-check".to_string(),
+                "--".to_string(),
+                prompt.to_string(),
+            ],
             cwd,
             backend,
             live_output_path,
