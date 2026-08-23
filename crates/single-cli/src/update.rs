@@ -93,17 +93,30 @@ pub fn check_latest(channel: &str) -> Result<ReleaseInfo> {
 /// should treat that as "an update might be available" rather than
 /// silently assuming there isn't one.
 pub fn is_newer(current: &str, latest_tag: &str) -> Option<bool> {
-    let parse = |s: &str| -> Option<(u64, u64, u64)> {
-        let s = s.strip_prefix('v').unwrap_or(s);
-        let mut parts = s.split('.');
-        let major = parts.next()?.parse().ok()?;
-        let minor = parts.next()?.parse().ok()?;
-        let patch = parts.next()?.parse().ok()?;
-        Some((major, minor, patch))
-    };
-    let current = parse(current)?;
-    let latest = parse(latest_tag)?;
+    let current = parse_stable_version(current)?;
+    let latest = parse_stable_version(latest_tag)?;
     Some(latest > current)
+}
+
+/// Complete stable `v?MAJOR.MINOR.PATCH` only. Extra segments (`1.2.3.4`)
+/// and nonnumeric components (`1.2.x`, `1.2.3-beta`) are rejected.
+fn parse_stable_version(s: &str) -> Option<(u64, u64, u64)> {
+    let s = s.strip_prefix('v').unwrap_or(s);
+    let mut parts = s.split('.');
+    let major = parse_version_component(parts.next()?)?;
+    let minor = parse_version_component(parts.next()?)?;
+    let patch = parse_version_component(parts.next()?)?;
+    match parts.next() {
+        Some(_) => None,
+        None => Some((major, minor, patch)),
+    }
+}
+
+fn parse_version_component(s: &str) -> Option<u64> {
+    if s.is_empty() || !s.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    s.parse().ok()
 }
 
 /// Downloads the release asset and atomically replaces `single`/
@@ -181,17 +194,56 @@ mod tests {
     use super::*;
 
     #[test]
-    fn is_newer_detects_a_real_version_bump() {
-        assert_eq!(is_newer("0.1.0", "v0.1.1"), Some(true));
-        assert_eq!(is_newer("0.1.1", "v0.1.1"), Some(false));
-        assert_eq!(is_newer("0.2.0", "v0.1.9"), Some(false));
-        assert_eq!(is_newer("0.1.0", "v1.0.0"), Some(true));
+    fn is_newer_compares_complete_stable_tags() {
+        let cases = [
+            ("0.1.0", "v0.1.1", Some(true)),
+            ("0.1.1", "v0.1.1", Some(false)),
+            ("0.2.0", "v0.1.9", Some(false)),
+            ("0.1.0", "v1.0.0", Some(true)),
+            ("1.0.0", "v1.0.1", Some(true)),
+            ("1.0.0", "v1.1.0", Some(true)),
+            ("v1.2.3", "1.2.3", Some(false)),
+            ("v1.2.3", "v1.2.3", Some(false)),
+            ("1.2.3", "1.2.3", Some(false)),
+            ("v2.0.0", "v1.9.9", Some(false)),
+            ("0.0.1", "0.0.2", Some(true)),
+            ("9.9.9", "v10.0.0", Some(true)),
+        ];
+        for (current, latest, expected) in cases {
+            assert_eq!(is_newer(current, latest), expected, "{current} vs {latest}");
+        }
     }
 
     #[test]
-    fn is_newer_returns_none_for_unparseable_tags() {
-        assert_eq!(is_newer("0.1.0", "nightly"), None);
-        assert_eq!(is_newer("0.1.0", "not-a-version"), None);
+    fn is_newer_rejects_malformed_tags() {
+        let cases = [
+            ("0.1.0", "nightly"),
+            ("0.1.0", "not-a-version"),
+            ("0.1.0", "v1.2.3.4"),
+            ("0.1.0", "1.2.3.4"),
+            ("0.1.0", "1.2"),
+            ("0.1.0", "1"),
+            ("0.1.0", "v1.2"),
+            ("0.1.0", "1.2.x"),
+            ("0.1.0", "1.2.3-beta"),
+            ("0.1.0", "v1.2.3-rc.1"),
+            ("0.1.0", "1.2.3+build"),
+            ("0.1.0", "1.2.3."),
+            ("0.1.0", ".1.2.3"),
+            ("0.1.0", "1..2"),
+            ("0.1.0", ""),
+            ("0.1.0", "v"),
+            ("0.1.0", "vv1.2.3"),
+            ("0.1.0", "V1.2.3"),
+            ("0.1.0", "+1.2.3"),
+            ("1.2.3.4", "v1.2.4"),
+            ("1.2.x", "v1.2.3"),
+            ("1.2", "v1.2.3"),
+            ("1.2.3-beta", "v1.2.4"),
+        ];
+        for (current, latest) in cases {
+            assert_eq!(is_newer(current, latest), None, "{current} vs {latest}");
+        }
     }
 
     #[test]
