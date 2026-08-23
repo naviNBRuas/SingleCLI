@@ -48,7 +48,16 @@ pub fn send(socket_path: &Path, request: Request) -> Result<Response> {
 fn wants_background(request: &Request) -> bool {
     matches!(
         request,
-        Request::TaskRun { background: true, .. } | Request::OrchestrateParallel { background: true, .. }
+        Request::TaskRun {
+            background: true,
+            ..
+        } | Request::OrchestrateParallel {
+            background: true,
+            ..
+        } | Request::OrchestrateGraph {
+            background: true,
+            ..
+        }
     )
 }
 

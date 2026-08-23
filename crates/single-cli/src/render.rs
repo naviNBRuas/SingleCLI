@@ -25,7 +25,10 @@ fn print_data(data: ResponseData) {
         ResponseData::Status(s) => {
             println!("SingleCLI runtime v{}", s.version);
             println!("  profile:  {}", s.active_profile);
-            println!("  agents:   {}/{} detected", s.agents_detected, s.agents_known);
+            println!(
+                "  agents:   {}/{} detected",
+                s.agents_detected, s.agents_known
+            );
             println!("  socket:   {}", s.socket_path);
             println!("  db:       {}", s.db_path);
         }
@@ -44,8 +47,17 @@ fn print_data(data: ResponseData) {
             for agent in agents {
                 let dot = if agent.detected { "●" } else { "○" };
                 let version = agent.version.as_deref().unwrap_or("-");
-                let flag = if agent.unverified { " (unverified)" } else { "" };
-                println!("{dot} {:<12} {:<20} {}{flag}", agent.name, version, install_summary(&agent.install_method));
+                let flag = if agent.unverified {
+                    " (unverified)"
+                } else {
+                    ""
+                };
+                println!(
+                    "{dot} {:<12} {:<20} {}{flag}",
+                    agent.name,
+                    version,
+                    install_summary(&agent.install_method)
+                );
             }
         }
         ResponseData::Agent(agent) => {
@@ -53,10 +65,16 @@ fn print_data(data: ResponseData) {
             println!("  adapter:      {}", agent.adapter);
             println!("  command:      {}", agent.command);
             println!("  detected:     {}", agent.detected);
-            println!("  version:      {}", agent.version.as_deref().unwrap_or("-"));
+            println!(
+                "  version:      {}",
+                agent.version.as_deref().unwrap_or("-")
+            );
             println!("  install:      {}", install_summary(&agent.install_method));
             if let Some(install) = &agent.bootstrap_install {
-                println!("  bootstrap:    {} (source: {})", install.command, install.source);
+                println!(
+                    "  bootstrap:    {} (source: {})",
+                    install.command, install.source
+                );
             }
             println!(
                 "  capabilities: mcp={} lsp={} tools={} sessions={} streaming={} structured_output={}",
@@ -79,7 +97,11 @@ fn print_data(data: ResponseData) {
                 println!("(no mcp servers registered)");
             }
             for server in servers {
-                let flag = if server.enabled { "enabled" } else { "disabled" };
+                let flag = if server.enabled {
+                    "enabled"
+                } else {
+                    "disabled"
+                };
                 println!("{:<12} {:<40} [{flag}]", server.name, server.command);
             }
         }
@@ -88,7 +110,10 @@ fn print_data(data: ResponseData) {
             println!("  command: {} {}", server.command, server.args.join(" "));
             println!("  enabled: {}", server.enabled);
             if !server.env.is_empty() {
-                println!("  env:     {}", server.env.keys().cloned().collect::<Vec<_>>().join(", "));
+                println!(
+                    "  env:     {}",
+                    server.env.keys().cloned().collect::<Vec<_>>().join(", ")
+                );
             }
         }
         ResponseData::McpPresets(presets) => {
@@ -97,20 +122,37 @@ fn print_data(data: ResponseData) {
             }
         }
         ResponseData::McpGatewayMode(enabled) => {
-            println!("gateway mode: {}", if enabled { "enabled" } else { "disabled" });
+            println!(
+                "gateway mode: {}",
+                if enabled { "enabled" } else { "disabled" }
+            );
         }
         ResponseData::LspServers(servers) => {
             if servers.is_empty() {
                 println!("(no lsp servers registered)");
             }
             for server in servers {
-                let flag = if server.enabled { "enabled" } else { "disabled" };
-                println!("{:<12} {:<30} {} [{flag}]", server.name, server.command, server.extensions.join(","));
+                let flag = if server.enabled {
+                    "enabled"
+                } else {
+                    "disabled"
+                };
+                println!(
+                    "{:<12} {:<30} {} [{flag}]",
+                    server.name,
+                    server.command,
+                    server.extensions.join(",")
+                );
             }
         }
         ResponseData::LspPresets(presets) => {
             for p in presets {
-                println!("{:<14} {:<28} {}", p.name, format!("{} {}", p.command, p.args.join(" ")), p.extensions.join(","));
+                println!(
+                    "{:<14} {:<28} {}",
+                    p.name,
+                    format!("{} {}", p.command, p.args.join(" ")),
+                    p.extensions.join(",")
+                );
             }
         }
         ResponseData::LspServer(server) => {
@@ -125,7 +167,10 @@ fn print_data(data: ResponseData) {
             }
             for tool in tools {
                 let flag = if tool.enabled { "enabled" } else { "disabled" };
-                println!("{:<12} {:?} {:<40} [{flag}]", tool.name, tool.risk_level, tool.description);
+                println!(
+                    "{:<12} {:?} {:<40} [{flag}]",
+                    tool.name, tool.risk_level, tool.description
+                );
             }
         }
         ResponseData::Tool(tool) => {
@@ -190,9 +235,16 @@ fn print_data(data: ResponseData) {
                 println!("(no notes)");
             }
             for note in notes {
-                let read = if note.read_at.is_some() { " (read)" } else { "" };
+                let read = if note.read_at.is_some() {
+                    " (read)"
+                } else {
+                    ""
+                };
                 let to = note.to_agent.as_deref().unwrap_or("*");
-                println!("#{:<5} {} -> {:<10} [{}]{read}  {}", note.id, note.from_agent, to, note.topic, note.created_at);
+                println!(
+                    "#{:<5} {} -> {:<10} [{}]{read}  {}",
+                    note.id, note.from_agent, to, note.topic, note.created_at
+                );
                 println!("        {}", note.content);
             }
         }
@@ -202,15 +254,39 @@ fn print_data(data: ResponseData) {
                 println!("(no documents)");
             }
             for doc in docs {
-                println!("#{:<5} {:<10} {:<30} {} chars  {}", doc.id, doc.project.as_deref().unwrap_or("-"), doc.title, doc.extracted_chars, doc.ingested_at);
+                println!(
+                    "#{:<5} {:<10} {:<30} {} chars  {}",
+                    doc.id,
+                    doc.project.as_deref().unwrap_or("-"),
+                    doc.title,
+                    doc.extracted_chars,
+                    doc.ingested_at
+                );
             }
         }
         ResponseData::Context(ctx) => {
             println!("cwd:       {}", ctx.cwd);
-            println!("repo root: {}", ctx.repo_root.as_deref().unwrap_or("(not a git repo)"));
+            println!(
+                "repo root: {}",
+                ctx.repo_root.as_deref().unwrap_or("(not a git repo)")
+            );
             println!("branch:    {}", ctx.branch.as_deref().unwrap_or("-"));
-            println!("changed:   {}", if ctx.changed_files.is_empty() { "(clean)".to_string() } else { ctx.changed_files.join(", ") });
-            println!("docs:      {}", if ctx.project_docs.is_empty() { "(none found)".to_string() } else { ctx.project_docs.join(", ") });
+            println!(
+                "changed:   {}",
+                if ctx.changed_files.is_empty() {
+                    "(clean)".to_string()
+                } else {
+                    ctx.changed_files.join(", ")
+                }
+            );
+            println!(
+                "docs:      {}",
+                if ctx.project_docs.is_empty() {
+                    "(none found)".to_string()
+                } else {
+                    ctx.project_docs.join(", ")
+                }
+            );
         }
         ResponseData::Task(task) => print_task(&task),
         ResponseData::Tasks(tasks) => {
@@ -236,13 +312,28 @@ fn print_data(data: ResponseData) {
                     single_protocol::TaskStatus::Failed => "✗",
                     _ => "·",
                 };
-                println!("  {mark} step {} — {} (task #{}): {}", i + 1, r.agent, r.id, r.summary.clone().unwrap_or_default());
+                println!(
+                    "  {mark} step {} — {} (task #{}): {}",
+                    i + 1,
+                    r.agent,
+                    r.id,
+                    r.summary.clone().unwrap_or_default()
+                );
             }
             if let Some(last) = records.last() {
                 if last.status == single_protocol::TaskStatus::Failed {
-                    eprintln!("relay stopped early after a failed step; see `single task inspect {}`", last.id);
+                    eprintln!(
+                        "relay stopped early after a failed step; see `single task inspect {}`",
+                        last.id
+                    );
                     std::process::exit(1);
                 }
+            }
+        }
+        ResponseData::OrchestrateGraphResult(records) => {
+            println!("Graph ({} node(s)):", records.len());
+            for r in records {
+                print_task(&r);
             }
         }
         ResponseData::AccountProfile(info) => print_account_profile(&info),
@@ -251,9 +342,20 @@ fn print_data(data: ResponseData) {
                 println!("(no captured account profiles)");
             }
             for p in profiles {
-                let flag = if p.unverified_complete { " (best-effort — not confirmed complete)" } else { "" };
+                let flag = if p.unverified_complete {
+                    " (best-effort — not confirmed complete)"
+                } else {
+                    ""
+                };
                 let label = p.label.as_deref().unwrap_or("-");
-                println!("{:<10} {:<16} {:<28} [{}] {}{flag}", p.agent, p.name, label, p.status.as_str(), p.captured_at);
+                println!(
+                    "{:<10} {:<16} {:<28} [{}] {}{flag}",
+                    p.agent,
+                    p.name,
+                    label,
+                    p.status.as_str(),
+                    p.captured_at
+                );
             }
         }
         ResponseData::AccountSwitched(result) => {
@@ -265,7 +367,9 @@ fn print_data(data: ResponseData) {
         ResponseData::DockerContainerInfo(info) => print_docker_info(&info),
         ResponseData::DockerContainerList(infos) => {
             if infos.is_empty() {
-                println!("(no agents/accounts configured for docker — see `single agent docker enable`)");
+                println!(
+                    "(no agents/accounts configured for docker — see `single agent docker enable`)"
+                );
             }
             for info in infos {
                 print_docker_info(&info);
@@ -276,7 +380,11 @@ fn print_data(data: ResponseData) {
                 println!("(no agents configured for mid-run permission interception — see `single agent hooks enable`)");
             }
             for (agent, enabled) in statuses {
-                println!("{:<12} {}", agent, if enabled { "enabled" } else { "disabled" });
+                println!(
+                    "{:<12} {}",
+                    agent,
+                    if enabled { "enabled" } else { "disabled" }
+                );
             }
         }
         ResponseData::Approvals(approvals) => {
@@ -311,7 +419,12 @@ fn print_data(data: ResponseData) {
                 println!("(no providers registered)");
             }
             for p in providers {
-                println!("{:<16} {:<20} {}", p.name, p.env_var_name, p.base_url.as_deref().unwrap_or("-"));
+                println!(
+                    "{:<16} {:<20} {}",
+                    p.name,
+                    p.env_var_name,
+                    p.base_url.as_deref().unwrap_or("-")
+                );
             }
         }
         ResponseData::ProviderPresets(presets) => {
@@ -333,13 +446,21 @@ fn print_data(data: ResponseData) {
                 println!("(no labeled keys for this provider)");
             }
             for k in keys {
-                println!("{:<14} agent: {}", k.label, k.agent.as_deref().unwrap_or("-"));
+                println!(
+                    "{:<14} agent: {}",
+                    k.label,
+                    k.agent.as_deref().unwrap_or("-")
+                );
             }
         }
         ResponseData::BillingProviders(providers) => {
             for p in providers {
                 let status = if !p.verified { "unverified" } else { "" };
-                let admin = if p.admin_key_configured { "admin key set" } else { "admin key not set" };
+                let admin = if p.admin_key_configured {
+                    "admin key set"
+                } else {
+                    "admin key not set"
+                };
                 println!("{:<12} {:<11} {}", p.provider, status, admin);
                 if let Some(notes) = p.notes {
                     println!("             {notes}");
@@ -347,7 +468,13 @@ fn print_data(data: ResponseData) {
             }
         }
         ResponseData::Usage(summary) => {
-            println!("Provider spend (as of {}):", summary.last_refreshed.as_deref().unwrap_or("never refreshed"));
+            println!(
+                "Provider spend (as of {}):",
+                summary
+                    .last_refreshed
+                    .as_deref()
+                    .unwrap_or("never refreshed")
+            );
             if summary.provider_usage.is_empty() {
                 println!("  (no provider usage data — configure a billing admin key with `single provider set-billing-key`)");
             }
@@ -366,20 +493,34 @@ fn print_data(data: ResponseData) {
             println!();
             println!("Connected agents (local stats only, no billing API):");
             for a in &summary.agent_local_stats {
-                println!("  {:<14} runs: {:<5} avg: {}ms  last: {}", a.agent, a.run_count, a.avg_duration_ms, a.last_run_at.as_deref().unwrap_or("never"));
+                println!(
+                    "  {:<14} runs: {:<5} avg: {}ms  last: {}",
+                    a.agent,
+                    a.run_count,
+                    a.avg_duration_ms,
+                    a.last_run_at.as_deref().unwrap_or("never")
+                );
             }
         }
         ResponseData::Plugin(p) => {
             println!("name:            {}", p.name);
             println!("target:          {}", p.target);
-            println!("opencode_module: {}", p.opencode_module.as_deref().unwrap_or("-"));
+            println!(
+                "opencode_module: {}",
+                p.opencode_module.as_deref().unwrap_or("-")
+            );
         }
         ResponseData::Plugins(plugins) => {
             if plugins.is_empty() {
                 println!("(no plugins registered)");
             }
             for p in plugins {
-                println!("{:<16} {:<28} {}", p.name, p.target, p.opencode_module.as_deref().unwrap_or("-"));
+                println!(
+                    "{:<16} {:<28} {}",
+                    p.name,
+                    p.target,
+                    p.opencode_module.as_deref().unwrap_or("-")
+                );
             }
         }
         ResponseData::PluginPresets(presets) => {
@@ -400,7 +541,12 @@ fn print_data(data: ResponseData) {
                 println!("(no matching entities)");
             }
             for e in entities {
-                println!("{:<20} {:<14} {} observation(s)", e.name, e.entity_type, e.observations.len());
+                println!(
+                    "{:<20} {:<14} {} observation(s)",
+                    e.name,
+                    e.entity_type,
+                    e.observations.len()
+                );
             }
         }
         ResponseData::KgGraph(graph) => {
@@ -413,7 +559,10 @@ fn print_data(data: ResponseData) {
             }
             println!("Relations:");
             for r in &graph.relations {
-                println!("  {} --[{}]--> {}", r.from_entity, r.relation_type, r.to_entity);
+                println!(
+                    "  {} --[{}]--> {}",
+                    r.from_entity, r.relation_type, r.to_entity
+                );
             }
         }
         ResponseData::CacheValue(value) => match value {
@@ -431,11 +580,23 @@ fn print_data(data: ResponseData) {
                 println!("{k}");
             }
         }
-        ResponseData::CacheStatus { configured, url, reachable } => {
+        ResponseData::CacheStatus {
+            configured,
+            url,
+            reachable,
+        } => {
             if !configured {
                 println!("Redis: not configured (set SINGLE_REDIS_URL to enable)");
             } else {
-                println!("Redis: {} ({})", url.unwrap_or_default(), if reachable { "reachable" } else { "unreachable" });
+                println!(
+                    "Redis: {} ({})",
+                    url.unwrap_or_default(),
+                    if reachable {
+                        "reachable"
+                    } else {
+                        "unreachable"
+                    }
+                );
             }
         }
         ResponseData::VectorHits(hits) => {
@@ -446,23 +607,41 @@ fn print_data(data: ResponseData) {
                 println!("#{:<6} score={:<8.4} {}", h.id, h.score, h.payload);
             }
         }
-        ResponseData::VectorStatus { configured, url, reachable } => {
+        ResponseData::VectorStatus {
+            configured,
+            url,
+            reachable,
+        } => {
             if !configured {
                 println!("Qdrant: not configured (set SINGLE_QDRANT_URL to enable)");
             } else {
-                println!("Qdrant: {} ({})", url.unwrap_or_default(), if reachable { "reachable" } else { "unreachable" });
+                println!(
+                    "Qdrant: {} ({})",
+                    url.unwrap_or_default(),
+                    if reachable {
+                        "reachable"
+                    } else {
+                        "unreachable"
+                    }
+                );
             }
         }
         ResponseData::AgentInstallResult(action) => {
             let mark = if action.executed { "✓" } else { "·" };
-            println!("{mark} {:<12} {:?}: {}", action.agent, action.action, action.detail);
+            println!(
+                "{mark} {:<12} {:?}: {}",
+                action.agent, action.action, action.detail
+            );
         }
         ResponseData::SetupPlan(plan) => {
             let mode = if plan.dry_run { "dry run" } else { "applied" };
             println!("Setup plan ({mode}):");
             for action in plan.actions {
                 let mark = if action.executed { "✓" } else { "·" };
-                println!("  {mark} {:<12} {:?}: {}", action.agent, action.action, action.detail);
+                println!(
+                    "  {mark} {:<12} {:?}: {}",
+                    action.agent, action.action, action.detail
+                );
             }
         }
         ResponseData::IntegrationResult(result) => {
@@ -470,7 +649,10 @@ fn print_data(data: ResponseData) {
             println!("Integrations ({mode}):");
             for write in result.writes {
                 let mark = if write.applied { "✓" } else { "·" };
-                println!("  {mark} {:<12} {} — {}", write.agent, write.config_path, write.detail);
+                println!(
+                    "  {mark} {:<12} {} — {}",
+                    write.agent, write.config_path, write.detail
+                );
                 if let Some(backup) = write.backup_path {
                     println!("      backup: {backup}");
                 }
@@ -534,7 +716,10 @@ fn print_document(doc: &single_protocol::DocumentInfo) {
     println!("  title:      {}", doc.title);
     println!("  project:    {}", doc.project.as_deref().unwrap_or("-"));
     println!("  source:     {}", doc.source_path);
-    println!("  extracted:  {} chars (memory #{})", doc.extracted_chars, doc.memory_id);
+    println!(
+        "  extracted:  {} chars (memory #{})",
+        doc.extracted_chars, doc.memory_id
+    );
     println!("  ingested:   {}", doc.ingested_at);
 }
 

@@ -1,8 +1,8 @@
 pub mod billing;
 pub mod bootstrap;
 pub mod context;
-pub mod doctor;
 pub mod docker;
+pub mod doctor;
 pub mod documents;
 pub mod embeddings;
 pub mod handlers;
@@ -10,6 +10,7 @@ pub mod integrations;
 pub mod knowledge_graph;
 pub mod memory;
 pub mod orchestrate;
+pub mod orchestrate_graph;
 pub mod qdrant_backend;
 pub mod redis_backend;
 pub mod registry;

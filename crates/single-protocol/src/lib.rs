@@ -22,49 +22,99 @@ pub enum Request {
     /// agent CLI is invisible to detection until the daemon is restarted.
     Shutdown,
     AgentList,
-    AgentInspect { name: String },
+    AgentInspect {
+        name: String,
+    },
     McpList,
-    McpAdd { server: McpServerSpec },
-    McpRemove { name: String },
-    McpEnable { name: String },
-    McpDisable { name: String },
-    McpInspect { name: String },
+    McpAdd {
+        server: McpServerSpec,
+    },
+    McpRemove {
+        name: String,
+    },
+    McpEnable {
+        name: String,
+    },
+    McpDisable {
+        name: String,
+    },
+    McpInspect {
+        name: String,
+    },
     McpPresetList,
-    McpAddPreset { name: String },
+    McpAddPreset {
+        name: String,
+    },
     /// Toggles gateway mode (see `single_core::mcp::gateway_mode`) — takes
     /// effect on the next `single install-integrations --yes`, not
     /// retroactively.
-    McpGatewaySetEnabled { enabled: bool },
+    McpGatewaySetEnabled {
+        enabled: bool,
+    },
     McpGatewayStatus,
     LspList,
-    LspAdd { server: LspServerSpec },
-    LspRemove { name: String },
-    LspInspect { name: String },
+    LspAdd {
+        server: LspServerSpec,
+    },
+    LspRemove {
+        name: String,
+    },
+    LspInspect {
+        name: String,
+    },
     LspPresetList,
-    LspAddPreset { name: String },
+    LspAddPreset {
+        name: String,
+    },
     ToolList,
-    ToolAdd { tool: ToolSpec },
-    ToolInspect { name: String },
-    ToolEnable { name: String },
-    ToolDisable { name: String },
+    ToolAdd {
+        tool: ToolSpec,
+    },
+    ToolInspect {
+        name: String,
+    },
+    ToolEnable {
+        name: String,
+    },
+    ToolDisable {
+        name: String,
+    },
     SecretList,
-    SecretSet { name: String, value: String },
+    SecretSet {
+        name: String,
+        value: String,
+    },
     /// Returns whether the secret exists and its value in one shot — the
     /// value never passes through the runtime's event log (see
     /// `single-runtime`'s `handlers.rs`), only through this direct response.
-    SecretGet { name: String },
-    SecretDelete { name: String },
+    SecretGet {
+        name: String,
+    },
+    SecretDelete {
+        name: String,
+    },
     SkillList,
-    SkillInstall { name: String, source_path: String },
-    SkillRemove { name: String },
-    SkillInspect { name: String },
+    SkillInstall {
+        name: String,
+        source_path: String,
+    },
+    SkillRemove {
+        name: String,
+    },
+    SkillInspect {
+        name: String,
+    },
     /// Copies a skill into Claude Code's real skill directory
     /// (`~/.claude/skills/<name>/`) — see `single_core::skills::sync_to_claude`.
-    SkillSyncClaude { name: String },
+    SkillSyncClaude {
+        name: String,
+    },
     /// Lists the curated starter skills bundled with SingleCLI itself —
     /// see `single_core::skills::starter_set`.
     SkillStarterList,
-    SkillInstallStarter { name: String },
+    SkillInstallStarter {
+        name: String,
+    },
     MemoryStore {
         scope: Option<MemoryScope>,
         source: Option<MemorySource>,
@@ -76,33 +126,70 @@ pub enum Request {
         confidence: Option<f64>,
         expires_in_seconds: Option<i64>,
     },
-    MemorySearch { query: String, scope: Option<MemoryScope>, project: Option<String> },
+    MemorySearch {
+        query: String,
+        scope: Option<MemoryScope>,
+        project: Option<String>,
+    },
     /// Embeds `query` and searches the vector store for the nearest
     /// stored memory entries — real semantic search, not `LIKE` matching
     /// (see `single-runtime::embeddings`/`qdrant_backend`). Falls back to
     /// `MemorySearch`'s substring matching when no embeddings key and/or
     /// `SINGLE_QDRANT_URL` are configured, rather than erroring.
-    MemorySearchSemantic { query: String, scope: Option<MemoryScope>, project: Option<String>, limit: u64 },
-    MemoryGet { id: i64 },
-    MemoryDelete { id: i64 },
-    MemoryList { scope: Option<MemoryScope> },
+    MemorySearchSemantic {
+        query: String,
+        scope: Option<MemoryScope>,
+        project: Option<String>,
+        limit: u64,
+    },
+    MemoryGet {
+        id: i64,
+    },
+    MemoryDelete {
+        id: i64,
+    },
+    MemoryList {
+        scope: Option<MemoryScope>,
+    },
     /// Leaves a note for another agent (or, with `to_agent: None`, any
     /// agent) working the same project — a minimal inbox, not a live
     /// stream: the recipient picks it up the next time it runs a task in
     /// that project (see `single-runtime::task::run`'s prompt preamble).
-    NoteLeave { project: Option<String>, from_agent: String, to_agent: Option<String>, topic: String, content: String },
+    NoteLeave {
+        project: Option<String>,
+        from_agent: String,
+        to_agent: Option<String>,
+        topic: String,
+        content: String,
+    },
     /// `to_agent` also matches notes left with `to_agent: None` (broadcast
     /// to the project). `unread_only` additionally filters to `read_at IS
     /// NULL` without marking anything read — see `NoteMarkRead`.
-    NoteInbox { project: Option<String>, to_agent: String, unread_only: bool },
-    NoteMarkRead { id: i64 },
+    NoteInbox {
+        project: Option<String>,
+        to_agent: String,
+        unread_only: bool,
+    },
+    NoteMarkRead {
+        id: i64,
+    },
     /// Extracts text from a PDF/image/plain-text file (OCR fallback for
     /// scanned PDFs) and stores it as a searchable memory entry — see
     /// `single-runtime::documents`.
-    DocumentIngest { path: String, project: Option<String>, title: Option<String> },
-    DocumentList { project: Option<String> },
-    DocumentGet { id: i64 },
-    ContextShow { cwd: String },
+    DocumentIngest {
+        path: String,
+        project: Option<String>,
+        title: Option<String>,
+    },
+    DocumentList {
+        project: Option<String>,
+    },
+    DocumentGet {
+        id: i64,
+    },
+    ContextShow {
+        cwd: String,
+    },
     TaskRun {
         description: String,
         agent: String,
@@ -134,7 +221,9 @@ pub enum Request {
         background: bool,
     },
     TaskList,
-    TaskInspect { id: i64 },
+    TaskInspect {
+        id: i64,
+    },
     /// Stops a `Running` task started with `background: true` (or an
     /// in-flight `OrchestrateParallel{ background: true, .. }` sub-task):
     /// sets its cancel flag, which the agent subprocess's own poll loop
@@ -142,13 +231,24 @@ pub enum Request {
     /// `single-agent-sdk::run::run_command_live`. A no-op success on a
     /// task that isn't currently running (already finished, or was never
     /// started in the background).
-    TaskCancel { id: i64 },
+    TaskCancel {
+        id: i64,
+    },
     /// Removes a finished (`Completed`/`Failed`/`Cancelled`) task's git
     /// worktree and any leftover live-output file — SingleCLI never does
     /// this automatically, since a worktree might still be worth
     /// inspecting after the fact. Errors if the task is still `Running`.
-    TaskCleanup { id: i64 },
-    Orchestrate { goal: String, agents: Vec<String>, cwd: String, use_worktree: bool, real_home: bool, timeout_secs: u64 },
+    TaskCleanup {
+        id: i64,
+    },
+    Orchestrate {
+        goal: String,
+        agents: Vec<String>,
+        cwd: String,
+        use_worktree: bool,
+        real_home: bool,
+        timeout_secs: u64,
+    },
     /// Real concurrent execution (v0.1.17), as opposed to `Orchestrate`'s
     /// sequential relay: each `ParallelTaskSpec` runs on its own thread, in
     /// its own git worktree, with its own SQLite connection. There's no
@@ -166,21 +266,70 @@ pub enum Request {
         /// initial records immediately instead of blocking until every
         /// sub-task finishes.
         background: bool,
+        #[serde(default)]
+        orchestrator: OrchestratorMode,
+        #[serde(default)]
+        goal: Option<String>,
+        #[serde(default)]
+        candidate_agents: Vec<String>,
     },
-    AccountCapture { agent: String, name: String, label: Option<String> },
-    AccountUse { agent: String, name: String },
-    AccountList { agent: Option<String> },
-    AccountRemove { agent: String, name: String },
-    AccountSetStatus { agent: String, name: String, status: AccountStatus },
+    /// Executes an explicit dependency graph. Nodes become eligible together
+    /// once their dependencies have terminal records, then run in isolated
+    /// worktrees just like `OrchestrateParallel`.
+    OrchestrateGraph {
+        nodes: Vec<TaskGraphNode>,
+        cwd: String,
+        real_home: bool,
+        timeout_secs: u64,
+        background: bool,
+        #[serde(default)]
+        orchestrator: OrchestratorMode,
+        #[serde(default)]
+        goal: Option<String>,
+        #[serde(default)]
+        candidate_agents: Vec<String>,
+    },
+    AccountCapture {
+        agent: String,
+        name: String,
+        label: Option<String>,
+    },
+    AccountUse {
+        agent: String,
+        name: String,
+    },
+    AccountList {
+        agent: Option<String>,
+    },
+    AccountRemove {
+        agent: String,
+        name: String,
+    },
+    AccountSetStatus {
+        agent: String,
+        name: String,
+        status: AccountStatus,
+    },
     /// Opt-in Docker execution backend (see `single_core::docker`) —
     /// `account: None` means the agent-wide setting, `Some` overrides it
     /// for one captured account. Takes effect on the next `single task
     /// run`/orchestrate step for that agent/account, not retroactively.
-    DockerEnable { agent: String, account: Option<String> },
-    DockerDisable { agent: String, account: Option<String> },
+    DockerEnable {
+        agent: String,
+        account: Option<String>,
+    },
+    DockerDisable {
+        agent: String,
+        account: Option<String>,
+    },
     /// `agent: None` lists every configured agent/account pair.
-    DockerStatus { agent: Option<String> },
-    DockerStop { agent: String, account: Option<String> },
+    DockerStatus {
+        agent: Option<String>,
+    },
+    DockerStop {
+        agent: String,
+        account: Option<String>,
+    },
     /// Pending human decisions created by `single_core::preferences::evaluate_and_learn`
     /// — raised by the single-mcp gateway's `invoke_mcp` and, when enabled,
     /// an agent's own mid-run permission hook (see `HooksEnable`). See
@@ -188,7 +337,11 @@ pub enum Request {
     ApprovalList,
     /// `remember: true` also records this as a learned preference for the
     /// same resource pattern, so it doesn't ask again next time.
-    ApprovalResolve { id: i64, allow: bool, remember: bool },
+    ApprovalResolve {
+        id: i64,
+        allow: bool,
+        remember: bool,
+    },
     PreferenceList,
     /// Opt-in per-agent mid-run permission interception (see
     /// `single_core::hooks`) — an agent's own process pauses mid-task to
@@ -196,13 +349,25 @@ pub enum Request {
     /// `invoke_mcp`. Only `claude` is wired up; other agents error.
     /// Bootstraps the isolated home and writes the hook into its
     /// settings.json immediately, so it takes effect on the next run.
-    HooksEnable { agent: String },
-    HooksDisable { agent: String },
+    HooksEnable {
+        agent: String,
+    },
+    HooksDisable {
+        agent: String,
+    },
     HooksStatus,
-    ProviderAdd { name: String, env_var_name: String, base_url: Option<String> },
-    ProviderAddPreset { name: String },
+    ProviderAdd {
+        name: String,
+        env_var_name: String,
+        base_url: Option<String>,
+    },
+    ProviderAddPreset {
+        name: String,
+    },
     ProviderPresetList,
-    ProviderRemove { name: String },
+    ProviderRemove {
+        name: String,
+    },
     ProviderList,
     /// Same shape as `ProviderList`, filtered to providers that actually
     /// have a key stored (shared `set-key` or any labeled `add-key`) —
@@ -211,54 +376,142 @@ pub enum Request {
     /// Tools, `ProviderSpec` has no `enabled` field), so plain `ProviderList`
     /// can't answer "which of these did I actually configure."
     ConfiguredProviderList,
-    ProviderInspect { name: String },
-    ProviderSetKey { name: String, value: String },
-    ProviderSync { name: String, agents: Vec<String>, dry_run: bool },
+    ProviderInspect {
+        name: String,
+    },
+    ProviderSetKey {
+        name: String,
+        value: String,
+    },
+    ProviderSync {
+        name: String,
+        agents: Vec<String>,
+        dry_run: bool,
+    },
     /// Stores one *labeled* key for a provider (see `ProviderKeySpec`),
     /// distinct from `ProviderSetKey`'s single shared key.
-    ProviderAddKey { provider: String, label: String, agent: Option<String>, value: String },
-    ProviderListKeys { provider: String },
-    ProviderRemoveKey { provider: String, label: String },
+    ProviderAddKey {
+        provider: String,
+        label: String,
+        agent: Option<String>,
+        value: String,
+    },
+    ProviderListKeys {
+        provider: String,
+    },
+    ProviderRemoveKey {
+        provider: String,
+        label: String,
+    },
     /// Same as `ProviderSync` but syncs one specific labeled key (not the
     /// shared `providers.toml` one) into one specific agent.
-    ProviderKeySync { provider: String, label: String, agent: String, dry_run: bool },
+    ProviderKeySync {
+        provider: String,
+        label: String,
+        agent: String,
+        dry_run: bool,
+    },
     /// The org/admin-scoped key used only to *query* a provider's usage
     /// API — separate from any inference key in `ProviderSpec`/
     /// `ProviderKeySpec`, since billing endpoints typically need a
     /// different credential scope than making model calls.
-    ProviderSetBillingKey { provider: String, value: String },
+    ProviderSetBillingKey {
+        provider: String,
+        value: String,
+    },
     BillingProviderList,
-    UsageShow { provider: Option<String> },
+    UsageShow {
+        provider: Option<String>,
+    },
     UsageRefresh,
-    KgCreateEntity { name: String, entity_type: String },
-    KgAddObservation { entity: String, content: String },
-    KgCreateRelation { from: String, to: String, relation_type: String },
-    KgDeleteEntity { name: String },
-    KgGetEntity { name: String },
-    KgQuery { term: String },
+    KgCreateEntity {
+        name: String,
+        entity_type: String,
+    },
+    KgAddObservation {
+        entity: String,
+        content: String,
+    },
+    KgCreateRelation {
+        from: String,
+        to: String,
+        relation_type: String,
+    },
+    KgDeleteEntity {
+        name: String,
+    },
+    KgGetEntity {
+        name: String,
+    },
+    KgQuery {
+        term: String,
+    },
     KgReadGraph,
-    CacheSet { key: String, value: String, ttl_secs: Option<u64> },
-    CacheGet { key: String },
-    CacheDelete { key: String },
-    CacheList { pattern: String },
+    CacheSet {
+        key: String,
+        value: String,
+        ttl_secs: Option<u64>,
+    },
+    CacheGet {
+        key: String,
+    },
+    CacheDelete {
+        key: String,
+    },
+    CacheList {
+        pattern: String,
+    },
     CacheStatus,
-    VectorUpsert { collection: String, id: u64, vector: Vec<f32>, payload: serde_json::Value },
-    VectorSearch { collection: String, vector: Vec<f32>, limit: u64 },
-    VectorDelete { collection: String, id: u64 },
+    VectorUpsert {
+        collection: String,
+        id: u64,
+        vector: Vec<f32>,
+        payload: serde_json::Value,
+    },
+    VectorSearch {
+        collection: String,
+        vector: Vec<f32>,
+        limit: u64,
+    },
+    VectorDelete {
+        collection: String,
+        id: u64,
+    },
     VectorStatus,
-    AgentInstall { name: String, dry_run: bool },
-    Setup { dry_run: bool },
-    InstallIntegrations { dry_run: bool },
+    AgentInstall {
+        name: String,
+        dry_run: bool,
+    },
+    Setup {
+        dry_run: bool,
+    },
+    InstallIntegrations {
+        dry_run: bool,
+    },
     UninstallIntegrations,
     ProfileList,
-    ProfileUse { name: String },
-    PluginAdd { plugin: PluginSpec },
-    PluginRemove { name: String },
+    ProfileUse {
+        name: String,
+    },
+    PluginAdd {
+        plugin: PluginSpec,
+    },
+    PluginRemove {
+        name: String,
+    },
     PluginList,
-    PluginInspect { name: String },
-    PluginSync { name: String, agents: Vec<String>, dry_run: bool },
+    PluginInspect {
+        name: String,
+    },
+    PluginSync {
+        name: String,
+        agents: Vec<String>,
+        dry_run: bool,
+    },
     PluginPresetList,
-    PluginAddPreset { name: String },
+    PluginAddPreset {
+        name: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -292,7 +545,9 @@ pub enum ResponseData {
     Skills(Vec<String>),
     SkillStarters(Vec<SkillStarterInfo>),
     SkillContents(Vec<String>),
-    SkillSynced { path: String },
+    SkillSynced {
+        path: String,
+    },
     MemoryId(i64),
     MemoryEntry(MemoryEntry),
     MemoryEntries(Vec<MemoryEntry>),
@@ -324,11 +579,20 @@ pub enum ResponseData {
     KgGraph(KnowledgeGraphSnapshot),
     CacheValue(Option<String>),
     CacheKeys(Vec<String>),
-    CacheStatus { configured: bool, url: Option<String>, reachable: bool },
+    CacheStatus {
+        configured: bool,
+        url: Option<String>,
+        reachable: bool,
+    },
     VectorHits(Vec<VectorHit>),
-    VectorStatus { configured: bool, url: Option<String>, reachable: bool },
+    VectorStatus {
+        configured: bool,
+        url: Option<String>,
+        reachable: bool,
+    },
     Tasks(Vec<TaskRecord>),
     OrchestrateResult(Vec<TaskRecord>),
+    OrchestrateGraphResult(Vec<TaskRecord>),
     AgentInstallResult(SetupAction),
     SetupPlan(SetupPlan),
     IntegrationResult(IntegrationResult),
@@ -692,9 +956,10 @@ pub enum TaskStatus {
     Running,
     Completed,
     Failed,
-    /// Killed by an explicit `single task cancel` before it finished on
-    /// its own — distinct from `Failed`, which means the agent ran and
-    /// exited unsuccessfully (or errored/timed out) on its own.
+    /// Either killed by an explicit `single task cancel` before it finished,
+    /// or deliberately skipped by a graph `run_if` condition. The latter
+    /// always says so in its summary; `Failed` means an agent actually ran
+    /// unsuccessfully (or errored/timed out).
     Cancelled,
 }
 
@@ -704,6 +969,44 @@ pub enum TaskStatus {
 pub struct ParallelTaskSpec {
     pub agent: String,
     pub description: String,
+}
+
+/// One named step in a dependency graph. Stable IDs make dependencies
+/// inspectable instead of coupling graph wiring to a display description.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskGraphNode {
+    pub id: String,
+    pub agent: String,
+    pub description: String,
+    #[serde(default)]
+    pub depends_on: Vec<String>,
+    #[serde(default)]
+    pub run_if: RunCondition,
+}
+
+/// Decides whether a graph node starts after all of its dependencies have
+/// reached a terminal state. A skipped conditional node is recorded as
+/// `Cancelled`, with a summary that distinguishes it from user cancellation.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RunCondition {
+    #[default]
+    Always,
+    OnSuccess,
+    OnFailure,
+}
+
+/// Selects whether a caller supplies a fixed split or asks an installed agent
+/// CLI to produce one. `Auto` and `Delegate` intentionally share execution:
+/// both avoid direct provider APIs; the distinction is only who chose to ask
+/// for planning rather than an accidentally different planning algorithm.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum OrchestratorMode {
+    #[default]
+    Fixed,
+    Auto,
+    Delegate,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

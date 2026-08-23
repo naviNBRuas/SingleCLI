@@ -9,7 +9,11 @@ use single_protocol::{LspServerSpec, McpServerSpec, Request, Response, RiskLevel
 use std::collections::BTreeMap;
 
 #[derive(Parser)]
-#[command(name = "single", version, about = "SingleCLI — unified control plane for AI coding agents")]
+#[command(
+    name = "single",
+    version,
+    about = "SingleCLI — unified control plane for AI coding agents"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
@@ -134,8 +138,15 @@ enum Command {
     /// and reports what happened — branches are never auto-merged.
     OrchestrateParallel {
         /// Repeatable: <agent>:<description>, e.g. claude:"implement the API"
-        #[arg(long = "task", required = true)]
+        #[arg(long = "task")]
         tasks: Vec<String>,
+        /// fixed (default) uses --task; auto/delegate ask an installed candidate CLI to plan a graph.
+        #[arg(long, default_value = "fixed")]
+        orchestrator: String,
+        #[arg(long)]
+        goal: Option<String>,
+        #[arg(long = "candidate-agent", value_delimiter = ',')]
+        candidate_agents: Vec<String>,
         #[arg(long)]
         cwd: Option<String>,
         /// See `single task run --help`'s --real-home — applies to every task.
@@ -146,6 +157,27 @@ enum Command {
         /// Start the whole batch and return immediately instead of
         /// blocking until every task finishes — poll `task list`/`task
         /// inspect` for each one's progress as it lands.
+        #[arg(long)]
+        background: bool,
+    },
+    /// Run an explicit dependency graph. Each --task is a comma-separated
+    /// node specification: id=build,agent=codex,desc="build it",depends_on=lint|test,run_if=on_success.
+    OrchestrateGraph {
+        /// Repeatable node specification; depends_on and run_if are optional.
+        #[arg(long = "task")]
+        tasks: Vec<String>,
+        #[arg(long, default_value = "fixed")]
+        orchestrator: String,
+        #[arg(long)]
+        goal: Option<String>,
+        #[arg(long = "candidate-agent", value_delimiter = ',')]
+        candidate_agents: Vec<String>,
+        #[arg(long)]
+        cwd: Option<String>,
+        #[arg(long)]
+        real_home: bool,
+        #[arg(long, default_value = "300")]
+        timeout_secs: u64,
         #[arg(long)]
         background: bool,
     },
@@ -340,7 +372,9 @@ enum McpCommand {
     /// List built-in MCP server presets (brave-search, slack, puppeteer, postgres, cloudflare, postman, distrobox-control).
     Presets,
     /// Register an MCP server from a built-in preset (ships disabled — most need a secret).
-    AddPreset { name: String },
+    AddPreset {
+        name: String,
+    },
     /// Dynamic MCP gateway (crates/single-mcp): when enabled, `single install-integrations`
     /// syncs only single-mcp into agents' native config instead of every enabled server —
     /// single-mcp then proxies to them lazily. Takes effect on the next install-integrations.
@@ -351,7 +385,9 @@ enum McpCommand {
 }
 
 fn parse_key_val(s: &str) -> anyhow::Result<(String, String)> {
-    let (k, v) = s.split_once('=').ok_or_else(|| anyhow::anyhow!("expected KEY=VALUE, got '{s}'"))?;
+    let (k, v) = s
+        .split_once('=')
+        .ok_or_else(|| anyhow::anyhow!("expected KEY=VALUE, got '{s}'"))?;
     Ok((k.to_string(), v.to_string()))
 }
 
@@ -388,7 +424,9 @@ enum LspCommand {
     /// List built-in LSP presets (rust-analyzer, pyright, typescript, gopls, dockerfile, clangd, bash, yaml, terraform, json).
     Presets,
     /// Register an LSP server from a built-in preset.
-    AddPreset { name: String },
+    AddPreset {
+        name: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -434,16 +472,27 @@ enum SecretCommand {
 #[derive(Subcommand)]
 enum SkillCommand {
     List,
-    Install { name: String, source_path: String },
-    Remove { name: String },
-    Inspect { name: String },
+    Install {
+        name: String,
+        source_path: String,
+    },
+    Remove {
+        name: String,
+    },
+    Inspect {
+        name: String,
+    },
     /// Copies a skill into Claude Code's real skill directory
     /// (~/.claude/skills/<name>/) — backs up any existing same-named directory first.
-    SyncClaude { name: String },
+    SyncClaude {
+        name: String,
+    },
     /// List the curated starter skills bundled with SingleCLI.
     Starters,
     /// Install a bundled starter skill by name (see `single skill starters`).
-    InstallStarter { name: String },
+    InstallStarter {
+        name: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -547,7 +596,9 @@ enum NoteCommand {
         #[arg(long)]
         json: bool,
     },
-    MarkRead { id: i64 },
+    MarkRead {
+        id: i64,
+    },
 }
 
 #[derive(Subcommand)]
@@ -611,7 +662,10 @@ enum VectorCommand {
         #[arg(long, default_value = "5")]
         limit: u64,
     },
-    Delete { collection: String, id: u64 },
+    Delete {
+        collection: String,
+        id: u64,
+    },
     Status,
 }
 
@@ -623,8 +677,12 @@ enum CacheCommand {
         #[arg(long)]
         ttl_secs: Option<u64>,
     },
-    Get { key: String },
-    Delete { key: String },
+    Get {
+        key: String,
+    },
+    Delete {
+        key: String,
+    },
     List {
         #[arg(default_value = "*")]
         pattern: String,
@@ -634,10 +692,22 @@ enum CacheCommand {
 
 #[derive(Subcommand)]
 enum KgCommand {
-    CreateEntity { name: String, entity_type: String },
-    AddObservation { entity: String, content: String },
-    CreateRelation { from: String, to: String, relation_type: String },
-    DeleteEntity { name: String },
+    CreateEntity {
+        name: String,
+        entity_type: String,
+    },
+    AddObservation {
+        entity: String,
+        content: String,
+    },
+    CreateRelation {
+        from: String,
+        to: String,
+        relation_type: String,
+    },
+    DeleteEntity {
+        name: String,
+    },
     Get {
         name: String,
         #[arg(long)]
@@ -714,7 +784,9 @@ enum ProviderCommand {
         #[arg(long)]
         base_url: Option<String>,
     },
-    Remove { name: String },
+    Remove {
+        name: String,
+    },
     List {
         /// Only show providers that actually have a key stored (shared set-key or any labeled add-key) — every built-in preset shows without this.
         #[arg(long)]
@@ -728,7 +800,10 @@ enum ProviderCommand {
         json: bool,
     },
     /// Store the actual API key in the OS keychain.
-    SetKey { name: String, value: String },
+    SetKey {
+        name: String,
+        value: String,
+    },
     /// Write the key into the named agents' real config (all registered agents if none given).
     Sync {
         name: String,
@@ -740,7 +815,9 @@ enum ProviderCommand {
     /// List built-in provider presets (OpenAI, Anthropic, OpenCode Zen, NVIDIA).
     Presets,
     /// Register a provider from a built-in preset (name, env var, base URL already filled in).
-    AddPreset { name: String },
+    AddPreset {
+        name: String,
+    },
     /// Store a *labeled* key for a provider (e.g. one key per agent), distinct from `set-key`'s single shared key.
     AddKey {
         provider: String,
@@ -752,8 +829,13 @@ enum ProviderCommand {
         value: String,
     },
     /// List labeled keys for a provider (labels/agent tags only, never the key value).
-    ListKeys { provider: String },
-    RemoveKey { provider: String, label: String },
+    ListKeys {
+        provider: String,
+    },
+    RemoveKey {
+        provider: String,
+        label: String,
+    },
     /// Sync one specific labeled key into one specific agent's real config.
     KeySync {
         provider: String,
@@ -763,7 +845,10 @@ enum ProviderCommand {
         yes: bool,
     },
     /// Store the org/admin-scoped key used only to query a provider's usage/billing API — separate from any inference key.
-    SetBillingKey { provider: String, value: String },
+    SetBillingKey {
+        provider: String,
+        value: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -807,7 +892,9 @@ enum PluginCommand {
         #[arg(long)]
         opencode_module: Option<String>,
     },
-    Remove { name: String },
+    Remove {
+        name: String,
+    },
     List {
         #[arg(long)]
         json: bool,
@@ -821,7 +908,9 @@ enum PluginCommand {
     /// marketplace (github.com/anthropics/claude-plugins-official).
     Presets,
     /// Register a plugin from a built-in preset (verified to sync into `claude`; other agents best-effort).
-    AddPreset { name: String },
+    AddPreset {
+        name: String,
+    },
     /// Install the plugin into the named agents (all registered agents if none given).
     Sync {
         name: String,
@@ -846,14 +935,20 @@ enum AccountCommand {
     },
     /// Swap a captured profile into place as the agent's live login state
     /// (backs up whatever was live first).
-    Use { agent: String, name: String },
+    Use {
+        agent: String,
+        name: String,
+    },
     List {
         #[arg(long)]
         agent: Option<String>,
         #[arg(long)]
         json: bool,
     },
-    Remove { agent: String, name: String },
+    Remove {
+        agent: String,
+        name: String,
+    },
     /// Manually record whether an account is usable, rate-limited, or
     /// needs a top-up. Never auto-detected (no verified quota API across
     /// agents) — you or a failed task tell SingleCLI, and it remembers.
@@ -949,7 +1044,12 @@ fn main() -> anyhow::Result<()> {
 
     // Self-update needs no runtime/socket at all — it just talks to
     // GitHub and replaces files next to the current executable.
-    if let Command::Update { channel, check, yes } = command {
+    if let Command::Update {
+        channel,
+        check,
+        yes,
+    } = command
+    {
         return run_update(&channel, check, yes);
     }
 
@@ -971,7 +1071,10 @@ fn main() -> anyhow::Result<()> {
     // daemon's stdio, not the user's, which may not even be a TTY. Runs
     // entirely locally: no socket round-trip needed to resolve the
     // isolated home path either (single_core::agent_home is pure logic).
-    if let Command::Agent { action: AgentCommand::Login { name } } = &command {
+    if let Command::Agent {
+        action: AgentCommand::Login { name },
+    } = &command
+    {
         return run_agent_login(&dirs, &socket_path, name);
     }
 
@@ -1025,17 +1128,27 @@ fn main() -> anyhow::Result<()> {
                 if !yes {
                     eprintln!("Dry run (pass --yes to actually run the install command).");
                 }
-                let response = client::send(&socket_path, Request::AgentInstall { name, dry_run: !yes })?;
+                let response = client::send(
+                    &socket_path,
+                    Request::AgentInstall {
+                        name,
+                        dry_run: !yes,
+                    },
+                )?;
                 render::print(response, json);
             }
-            AgentCommand::Login { .. } => unreachable!("Command::Agent{{Login}} is intercepted before this match"),
+            AgentCommand::Login { .. } => {
+                unreachable!("Command::Agent{{Login}} is intercepted before this match")
+            }
             AgentCommand::Docker { action } => match action {
                 AgentDockerCommand::Enable { agent, account } => {
-                    let response = client::send(&socket_path, Request::DockerEnable { agent, account })?;
+                    let response =
+                        client::send(&socket_path, Request::DockerEnable { agent, account })?;
                     render::print(response, false);
                 }
                 AgentDockerCommand::Disable { agent, account } => {
-                    let response = client::send(&socket_path, Request::DockerDisable { agent, account })?;
+                    let response =
+                        client::send(&socket_path, Request::DockerDisable { agent, account })?;
                     render::print(response, false);
                 }
                 AgentDockerCommand::Status { agent } => {
@@ -1043,7 +1156,8 @@ fn main() -> anyhow::Result<()> {
                     render::print(response, false);
                 }
                 AgentDockerCommand::Stop { agent, account } => {
-                    let response = client::send(&socket_path, Request::DockerStop { agent, account })?;
+                    let response =
+                        client::send(&socket_path, Request::DockerStop { agent, account })?;
                     render::print(response, false);
                 }
             },
@@ -1067,15 +1181,33 @@ fn main() -> anyhow::Result<()> {
                 let response = client::send(&socket_path, Request::McpList)?;
                 render::print(response, json);
             }
-            McpCommand::Add { name, command, secrets, args } => {
+            McpCommand::Add {
+                name,
+                command,
+                secrets,
+                args,
+            } => {
                 let mut secret_env = BTreeMap::new();
                 for (env_var, value) in secrets {
                     let secret_key = format!("mcp:{name}:{env_var}");
-                    let response = client::send(&socket_path, Request::SecretSet { name: secret_key.clone(), value })?;
+                    let response = client::send(
+                        &socket_path,
+                        Request::SecretSet {
+                            name: secret_key.clone(),
+                            value,
+                        },
+                    )?;
                     render::print(response, false); // exits on failure, prints nothing on success
                     secret_env.insert(env_var, secret_key);
                 }
-                let server = McpServerSpec { name, command, args, env: BTreeMap::new(), secret_env, enabled: true };
+                let server = McpServerSpec {
+                    name,
+                    command,
+                    args,
+                    env: BTreeMap::new(),
+                    secret_env,
+                    enabled: true,
+                };
                 let response = client::send(&socket_path, Request::McpAdd { server })?;
                 render::print(response, false);
             }
@@ -1105,12 +1237,18 @@ fn main() -> anyhow::Result<()> {
             }
             McpCommand::Gateway { action } => match action {
                 McpGatewayCommand::Enable => {
-                    let response = client::send(&socket_path, Request::McpGatewaySetEnabled { enabled: true })?;
+                    let response = client::send(
+                        &socket_path,
+                        Request::McpGatewaySetEnabled { enabled: true },
+                    )?;
                     render::print(response, false);
                     eprintln!("run `single install-integrations --yes` to apply this to agents' native config.");
                 }
                 McpGatewayCommand::Disable => {
-                    let response = client::send(&socket_path, Request::McpGatewaySetEnabled { enabled: false })?;
+                    let response = client::send(
+                        &socket_path,
+                        Request::McpGatewaySetEnabled { enabled: false },
+                    )?;
                     render::print(response, false);
                     eprintln!("run `single install-integrations --yes` to apply this to agents' native config.");
                 }
@@ -1125,8 +1263,19 @@ fn main() -> anyhow::Result<()> {
                 let response = client::send(&socket_path, Request::LspList)?;
                 render::print(response, json);
             }
-            LspCommand::Add { name, command, extensions, args } => {
-                let server = LspServerSpec { name, command, args, extensions, enabled: true };
+            LspCommand::Add {
+                name,
+                command,
+                extensions,
+                args,
+            } => {
+                let server = LspServerSpec {
+                    name,
+                    command,
+                    args,
+                    extensions,
+                    enabled: true,
+                };
                 let response = client::send(&socket_path, Request::LspAdd { server })?;
                 render::print(response, false);
             }
@@ -1152,13 +1301,22 @@ fn main() -> anyhow::Result<()> {
                 let response = client::send(&socket_path, Request::ToolList)?;
                 render::print(response, json);
             }
-            ToolCommand::Add { name, description, risk } => {
+            ToolCommand::Add {
+                name,
+                description,
+                risk,
+            } => {
                 let risk_level = match risk {
                     RiskArg::Low => RiskLevel::Low,
                     RiskArg::Medium => RiskLevel::Medium,
                     RiskArg::High => RiskLevel::High,
                 };
-                let tool = ToolSpec { name, description, risk_level, enabled: true };
+                let tool = ToolSpec {
+                    name,
+                    description,
+                    risk_level,
+                    enabled: true,
+                };
                 let response = client::send(&socket_path, Request::ToolAdd { tool })?;
                 render::print(response, false);
             }
@@ -1199,7 +1357,8 @@ fn main() -> anyhow::Result<()> {
                 render::print(response, false);
             }
             SkillCommand::Install { name, source_path } => {
-                let response = client::send(&socket_path, Request::SkillInstall { name, source_path })?;
+                let response =
+                    client::send(&socket_path, Request::SkillInstall { name, source_path })?;
                 render::print(response, false);
             }
             SkillCommand::Remove { name } => {
@@ -1224,25 +1383,54 @@ fn main() -> anyhow::Result<()> {
             }
         },
         Command::Memory { action } => match action {
-            MemoryCommand::Store { title, content, scope, source, project, agent, task, confidence, expires_in } => {
-                let response = client::send(&socket_path, Request::MemoryStore {
-                    scope: scope.map(Into::into),
-                    source: source.map(Into::into),
-                    project,
-                    agent,
-                    task,
-                    title,
-                    content,
-                    confidence,
-                    expires_in_seconds: expires_in,
-                })?;
+            MemoryCommand::Store {
+                title,
+                content,
+                scope,
+                source,
+                project,
+                agent,
+                task,
+                confidence,
+                expires_in,
+            } => {
+                let response = client::send(
+                    &socket_path,
+                    Request::MemoryStore {
+                        scope: scope.map(Into::into),
+                        source: source.map(Into::into),
+                        project,
+                        agent,
+                        task,
+                        title,
+                        content,
+                        confidence,
+                        expires_in_seconds: expires_in,
+                    },
+                )?;
                 render::print(response, false);
             }
-            MemoryCommand::Search { query, scope, project, semantic, limit, json } => {
+            MemoryCommand::Search {
+                query,
+                scope,
+                project,
+                semantic,
+                limit,
+                json,
+            } => {
                 let request = if semantic {
-                    Request::MemorySearchSemantic { query, scope: scope.map(Into::into), project, limit }
+                    Request::MemorySearchSemantic {
+                        query,
+                        scope: scope.map(Into::into),
+                        project,
+                        limit,
+                    }
                 } else {
-                    Request::MemorySearch { query, scope: scope.map(Into::into), project }
+                    Request::MemorySearch {
+                        query,
+                        scope: scope.map(Into::into),
+                        project,
+                    }
                 };
                 let response = client::send(&socket_path, request)?;
                 render::print(response, json);
@@ -1256,20 +1444,38 @@ fn main() -> anyhow::Result<()> {
                 render::print(response, false);
             }
             MemoryCommand::List { scope, json } => {
-                let response = client::send(&socket_path, Request::MemoryList { scope: scope.map(Into::into) })?;
+                let response = client::send(
+                    &socket_path,
+                    Request::MemoryList {
+                        scope: scope.map(Into::into),
+                    },
+                )?;
                 render::print(response, json);
             }
             MemoryCommand::Graph { action } => match action {
                 KgCommand::CreateEntity { name, entity_type } => {
-                    let response = client::send(&socket_path, Request::KgCreateEntity { name, entity_type })?;
+                    let response =
+                        client::send(&socket_path, Request::KgCreateEntity { name, entity_type })?;
                     render::print(response, false);
                 }
                 KgCommand::AddObservation { entity, content } => {
-                    let response = client::send(&socket_path, Request::KgAddObservation { entity, content })?;
+                    let response =
+                        client::send(&socket_path, Request::KgAddObservation { entity, content })?;
                     render::print(response, false);
                 }
-                KgCommand::CreateRelation { from, to, relation_type } => {
-                    let response = client::send(&socket_path, Request::KgCreateRelation { from, to, relation_type })?;
+                KgCommand::CreateRelation {
+                    from,
+                    to,
+                    relation_type,
+                } => {
+                    let response = client::send(
+                        &socket_path,
+                        Request::KgCreateRelation {
+                            from,
+                            to,
+                            relation_type,
+                        },
+                    )?;
                     render::print(response, false);
                 }
                 KgCommand::DeleteEntity { name } => {
@@ -1290,8 +1496,19 @@ fn main() -> anyhow::Result<()> {
                 }
             },
             MemoryCommand::Cache { action } => match action {
-                CacheCommand::Set { key, value, ttl_secs } => {
-                    let response = client::send(&socket_path, Request::CacheSet { key, value, ttl_secs })?;
+                CacheCommand::Set {
+                    key,
+                    value,
+                    ttl_secs,
+                } => {
+                    let response = client::send(
+                        &socket_path,
+                        Request::CacheSet {
+                            key,
+                            value,
+                            ttl_secs,
+                        },
+                    )?;
                     render::print(response, false);
                 }
                 CacheCommand::Get { key } => {
@@ -1312,17 +1529,42 @@ fn main() -> anyhow::Result<()> {
                 }
             },
             MemoryCommand::Vector { action } => match action {
-                VectorCommand::Upsert { collection, id, vector, payload } => {
+                VectorCommand::Upsert {
+                    collection,
+                    id,
+                    vector,
+                    payload,
+                } => {
                     let payload: serde_json::Value = serde_json::from_str(&payload)?;
-                    let response = client::send(&socket_path, Request::VectorUpsert { collection, id, vector, payload })?;
+                    let response = client::send(
+                        &socket_path,
+                        Request::VectorUpsert {
+                            collection,
+                            id,
+                            vector,
+                            payload,
+                        },
+                    )?;
                     render::print(response, false);
                 }
-                VectorCommand::Search { collection, vector, limit } => {
-                    let response = client::send(&socket_path, Request::VectorSearch { collection, vector, limit })?;
+                VectorCommand::Search {
+                    collection,
+                    vector,
+                    limit,
+                } => {
+                    let response = client::send(
+                        &socket_path,
+                        Request::VectorSearch {
+                            collection,
+                            vector,
+                            limit,
+                        },
+                    )?;
                     render::print(response, false);
                 }
                 VectorCommand::Delete { collection, id } => {
-                    let response = client::send(&socket_path, Request::VectorDelete { collection, id })?;
+                    let response =
+                        client::send(&socket_path, Request::VectorDelete { collection, id })?;
                     render::print(response, false);
                 }
                 VectorCommand::Status => {
@@ -1336,11 +1578,23 @@ fn main() -> anyhow::Result<()> {
                 let response = client::send(&socket_path, Request::ApprovalList)?;
                 render::print(response, false);
             }
-            ApprovalCommand::Resolve { id, allow, deny, remember } => {
+            ApprovalCommand::Resolve {
+                id,
+                allow,
+                deny,
+                remember,
+            } => {
                 if !allow && !deny {
                     anyhow::bail!("pass --allow or --deny");
                 }
-                let response = client::send(&socket_path, Request::ApprovalResolve { id, allow, remember })?;
+                let response = client::send(
+                    &socket_path,
+                    Request::ApprovalResolve {
+                        id,
+                        allow,
+                        remember,
+                    },
+                )?;
                 render::print(response, false);
             }
         },
@@ -1351,12 +1605,39 @@ fn main() -> anyhow::Result<()> {
             }
         },
         Command::Note { action } => match action {
-            NoteCommand::Leave { content, from, to, topic, project } => {
-                let response = client::send(&socket_path, Request::NoteLeave { project, from_agent: from, to_agent: to, topic, content })?;
+            NoteCommand::Leave {
+                content,
+                from,
+                to,
+                topic,
+                project,
+            } => {
+                let response = client::send(
+                    &socket_path,
+                    Request::NoteLeave {
+                        project,
+                        from_agent: from,
+                        to_agent: to,
+                        topic,
+                        content,
+                    },
+                )?;
                 render::print(response, false);
             }
-            NoteCommand::Inbox { to, project, unread_only, json } => {
-                let response = client::send(&socket_path, Request::NoteInbox { project, to_agent: to, unread_only })?;
+            NoteCommand::Inbox {
+                to,
+                project,
+                unread_only,
+                json,
+            } => {
+                let response = client::send(
+                    &socket_path,
+                    Request::NoteInbox {
+                        project,
+                        to_agent: to,
+                        unread_only,
+                    },
+                )?;
                 render::print(response, json);
             }
             NoteCommand::MarkRead { id } => {
@@ -1365,9 +1646,22 @@ fn main() -> anyhow::Result<()> {
             }
         },
         Command::Doc { action } => match action {
-            DocCommand::Ingest { path, project, title } => {
-                let path = std::fs::canonicalize(&path).map(|p| p.display().to_string()).unwrap_or(path);
-                let response = client::send(&socket_path, Request::DocumentIngest { path, project, title })?;
+            DocCommand::Ingest {
+                path,
+                project,
+                title,
+            } => {
+                let path = std::fs::canonicalize(&path)
+                    .map(|p| p.display().to_string())
+                    .unwrap_or(path);
+                let response = client::send(
+                    &socket_path,
+                    Request::DocumentIngest {
+                        path,
+                        project,
+                        title,
+                    },
+                )?;
                 render::print(response, false);
             }
             DocCommand::List { project, json } => {
@@ -1381,28 +1675,46 @@ fn main() -> anyhow::Result<()> {
         },
         Command::Context { cwd, json } => {
             let cwd = cwd.unwrap_or_else(|| ".".to_string());
-            let cwd = std::fs::canonicalize(&cwd).map(|p| p.display().to_string()).unwrap_or(cwd);
+            let cwd = std::fs::canonicalize(&cwd)
+                .map(|p| p.display().to_string())
+                .unwrap_or(cwd);
             let response = client::send(&socket_path, Request::ContextShow { cwd })?;
             render::print(response, json);
         }
         Command::Task { action } => match action {
-            TaskCommand::Run { description, agent, cwd, worktree, account, real_home, no_memory_context, timeout_secs, background, json } => {
+            TaskCommand::Run {
+                description,
+                agent,
+                cwd,
+                worktree,
+                account,
+                real_home,
+                no_memory_context,
+                timeout_secs,
+                background,
+                json,
+            } => {
                 let cwd = cwd.unwrap_or_else(|| ".".to_string());
-                let cwd = std::fs::canonicalize(&cwd).map(|p| p.display().to_string()).unwrap_or(cwd);
+                let cwd = std::fs::canonicalize(&cwd)
+                    .map(|p| p.display().to_string())
+                    .unwrap_or(cwd);
                 if real_home {
                     eprintln!("warning: running against your real $HOME — {agent} will see your real credentials/config and can modify real files.");
                 }
-                let response = client::send(&socket_path, Request::TaskRun {
-                    description,
-                    agent,
-                    cwd,
-                    use_worktree: worktree,
-                    account,
-                    real_home,
-                    no_memory_context,
-                    timeout_secs,
-                    background,
-                })?;
+                let response = client::send(
+                    &socket_path,
+                    Request::TaskRun {
+                        description,
+                        agent,
+                        cwd,
+                        use_worktree: worktree,
+                        account,
+                        real_home,
+                        no_memory_context,
+                        timeout_secs,
+                        background,
+                    },
+                )?;
                 render::print(response, json);
             }
             TaskCommand::List { json } => {
@@ -1422,20 +1734,57 @@ fn main() -> anyhow::Result<()> {
                 render::print(response, false);
             }
         },
-        Command::Orchestrate { goal, agents, cwd, worktree, real_home, timeout_secs } => {
+        Command::Orchestrate {
+            goal,
+            agents,
+            cwd,
+            worktree,
+            real_home,
+            timeout_secs,
+        } => {
             let cwd = cwd.unwrap_or_else(|| ".".to_string());
-            let cwd = std::fs::canonicalize(&cwd).map(|p| p.display().to_string()).unwrap_or(cwd);
+            let cwd = std::fs::canonicalize(&cwd)
+                .map(|p| p.display().to_string())
+                .unwrap_or(cwd);
             if real_home {
                 eprintln!("warning: running against your real $HOME — every agent in this relay will see your real credentials/config and can modify real files.");
             }
-            let response = client::send(&socket_path, Request::Orchestrate { goal, agents, cwd, use_worktree: worktree, real_home, timeout_secs })?;
+            let response = client::send(
+                &socket_path,
+                Request::Orchestrate {
+                    goal,
+                    agents,
+                    cwd,
+                    use_worktree: worktree,
+                    real_home,
+                    timeout_secs,
+                },
+            )?;
             render::print(response, false);
         }
-        Command::OrchestrateParallel { tasks, cwd, real_home, timeout_secs, background } => {
+        Command::OrchestrateParallel {
+            tasks,
+            orchestrator,
+            goal,
+            candidate_agents,
+            cwd,
+            real_home,
+            timeout_secs,
+            background,
+        } => {
             let cwd = cwd.unwrap_or_else(|| ".".to_string());
-            let cwd = std::fs::canonicalize(&cwd).map(|p| p.display().to_string()).unwrap_or(cwd);
+            let cwd = std::fs::canonicalize(&cwd)
+                .map(|p| p.display().to_string())
+                .unwrap_or(cwd);
             if real_home {
                 eprintln!("warning: running against your real $HOME — every agent will see your real credentials/config and can modify real files.");
+            }
+            let orchestrator = parse_orchestrator(&orchestrator)?;
+            if orchestrator == single_protocol::OrchestratorMode::Fixed && tasks.is_empty() {
+                anyhow::bail!("--orchestrator fixed requires at least one --task");
+            }
+            if orchestrator != single_protocol::OrchestratorMode::Fixed && goal.is_none() {
+                anyhow::bail!("--orchestrator {orchestrator:?} requires --goal");
             }
             let parsed: Vec<single_protocol::ParallelTaskSpec> = tasks
                 .into_iter()
@@ -1446,12 +1795,75 @@ fn main() -> anyhow::Result<()> {
                     Ok(single_protocol::ParallelTaskSpec { agent: agent.to_string(), description: description.to_string() })
                 })
                 .collect::<anyhow::Result<Vec<_>>>()?;
-            let response = client::send(&socket_path, Request::OrchestrateParallel { tasks: parsed, cwd, real_home, timeout_secs, background })?;
+            let response = client::send(
+                &socket_path,
+                Request::OrchestrateParallel {
+                    tasks: parsed,
+                    cwd,
+                    real_home,
+                    timeout_secs,
+                    background,
+                    orchestrator,
+                    goal,
+                    candidate_agents,
+                },
+            )?;
+            render::print(response, false);
+        }
+        Command::OrchestrateGraph {
+            tasks,
+            orchestrator,
+            goal,
+            candidate_agents,
+            cwd,
+            real_home,
+            timeout_secs,
+            background,
+        } => {
+            let cwd = cwd.unwrap_or_else(|| ".".to_string());
+            let cwd = std::fs::canonicalize(&cwd)
+                .map(|p| p.display().to_string())
+                .unwrap_or(cwd);
+            let orchestrator = parse_orchestrator(&orchestrator)?;
+            if orchestrator == single_protocol::OrchestratorMode::Fixed && tasks.is_empty() {
+                anyhow::bail!("--orchestrator fixed requires at least one --task");
+            }
+            if orchestrator != single_protocol::OrchestratorMode::Fixed && goal.is_none() {
+                anyhow::bail!("--orchestrator {orchestrator:?} requires --goal");
+            }
+            let nodes = tasks
+                .into_iter()
+                .map(|task| parse_graph_task(&task))
+                .collect::<anyhow::Result<Vec<_>>>()?;
+            let response = client::send(
+                &socket_path,
+                Request::OrchestrateGraph {
+                    nodes,
+                    cwd,
+                    real_home,
+                    timeout_secs,
+                    background,
+                    orchestrator,
+                    goal,
+                    candidate_agents,
+                },
+            )?;
             render::print(response, false);
         }
         Command::Provider { action } => match action {
-            ProviderCommand::Add { name, env_var, base_url } => {
-                let response = client::send(&socket_path, Request::ProviderAdd { name, env_var_name: env_var, base_url })?;
+            ProviderCommand::Add {
+                name,
+                env_var,
+                base_url,
+            } => {
+                let response = client::send(
+                    &socket_path,
+                    Request::ProviderAdd {
+                        name,
+                        env_var_name: env_var,
+                        base_url,
+                    },
+                )?;
                 render::print(response, false);
             }
             ProviderCommand::Remove { name } => {
@@ -1459,7 +1871,11 @@ fn main() -> anyhow::Result<()> {
                 render::print(response, false);
             }
             ProviderCommand::List { configured, json } => {
-                let request = if configured { Request::ConfiguredProviderList } else { Request::ProviderList };
+                let request = if configured {
+                    Request::ConfiguredProviderList
+                } else {
+                    Request::ProviderList
+                };
                 let response = client::send(&socket_path, request)?;
                 render::print(response, json);
             }
@@ -1475,7 +1891,14 @@ fn main() -> anyhow::Result<()> {
                 if !yes {
                     eprintln!("Dry run (pass --yes to actually write the key into agent config files; backups are made either way).");
                 }
-                let response = client::send(&socket_path, Request::ProviderSync { name, agents, dry_run: !yes })?;
+                let response = client::send(
+                    &socket_path,
+                    Request::ProviderSync {
+                        name,
+                        agents,
+                        dry_run: !yes,
+                    },
+                )?;
                 render::print(response, false);
             }
             ProviderCommand::Presets => {
@@ -1486,8 +1909,21 @@ fn main() -> anyhow::Result<()> {
                 let response = client::send(&socket_path, Request::ProviderAddPreset { name })?;
                 render::print(response, false);
             }
-            ProviderCommand::AddKey { provider, label, agent, value } => {
-                let response = client::send(&socket_path, Request::ProviderAddKey { provider, label, agent, value })?;
+            ProviderCommand::AddKey {
+                provider,
+                label,
+                agent,
+                value,
+            } => {
+                let response = client::send(
+                    &socket_path,
+                    Request::ProviderAddKey {
+                        provider,
+                        label,
+                        agent,
+                        value,
+                    },
+                )?;
                 render::print(response, false);
             }
             ProviderCommand::ListKeys { provider } => {
@@ -1495,18 +1931,35 @@ fn main() -> anyhow::Result<()> {
                 render::print(response, false);
             }
             ProviderCommand::RemoveKey { provider, label } => {
-                let response = client::send(&socket_path, Request::ProviderRemoveKey { provider, label })?;
+                let response =
+                    client::send(&socket_path, Request::ProviderRemoveKey { provider, label })?;
                 render::print(response, false);
             }
-            ProviderCommand::KeySync { provider, label, agent, yes } => {
+            ProviderCommand::KeySync {
+                provider,
+                label,
+                agent,
+                yes,
+            } => {
                 if !yes {
                     eprintln!("Dry run (pass --yes to actually write the key into the agent's config file; backups are made either way).");
                 }
-                let response = client::send(&socket_path, Request::ProviderKeySync { provider, label, agent, dry_run: !yes })?;
+                let response = client::send(
+                    &socket_path,
+                    Request::ProviderKeySync {
+                        provider,
+                        label,
+                        agent,
+                        dry_run: !yes,
+                    },
+                )?;
                 render::print(response, false);
             }
             ProviderCommand::SetBillingKey { provider, value } => {
-                let response = client::send(&socket_path, Request::ProviderSetBillingKey { provider, value })?;
+                let response = client::send(
+                    &socket_path,
+                    Request::ProviderSetBillingKey { provider, value },
+                )?;
                 render::print(response, false);
             }
         },
@@ -1522,8 +1975,21 @@ fn main() -> anyhow::Result<()> {
         },
         Command::Backup { action } => run_backup_command(&dirs, action)?,
         Command::Plugin { action } => match action {
-            PluginCommand::Add { name, target, opencode_module } => {
-                let response = client::send(&socket_path, Request::PluginAdd { plugin: single_protocol::PluginSpec { name, target, opencode_module } })?;
+            PluginCommand::Add {
+                name,
+                target,
+                opencode_module,
+            } => {
+                let response = client::send(
+                    &socket_path,
+                    Request::PluginAdd {
+                        plugin: single_protocol::PluginSpec {
+                            name,
+                            target,
+                            opencode_module,
+                        },
+                    },
+                )?;
                 render::print(response, false);
             }
             PluginCommand::Remove { name } => {
@@ -1540,9 +2006,18 @@ fn main() -> anyhow::Result<()> {
             }
             PluginCommand::Sync { name, agents, yes } => {
                 if !yes {
-                    eprintln!("Dry run (pass --yes to actually install the plugin into agent CLIs).");
+                    eprintln!(
+                        "Dry run (pass --yes to actually install the plugin into agent CLIs)."
+                    );
                 }
-                let response = client::send(&socket_path, Request::PluginSync { name, agents, dry_run: !yes })?;
+                let response = client::send(
+                    &socket_path,
+                    Request::PluginSync {
+                        name,
+                        agents,
+                        dry_run: !yes,
+                    },
+                )?;
                 render::print(response, false);
             }
             PluginCommand::Presets => {
@@ -1556,7 +2031,8 @@ fn main() -> anyhow::Result<()> {
         },
         Command::Account { action } => match action {
             AccountCommand::Capture { agent, name, label } => {
-                let response = client::send(&socket_path, Request::AccountCapture { agent, name, label })?;
+                let response =
+                    client::send(&socket_path, Request::AccountCapture { agent, name, label })?;
                 render::print(response, false);
             }
             AccountCommand::Use { agent, name } => {
@@ -1571,10 +2047,21 @@ fn main() -> anyhow::Result<()> {
                 let response = client::send(&socket_path, Request::AccountRemove { agent, name })?;
                 render::print(response, false);
             }
-            AccountCommand::SetStatus { agent, name, status } => {
+            AccountCommand::SetStatus {
+                agent,
+                name,
+                status,
+            } => {
                 let status = single_protocol::AccountStatus::parse(&status)
                     .ok_or_else(|| anyhow::anyhow!("invalid status '{status}' (expected: available, rate_limited, needs_topup, unknown)"))?;
-                let response = client::send(&socket_path, Request::AccountSetStatus { agent, name, status })?;
+                let response = client::send(
+                    &socket_path,
+                    Request::AccountSetStatus {
+                        agent,
+                        name,
+                        status,
+                    },
+                )?;
                 render::print(response, false);
             }
         },
@@ -1592,7 +2079,8 @@ fn main() -> anyhow::Result<()> {
             if !yes {
                 eprintln!("Dry run (pass --yes to actually write config files; backups are made either way).");
             }
-            let response = client::send(&socket_path, Request::InstallIntegrations { dry_run: !yes })?;
+            let response =
+                client::send(&socket_path, Request::InstallIntegrations { dry_run: !yes })?;
             render::print(response, json);
         }
         Command::UninstallIntegrations { yes } => {
@@ -1614,9 +2102,14 @@ fn print_bootstrap_script() {
     println!("#!/bin/sh");
     println!("set -u"); // not -e: one agent's install failing shouldn't abort the rest
     for agent in single_core::builtin_registry() {
-        let Some(install) = agent.bootstrap_install else { continue };
+        let Some(install) = agent.bootstrap_install else {
+            continue;
+        };
         println!("echo '==> installing {}'", agent.name);
-        println!("if ! ( {} ); then echo 'WARN: {} install failed' >&2; fi", install.command, agent.name);
+        println!(
+            "if ! ( {} ); then echo 'WARN: {} install failed' >&2; fi",
+            install.command, agent.name
+        );
     }
 }
 
@@ -1628,8 +2121,14 @@ fn run_claude_pretooluse_hook() -> anyhow::Result<()> {
     let mut input = String::new();
     std::io::stdin().read_to_string(&mut input)?;
     let input: serde_json::Value = serde_json::from_str(&input).unwrap_or(serde_json::Value::Null);
-    let tool_name = input.get("tool_name").and_then(|v| v.as_str()).unwrap_or("");
-    let tool_input = input.get("tool_input").cloned().unwrap_or(serde_json::Value::Null);
+    let tool_name = input
+        .get("tool_name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let tool_input = input
+        .get("tool_input")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
     let resource = claude_hook_resource(tool_name, &tool_input);
 
     let dirs = SingleDirs::discover()?;
@@ -1641,10 +2140,17 @@ fn run_claude_pretooluse_hook() -> anyhow::Result<()> {
     let conn = rusqlite::Connection::open(&db_path)?;
     single_core::preferences::ensure_schema(&conn)?;
 
-    let verdict = single_core::preferences::evaluate_and_learn(&rules.tools, &conn, &resource, Some("claude PreToolUse hook"))?;
+    let verdict = single_core::preferences::evaluate_and_learn(
+        &rules.tools,
+        &conn,
+        &resource,
+        Some("claude PreToolUse hook"),
+    )?;
     let output = match verdict {
         single_core::preferences::Verdict::Allow => serde_json::json!({}),
-        single_core::preferences::Verdict::Deny => hook_deny_json("blocked by SingleCLI permission policy"),
+        single_core::preferences::Verdict::Deny => {
+            hook_deny_json("blocked by SingleCLI permission policy")
+        }
         single_core::preferences::Verdict::PendingApproval(id) => wait_for_approval(&conn, id)?,
     };
     println!("{}", serde_json::to_string(&output)?);
@@ -1656,14 +2162,19 @@ fn run_claude_pretooluse_hook() -> anyhow::Result<()> {
 /// the TUI) or our own margin under `HOOK_TIMEOUT_SECS` runs out —
 /// timing out denies (fail closed) rather than guessing.
 fn wait_for_approval(conn: &rusqlite::Connection, id: i64) -> anyhow::Result<serde_json::Value> {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(single_core::hooks::CLAUDE_HOOK_TIMEOUT_SECS.saturating_sub(20));
+    let deadline = std::time::Instant::now()
+        + std::time::Duration::from_secs(
+            single_core::hooks::CLAUDE_HOOK_TIMEOUT_SECS.saturating_sub(20),
+        );
     loop {
         let Some(approval) = single_core::preferences::get_approval(conn, id)? else {
             return Ok(hook_deny_json("approval record disappeared"));
         };
         match approval.status {
             single_core::preferences::ApprovalStatus::Allowed => return Ok(serde_json::json!({})),
-            single_core::preferences::ApprovalStatus::Denied => return Ok(hook_deny_json("denied via `single approval resolve`")),
+            single_core::preferences::ApprovalStatus::Denied => {
+                return Ok(hook_deny_json("denied via `single approval resolve`"))
+            }
             single_core::preferences::ApprovalStatus::Pending => {
                 if std::time::Instant::now() >= deadline {
                     return Ok(hook_deny_json(&format!(
@@ -1689,11 +2200,17 @@ fn hook_deny_json(reason: &str) -> serde_json::Value {
 fn claude_hook_resource(tool_name: &str, tool_input: &serde_json::Value) -> String {
     match tool_name {
         "Bash" => {
-            let command = tool_input.get("command").and_then(|v| v.as_str()).unwrap_or("");
+            let command = tool_input
+                .get("command")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             format!("claude:bash:{command}")
         }
         "Edit" | "Write" | "MultiEdit" | "NotebookEdit" => {
-            let path = tool_input.get("file_path").and_then(|v| v.as_str()).unwrap_or("");
+            let path = tool_input
+                .get("file_path")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             format!("claude:edit:{path}")
         }
         other => format!("claude:{other}"),
@@ -1750,7 +2267,11 @@ fn run_backup_command(dirs: &SingleDirs, action: BackupCommand) -> anyhow::Resul
                 "note: if single-runtimed is currently running, stop it first with `single daemon stop` \
                  so state/single.db isn't captured mid-write."
             );
-            let warnings = single_core::backup::export(dirs, std::path::Path::new(&path), &age::secrecy::SecretString::from(passphrase))?;
+            let warnings = single_core::backup::export(
+                dirs,
+                std::path::Path::new(&path),
+                &age::secrecy::SecretString::from(passphrase),
+            )?;
             println!("backup written to {path}");
             for warning in warnings {
                 eprintln!("warning: {warning}");
@@ -1758,7 +2279,12 @@ fn run_backup_command(dirs: &SingleDirs, action: BackupCommand) -> anyhow::Resul
         }
         BackupCommand::Import { path, yes } => {
             let passphrase = rpassword::prompt_password("Backup passphrase: ")?;
-            let report = single_core::backup::import(dirs, std::path::Path::new(&path), &age::secrecy::SecretString::from(passphrase), !yes)?;
+            let report = single_core::backup::import(
+                dirs,
+                std::path::Path::new(&path),
+                &age::secrecy::SecretString::from(passphrase),
+                !yes,
+            )?;
             if !yes {
                 eprintln!("Dry run (pass --yes to actually write files and restore secrets).");
             }
@@ -1772,7 +2298,12 @@ fn run_backup_command(dirs: &SingleDirs, action: BackupCommand) -> anyhow::Resul
                 let mark = if item.success { "✓" } else { "✗" };
                 println!("  {mark} {} — {}", item.path, item.detail);
             }
-            let failed = report.files.iter().chain(&report.secrets).filter(|i| !i.success).count();
+            let failed = report
+                .files
+                .iter()
+                .chain(&report.secrets)
+                .filter(|i| !i.success)
+                .count();
             if failed > 0 {
                 eprintln!("{failed} item(s) failed to restore — see above.");
             }
@@ -1781,12 +2312,22 @@ fn run_backup_command(dirs: &SingleDirs, action: BackupCommand) -> anyhow::Resul
     Ok(())
 }
 
-fn run_agent_login(dirs: &SingleDirs, socket_path: &std::path::Path, agent: &str) -> anyhow::Result<()> {
+fn run_agent_login(
+    dirs: &SingleDirs,
+    socket_path: &std::path::Path,
+    agent: &str,
+) -> anyhow::Result<()> {
     let mut registry = single_core::builtin_registry();
     if let Ok((custom, _errors)) = single_core::custom_agents::load_all(&dirs.agents_dir()) {
-        registry.extend(custom.iter().map(single_core::custom_agents::to_agent_definition));
+        registry.extend(
+            custom
+                .iter()
+                .map(single_core::custom_agents::to_agent_definition),
+        );
     }
-    let Some(adapter) = single_agent_sdk::adapters::for_agent_with_custom(agent, &dirs.agents_dir(), &registry) else {
+    let Some(adapter) =
+        single_agent_sdk::adapters::for_agent_with_custom(agent, &dirs.agents_dir(), &registry)
+    else {
         anyhow::bail!("unknown agent: {agent}");
     };
     if !adapter.discover().detected {
@@ -1794,7 +2335,10 @@ fn run_agent_login(dirs: &SingleDirs, socket_path: &std::path::Path, agent: &str
     }
     let real_home = single_core::paths::real_home_dir()?;
     let home = single_core::agent_home::ensure_bootstrapped(&dirs.homes_dir(), &real_home, agent)?;
-    println!("logging in to {agent} (isolated home: {})...", home.display());
+    println!(
+        "logging in to {agent} (isolated home: {})...",
+        home.display()
+    );
     adapter.login(&home)?;
     println!("done.");
 
@@ -1804,6 +2348,100 @@ fn run_agent_login(dirs: &SingleDirs, socket_path: &std::path::Path, agent: &str
     Ok(())
 }
 
+/// Parses the compact graph syntax kept at the CLI boundary so the daemon
+/// receives typed protocol data, not a second ad-hoc text language. Commas
+/// delimit fields and `|` delimits dependencies; descriptions containing
+/// either should use the JSON/delegate path instead.
+/// Splits `value` on top-level commas only — a naive `str::split(',')`
+/// would also split inside a quoted `desc="build it, then test"`,
+/// silently truncating the description at the first internal comma
+/// instead of erroring or parsing correctly. Doesn't require the whole
+/// field to be quoted, just tracks whether a comma is currently inside an
+/// (unescaped) double-quoted span.
+fn split_top_level_commas(value: &str) -> Vec<&str> {
+    let mut fields = Vec::new();
+    let mut start = 0;
+    let mut in_quotes = false;
+    let mut escaped = false;
+    for (i, ch) in value.char_indices() {
+        if in_quotes {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_quotes = false;
+            }
+            continue;
+        }
+        match ch {
+            '"' => in_quotes = true,
+            ',' => {
+                fields.push(&value[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    fields.push(&value[start..]);
+    fields
+}
+
+fn parse_graph_task(value: &str) -> anyhow::Result<single_protocol::TaskGraphNode> {
+    let mut fields = std::collections::BTreeMap::new();
+    for field in split_top_level_commas(value) {
+        let (key, field_value) = field
+            .split_once('=')
+            .ok_or_else(|| anyhow::anyhow!("--task '{value}' must use key=value fields"))?;
+        let field_value = field_value.trim();
+        // Strip one layer of surrounding double quotes, e.g. desc="build it, then test".
+        let field_value = field_value
+            .strip_prefix('"')
+            .and_then(|v| v.strip_suffix('"'))
+            .unwrap_or(field_value);
+        fields.insert(key.trim(), field_value);
+    }
+    let required = |key| {
+        fields
+            .get(key)
+            .copied()
+            .ok_or_else(|| anyhow::anyhow!("--task '{value}' is missing {key}=..."))
+    };
+    let run_if = match fields.get("run_if").copied().unwrap_or("always") {
+        "always" => single_protocol::RunCondition::Always,
+        "on_success" => single_protocol::RunCondition::OnSuccess,
+        "on_failure" => single_protocol::RunCondition::OnFailure,
+        other => anyhow::bail!(
+            "--task '{value}' has invalid run_if '{other}' (use always, on_success, or on_failure)"
+        ),
+    };
+    let depends_on = fields
+        .get("depends_on")
+        .map(|deps| {
+            deps.split('|')
+                .filter(|id| !id.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok(single_protocol::TaskGraphNode {
+        id: required("id")?.to_string(),
+        agent: required("agent")?.to_string(),
+        description: required("desc")?.to_string(),
+        depends_on,
+        run_if,
+    })
+}
+
+fn parse_orchestrator(value: &str) -> anyhow::Result<single_protocol::OrchestratorMode> {
+    match value {
+        "fixed" => Ok(single_protocol::OrchestratorMode::Fixed),
+        "auto" => Ok(single_protocol::OrchestratorMode::Auto),
+        "delegate" => Ok(single_protocol::OrchestratorMode::Delegate),
+        _ => anyhow::bail!("--orchestrator must be fixed, auto, or delegate"),
+    }
+}
+
 /// After a successful `single agent login`, registers this login as a
 /// named account automatically — otherwise it only appears in `single
 /// account list`/the TUI Accounts tab after a separate manual `single
@@ -1811,16 +2449,33 @@ fn run_agent_login(dirs: &SingleDirs, socket_path: &std::path::Path, agent: &str
 /// "I logged in but don't see an account" confusion. Best-effort: login
 /// itself already succeeded, so a capture failure here (e.g. an agent with
 /// no account-switching support, like opencode) is only a warning.
-fn auto_capture_after_login(dirs: &SingleDirs, socket_path: &std::path::Path, home: &std::path::Path, agent: &str) {
+fn auto_capture_after_login(
+    dirs: &SingleDirs,
+    socket_path: &std::path::Path,
+    home: &std::path::Path,
+    agent: &str,
+) {
     let label = single_core::account::derive_label(home, agent);
-    let existing = single_core::account::list(&dirs.accounts_dir(), Some(agent)).unwrap_or_default();
+    let existing =
+        single_core::account::list(&dirs.accounts_dir(), Some(agent)).unwrap_or_default();
 
     let base_name = label.clone().unwrap_or_else(|| {
-        let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+        let secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
         format!("auto-{secs}")
     });
-    let slug: String =
-        base_name.chars().map(|c| if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') { c } else { '-' }).collect();
+    let slug: String = base_name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
     let mut name = slug.clone();
     let mut suffix = 2;
     while existing.iter().any(|p| p.name == name) {
@@ -1828,7 +2483,14 @@ fn auto_capture_after_login(dirs: &SingleDirs, socket_path: &std::path::Path, ho
         suffix += 1;
     }
 
-    match client::send(socket_path, Request::AccountCapture { agent: agent.to_string(), name: name.clone(), label: label.clone() }) {
+    match client::send(
+        socket_path,
+        Request::AccountCapture {
+            agent: agent.to_string(),
+            name: name.clone(),
+            label: label.clone(),
+        },
+    ) {
         Ok(Response::Ok { .. }) => println!("captured as: {}", label.unwrap_or(name)),
         Ok(Response::Error { message }) => {
             eprintln!("note: login succeeded, but auto-capturing an account failed: {message}");
@@ -1841,5 +2503,37 @@ fn auto_capture_after_login(dirs: &SingleDirs, socket_path: &std::path::Path, ho
             }
         }
         Err(e) => eprintln!("note: login succeeded, but auto-capturing an account failed: {e:#}"),
+    }
+}
+
+#[cfg(test)]
+mod graph_task_parsing_tests {
+    use super::*;
+
+    #[test]
+    fn parses_a_description_containing_a_comma_without_truncating_it() {
+        let node = parse_graph_task(r#"id=build,agent=codex,desc="build it, then test it",depends_on=lint"#).unwrap();
+        assert_eq!(node.id, "build");
+        assert_eq!(node.agent, "codex");
+        assert_eq!(node.description, "build it, then test it");
+        assert_eq!(node.depends_on, vec!["lint".to_string()]);
+    }
+
+    #[test]
+    fn parses_multiple_dependencies_and_defaults_run_if_to_always() {
+        let node = parse_graph_task("id=d,agent=codex,desc=x,depends_on=a|b|c").unwrap();
+        assert_eq!(node.depends_on, vec!["a".to_string(), "b".to_string(), "c".to_string()]);
+        assert_eq!(node.run_if, single_protocol::RunCondition::Always);
+    }
+
+    #[test]
+    fn rejects_a_task_missing_a_required_field() {
+        assert!(parse_graph_task("id=build,agent=codex").is_err());
+    }
+
+    #[test]
+    fn split_top_level_commas_ignores_commas_inside_quotes() {
+        let parts = split_top_level_commas(r#"a="x,y",b=z"#);
+        assert_eq!(parts, vec![r#"a="x,y""#, "b=z"]);
     }
 }

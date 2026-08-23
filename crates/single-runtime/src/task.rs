@@ -19,7 +19,7 @@ use crate::memory;
 use anyhow::{Context as _, Result};
 use rusqlite::{params, Connection, OptionalExtension};
 use single_agent_sdk::adapters::for_agent_with_custom;
-use single_protocol::{MemoryScope, MemorySource, TaskStatus, TaskRecord};
+use single_protocol::{MemoryScope, MemorySource, TaskRecord, TaskStatus};
 use std::path::Path;
 use std::time::Duration;
 
@@ -70,8 +70,9 @@ fn row_to_task(row: &rusqlite::Row) -> rusqlite::Result<TaskRecord> {
         id: row.get("id")?,
         description: row.get("description")?,
         agent: row.get("agent")?,
-        status: parse_status(&status_str)
-            .map_err(|e| rusqlite::Error::InvalidColumnType(0, e.to_string(), rusqlite::types::Type::Text))?,
+        status: parse_status(&status_str).map_err(|e| {
+            rusqlite::Error::InvalidColumnType(0, e.to_string(), rusqlite::types::Type::Text)
+        })?,
         worktree_path: row.get("worktree_path")?,
         artifact_path: row.get("artifact_path")?,
         exit_code: row.get("exit_code")?,
@@ -83,14 +84,20 @@ fn row_to_task(row: &rusqlite::Row) -> rusqlite::Result<TaskRecord> {
 }
 
 pub fn get(conn: &Connection, id: i64) -> Result<Option<TaskRecord>> {
-    conn.query_row("SELECT * FROM tasks WHERE id = ?1", params![id], row_to_task)
-        .optional()
-        .context("querying task by id")
+    conn.query_row(
+        "SELECT * FROM tasks WHERE id = ?1",
+        params![id],
+        row_to_task,
+    )
+    .optional()
+    .context("querying task by id")
 }
 
 pub fn list(conn: &Connection) -> Result<Vec<TaskRecord>> {
     let mut stmt = conn.prepare("SELECT * FROM tasks ORDER BY created_at DESC")?;
-    let rows = stmt.query_map([], row_to_task)?.collect::<rusqlite::Result<Vec<_>>>()?;
+    let rows = stmt
+        .query_map([], row_to_task)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(rows)
 }
 
@@ -118,21 +125,30 @@ pub fn local_stats_by_agent(conn: &Connection) -> Result<Vec<single_protocol::Ag
         let mut counted = 0u64;
         let mut last_run_at: Option<String> = None;
         for record in &records {
-            if let (Ok(created), Ok(updated)) =
-                (chrono::DateTime::parse_from_rfc3339(&record.created_at), chrono::DateTime::parse_from_rfc3339(&record.updated_at))
-            {
+            if let (Ok(created), Ok(updated)) = (
+                chrono::DateTime::parse_from_rfc3339(&record.created_at),
+                chrono::DateTime::parse_from_rfc3339(&record.updated_at),
+            ) {
                 let delta = (updated - created).num_milliseconds();
                 if delta >= 0 {
                     total_ms += delta as u64;
                     counted += 1;
                 }
             }
-            if last_run_at.as_deref().is_none_or(|last| record.updated_at.as_str() > last) {
+            if last_run_at
+                .as_deref()
+                .is_none_or(|last| record.updated_at.as_str() > last)
+            {
                 last_run_at = Some(record.updated_at.clone());
             }
         }
         let avg_duration_ms = if counted > 0 { total_ms / counted } else { 0 };
-        stats.push(single_protocol::AgentLocalStats { agent, run_count, avg_duration_ms, last_run_at });
+        stats.push(single_protocol::AgentLocalStats {
+            agent,
+            run_count,
+            avg_duration_ms,
+            last_run_at,
+        });
     }
     Ok(stats)
 }
@@ -145,6 +161,30 @@ fn create(conn: &Connection, description: &str, agent: &str) -> Result<i64> {
         params![description, agent, status_as_str(TaskStatus::Created), now],
     )?;
     Ok(conn.last_insert_rowid())
+}
+
+/// Persists a graph node that deliberately did not run. `Cancelled` is used
+/// rather than inventing a graph-only status; the summary makes clear this
+/// was a dependency condition, not an explicit user cancellation.
+pub fn record_conditionally_skipped(
+    conn: &Connection,
+    description: &str,
+    agent: &str,
+    summary: &str,
+) -> Result<TaskRecord> {
+    let id = create(conn, description, agent)?;
+    finish(
+        conn,
+        id,
+        TaskStatus::Cancelled,
+        None,
+        None,
+        None,
+        false,
+        Some(summary),
+    )?;
+    crate::state::record_event(conn, "task.cancelled", &format!("#{id} {summary}"))?;
+    get(conn, id)?.context("task disappeared after being recorded as skipped")
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -168,7 +208,10 @@ fn finish(
 
 fn set_status(conn: &Connection, id: i64, status: TaskStatus) -> Result<()> {
     let now = chrono::Utc::now().to_rfc3339();
-    conn.execute("UPDATE tasks SET status = ?1, updated_at = ?2 WHERE id = ?3", params![status_as_str(status), now, id])?;
+    conn.execute(
+        "UPDATE tasks SET status = ?1, updated_at = ?2 WHERE id = ?3",
+        params![status_as_str(status), now, id],
+    )?;
     Ok(())
 }
 
@@ -215,14 +258,22 @@ const MAX_CONTEXT_KG_ENTITIES: usize = 5;
 /// itself — the single-mcp gateway's live `notes_leave`/`notes_read` tools
 /// (v0.1.17) are the complementary on-demand path for agents that want to
 /// pull/push notes mid-session instead of only at the start of a run.
-fn build_context_preamble(conn: &Connection, description: &str, agent: &str, project: Option<&str>) -> String {
+fn build_context_preamble(
+    conn: &Connection,
+    description: &str,
+    agent: &str,
+    project: Option<&str>,
+) -> String {
     let mut sections = String::new();
 
     let mut memories = Vec::new();
     for keyword in significant_keywords(description) {
         if let Ok(hits) = memory::search(conn, &keyword, None, project) {
             for hit in hits {
-                if !memories.iter().any(|m: &single_protocol::MemoryEntry| m.id == hit.id) {
+                if !memories
+                    .iter()
+                    .any(|m: &single_protocol::MemoryEntry| m.id == hit.id)
+                {
                     memories.push(hit);
                 }
             }
@@ -233,7 +284,12 @@ fn build_context_preamble(conn: &Connection, description: &str, agent: &str, pro
     if !memories.is_empty() {
         sections.push_str("--- Relevant memory (from past sessions) ---\n");
         for m in &memories {
-            sections.push_str(&format!("- [{}] {}: {}\n", m.created_at, m.title, crate::orchestrate::truncate(&m.content, 400)));
+            sections.push_str(&format!(
+                "- [{}] {}: {}\n",
+                m.created_at,
+                m.title,
+                crate::orchestrate::truncate(&m.content, 400)
+            ));
         }
         sections.push_str("--- end memory ---\n\n");
     }
@@ -248,7 +304,10 @@ fn build_context_preamble(conn: &Connection, description: &str, agent: &str, pro
     for keyword in significant_keywords(description) {
         if let Ok(hits) = crate::knowledge_graph::query(conn, &keyword) {
             for hit in hits {
-                if !kg_entities.iter().any(|e: &single_protocol::KgEntity| e.name == hit.name) {
+                if !kg_entities
+                    .iter()
+                    .any(|e: &single_protocol::KgEntity| e.name == hit.name)
+                {
                     kg_entities.push(hit);
                 }
             }
@@ -259,7 +318,12 @@ fn build_context_preamble(conn: &Connection, description: &str, agent: &str, pro
         sections.push_str("--- Shared knowledge (from the team's knowledge graph) ---\n");
         for e in &kg_entities {
             let observations = e.observations.join("; ");
-            sections.push_str(&format!("- {} ({}): {}\n", e.name, e.entity_type, crate::orchestrate::truncate(&observations, 300)));
+            sections.push_str(&format!(
+                "- {} ({}): {}\n",
+                e.name,
+                e.entity_type,
+                crate::orchestrate::truncate(&observations, 300)
+            ));
         }
         sections.push_str("--- end shared knowledge ---\n\n");
     }
@@ -268,7 +332,12 @@ fn build_context_preamble(conn: &Connection, description: &str, agent: &str, pro
         if !notes.is_empty() {
             sections.push_str("--- Notes left by other agents ---\n");
             for n in &notes {
-                sections.push_str(&format!("- from {} [{}]: {}\n", n.from_agent, n.topic, crate::orchestrate::truncate(&n.content, 400)));
+                sections.push_str(&format!(
+                    "- from {} [{}]: {}\n",
+                    n.from_agent,
+                    n.topic,
+                    crate::orchestrate::truncate(&n.content, 400)
+                ));
                 let _ = single_core::notes::mark_read(conn, n.id);
             }
             sections.push_str("--- end notes ---\n\n");
@@ -278,7 +347,10 @@ fn build_context_preamble(conn: &Connection, description: &str, agent: &str, pro
     if sections.is_empty() {
         return description.to_string();
     }
-    format!("{}Task: {description}", crate::orchestrate::truncate(&sections, MAX_CONTEXT_CHARS))
+    format!(
+        "{}Task: {description}",
+        crate::orchestrate::truncate(&sections, MAX_CONTEXT_CHARS)
+    )
 }
 
 /// Pulls a few distinctive words out of a task description to drive the
@@ -305,15 +377,23 @@ fn significant_keywords(description: &str) -> Vec<String> {
 /// even though there's no live event *stream* yet (spec section 25) — only
 /// a persisted log.
 pub fn run(conn: &Connection, ctx: &Context, opts: RunTaskOptions) -> Result<TaskRecord> {
-    let Some(adapter) = for_agent_with_custom(opts.agent, &ctx.dirs.agents_dir(), &ctx.registry) else {
+    let Some(adapter) = for_agent_with_custom(opts.agent, &ctx.dirs.agents_dir(), &ctx.registry)
+    else {
         anyhow::bail!("unknown agent: {}", opts.agent);
     };
     if !adapter.discover().detected {
-        anyhow::bail!("agent '{}' is not installed; run `single setup --yes` first", opts.agent);
+        anyhow::bail!(
+            "agent '{}' is not installed; run `single setup --yes` first",
+            opts.agent
+        );
     }
 
     let id = create(conn, opts.description, opts.agent)?;
-    crate::state::record_event(conn, "task.created", &format!("#{id} agent={} \"{}\"", opts.agent, opts.description))?;
+    crate::state::record_event(
+        conn,
+        "task.created",
+        &format!("#{id} agent={} \"{}\"", opts.agent, opts.description),
+    )?;
     execute(conn, ctx, id, &opts, None)
 }
 
@@ -356,26 +436,47 @@ impl OwnedRunTaskOptions {
 /// cancel flag in `registry` before spawning so a later `TaskCancel{id}`
 /// can find and flip it; `single-agent-sdk::run::run_command_live`'s poll
 /// loop notices the flip the same way it already notices a timeout.
-pub fn run_background(ctx: &Context, opts: OwnedRunTaskOptions, registry: crate::registry::TaskRegistry) -> Result<TaskRecord> {
+pub fn run_background(
+    ctx: &Context,
+    opts: OwnedRunTaskOptions,
+    registry: crate::registry::TaskRegistry,
+) -> Result<TaskRecord> {
     let conn = crate::state::open(&ctx.dirs.db_path())?;
     ensure_schema(&conn)?;
 
-    let Some(adapter) = for_agent_with_custom(&opts.agent, &ctx.dirs.agents_dir(), &ctx.registry) else {
+    let Some(adapter) = for_agent_with_custom(&opts.agent, &ctx.dirs.agents_dir(), &ctx.registry)
+    else {
         anyhow::bail!("unknown agent: {}", opts.agent);
     };
     if !adapter.discover().detected {
-        anyhow::bail!("agent '{}' is not installed; run `single setup --yes` first", opts.agent);
+        anyhow::bail!(
+            "agent '{}' is not installed; run `single setup --yes` first",
+            opts.agent
+        );
     }
 
     let id = create(&conn, &opts.description, &opts.agent)?;
-    crate::state::record_event(&conn, "task.created", &format!("#{id} agent={} \"{}\" (background)", opts.agent, opts.description))?;
+    crate::state::record_event(
+        &conn,
+        "task.created",
+        &format!(
+            "#{id} agent={} \"{}\" (background)",
+            opts.agent, opts.description
+        ),
+    )?;
     let cancel_flag = registry.register(id);
     set_status(&conn, id, TaskStatus::Running)?;
 
     let ctx = ctx.clone();
     std::thread::spawn(move || {
         if let Ok(thread_conn) = crate::state::open(&ctx.dirs.db_path()) {
-            let _ = execute(&thread_conn, &ctx, id, &opts.as_borrowed(), Some(cancel_flag.as_ref()));
+            let _ = execute(
+                &thread_conn,
+                &ctx,
+                id,
+                &opts.as_borrowed(),
+                Some(cancel_flag.as_ref()),
+            );
         }
         registry.unregister(id);
     });
@@ -390,7 +491,10 @@ pub fn run_background(ctx: &Context, opts: OwnedRunTaskOptions, registry: crate:
 pub fn cleanup(conn: &Connection, ctx: &Context, id: i64) -> Result<()> {
     let task = get(conn, id)?.context("no such task")?;
     if task.status == TaskStatus::Running || task.status == TaskStatus::Created {
-        anyhow::bail!("task #{id} is still {}; cancel it first", status_as_str(task.status));
+        anyhow::bail!(
+            "task #{id} is still {}; cancel it first",
+            status_as_str(task.status)
+        );
     }
     if let Some(worktree_path) = &task.worktree_path {
         let path = Path::new(worktree_path);
@@ -409,25 +513,76 @@ pub fn cleanup(conn: &Connection, ctx: &Context, id: i64) -> Result<()> {
 /// records the final status. Shared by both the synchronous `run` (always
 /// `cancel: None`, since nothing outlives the blocking call that could
 /// flip it) and `run_background`.
-fn execute(conn: &Connection, ctx: &Context, id: i64, opts: &RunTaskOptions, cancel: Option<&std::sync::atomic::AtomicBool>) -> Result<TaskRecord> {
-    let Some(adapter) = for_agent_with_custom(opts.agent, &ctx.dirs.agents_dir(), &ctx.registry) else {
+fn execute(
+    conn: &Connection,
+    ctx: &Context,
+    id: i64,
+    opts: &RunTaskOptions,
+    cancel: Option<&std::sync::atomic::AtomicBool>,
+) -> Result<TaskRecord> {
+    let Some(adapter) = for_agent_with_custom(opts.agent, &ctx.dirs.agents_dir(), &ctx.registry)
+    else {
         anyhow::bail!("unknown agent: {}", opts.agent);
     };
 
     let run_cwd: std::path::PathBuf = if opts.use_worktree {
         let repo_ctx = single_core::project_context::resolve(opts.cwd);
         let Some(repo_root) = repo_ctx.repo_root else {
-            finish(conn, id, TaskStatus::Failed, None, None, None, false, Some("not a git repository; --worktree requires one"))?;
-            crate::state::record_event(conn, "task.failed", &format!("#{id} not a git repository"))?;
-            remember_failure(conn, id, opts.agent, None, opts.description, "not a git repository; --worktree requires one");
+            finish(
+                conn,
+                id,
+                TaskStatus::Failed,
+                None,
+                None,
+                None,
+                false,
+                Some("not a git repository; --worktree requires one"),
+            )?;
+            crate::state::record_event(
+                conn,
+                "task.failed",
+                &format!("#{id} not a git repository"),
+            )?;
+            remember_failure(
+                conn,
+                id,
+                opts.agent,
+                None,
+                opts.description,
+                "not a git repository; --worktree requires one",
+            );
             return get(conn, id)?.context("task disappeared after being created");
         };
-        let worktree_path = ctx.dirs.state_dir().join("worktrees").join(format!("task-{id}"));
+        let worktree_path = ctx
+            .dirs
+            .state_dir()
+            .join("worktrees")
+            .join(format!("task-{id}"));
         let branch = format!("single/task-{id}");
         if let Err(e) = single_core::worktree::add(Path::new(&repo_root), &worktree_path, &branch) {
-            finish(conn, id, TaskStatus::Failed, None, None, None, false, Some(&format!("worktree setup failed: {e:#}")))?;
-            crate::state::record_event(conn, "task.failed", &format!("#{id} worktree setup failed: {e:#}"))?;
-            remember_failure(conn, id, opts.agent, Some(repo_root.clone()), opts.description, &format!("worktree setup failed: {e:#}"));
+            finish(
+                conn,
+                id,
+                TaskStatus::Failed,
+                None,
+                None,
+                None,
+                false,
+                Some(&format!("worktree setup failed: {e:#}")),
+            )?;
+            crate::state::record_event(
+                conn,
+                "task.failed",
+                &format!("#{id} worktree setup failed: {e:#}"),
+            )?;
+            remember_failure(
+                conn,
+                id,
+                opts.agent,
+                Some(repo_root.clone()),
+                opts.description,
+                &format!("worktree setup failed: {e:#}"),
+            );
             return get(conn, id)?.context("task disappeared after being created");
         }
         worktree_path
@@ -442,7 +597,11 @@ fn execute(conn: &Connection, ctx: &Context, id: i64, opts: &RunTaskOptions, can
     let project = single_core::project_context::resolve(&run_cwd).repo_root;
 
     set_status(conn, id, TaskStatus::Running)?;
-    crate::state::record_event(conn, "task.started", &format!("#{id} cwd={}", run_cwd.display()))?;
+    crate::state::record_event(
+        conn,
+        "task.started",
+        &format!("#{id} cwd={}", run_cwd.display()),
+    )?;
 
     // Every run goes against a SingleCLI-managed home, never the real
     // ambient $HOME (single_core::agent_home docs) — either the default
@@ -456,18 +615,54 @@ fn execute(conn: &Connection, ctx: &Context, id: i64, opts: &RunTaskOptions, can
     } else {
         let resolved = match opts.account {
             Some(name) => integrations::home_dir()
-                .and_then(|home| single_core::account::ensure_isolated_home(&ctx.dirs.accounts_dir(), &home, opts.agent, name))
-                .map_err(|e| format!("failed to materialize isolated home for account '{name}': {e:#}")),
+                .and_then(|home| {
+                    single_core::account::ensure_isolated_home(
+                        &ctx.dirs.accounts_dir(),
+                        &home,
+                        opts.agent,
+                        name,
+                    )
+                })
+                .map_err(|e| {
+                    format!("failed to materialize isolated home for account '{name}': {e:#}")
+                }),
             None => integrations::home_dir()
-                .and_then(|home| single_core::agent_home::ensure_bootstrapped(&ctx.dirs.homes_dir(), &home, opts.agent))
-                .map_err(|e| format!("failed to materialize isolated home for agent '{}': {e:#}", opts.agent)),
+                .and_then(|home| {
+                    single_core::agent_home::ensure_bootstrapped(
+                        &ctx.dirs.homes_dir(),
+                        &home,
+                        opts.agent,
+                    )
+                })
+                .map_err(|e| {
+                    format!(
+                        "failed to materialize isolated home for agent '{}': {e:#}",
+                        opts.agent
+                    )
+                }),
         };
         match resolved {
             Ok(dir) => Some(dir),
             Err(detail) => {
-                finish(conn, id, TaskStatus::Failed, None, None, None, false, Some(&detail))?;
+                finish(
+                    conn,
+                    id,
+                    TaskStatus::Failed,
+                    None,
+                    None,
+                    None,
+                    false,
+                    Some(&detail),
+                )?;
                 crate::state::record_event(conn, "task.failed", &format!("#{id} {detail}"))?;
-                remember_failure(conn, id, opts.agent, project.clone(), opts.description, &detail);
+                remember_failure(
+                    conn,
+                    id,
+                    opts.agent,
+                    project.clone(),
+                    opts.description,
+                    &detail,
+                );
                 return get(conn, id)?.context("task disappeared after being created");
             }
         }
@@ -482,16 +677,48 @@ fn execute(conn: &Connection, ctx: &Context, id: i64, opts: &RunTaskOptions, can
     // Opt-in Docker execution (single_core::docker) — only reachable when
     // the isolated-home path above actually ran (real_home skips both).
     let docker_container = if let Some(home) = &home {
-        match single_core::docker::is_enabled(&ctx.dirs.docker_registry_file(), opts.agent, opts.account) {
+        match single_core::docker::is_enabled(
+            &ctx.dirs.docker_registry_file(),
+            opts.agent,
+            opts.account,
+        ) {
             Ok(true) => {
                 let container = single_core::docker::container_name(opts.agent, opts.account);
-                match crate::docker::ensure_started(&container, crate::docker::DEFAULT_IMAGE, home, &run_cwd) {
+                match crate::docker::ensure_started(
+                    &container,
+                    crate::docker::DEFAULT_IMAGE,
+                    home,
+                    &run_cwd,
+                ) {
                     Ok(()) => Some(container),
                     Err(e) => {
-                        let detail = format!("failed to start docker container for '{}': {e:#}", opts.agent);
-                        finish(conn, id, TaskStatus::Failed, None, None, None, false, Some(&detail))?;
-                        crate::state::record_event(conn, "task.failed", &format!("#{id} {detail}"))?;
-                        remember_failure(conn, id, opts.agent, project.clone(), opts.description, &detail);
+                        let detail = format!(
+                            "failed to start docker container for '{}': {e:#}",
+                            opts.agent
+                        );
+                        finish(
+                            conn,
+                            id,
+                            TaskStatus::Failed,
+                            None,
+                            None,
+                            None,
+                            false,
+                            Some(&detail),
+                        )?;
+                        crate::state::record_event(
+                            conn,
+                            "task.failed",
+                            &format!("#{id} {detail}"),
+                        )?;
+                        remember_failure(
+                            conn,
+                            id,
+                            opts.agent,
+                            project.clone(),
+                            opts.description,
+                            &detail,
+                        );
                         return get(conn, id)?.context("task disappeared after being created");
                     }
                 }
@@ -509,13 +736,24 @@ fn execute(conn: &Connection, ctx: &Context, id: i64, opts: &RunTaskOptions, can
     // without needing a daemon restart.
     let extra_env = single_core::provider_keys::resolve_env_for_agent(&ctx.dirs, opts.agent);
     let backend = match &docker_container {
-        Some(container) => single_agent_sdk::backend::ExecBackend::Docker { container, workdir: &run_cwd, extra_env: Some(&extra_env) },
+        Some(container) => single_agent_sdk::backend::ExecBackend::Docker {
+            container,
+            workdir: &run_cwd,
+            extra_env: Some(&extra_env),
+        },
         None => single_agent_sdk::backend::ExecBackend::host_with_env(home.as_deref(), &extra_env),
     };
 
     std::fs::create_dir_all(ctx.dirs.artifacts_dir())?;
     let live_output_path = ctx.dirs.task_live_output_path(id);
-    let outcome = adapter.run_prompt(&run_cwd, &prompt, &backend, Some(&live_output_path), opts.timeout, cancel);
+    let outcome = adapter.run_prompt(
+        &run_cwd,
+        &prompt,
+        &backend,
+        Some(&live_output_path),
+        opts.timeout,
+        cancel,
+    );
     // Left in place (not deleted here) so a task's live output stays
     // inspectable right after it finishes, not just while it's running —
     // an explicit `TaskCleanup{id}` removes it once the caller is done
@@ -526,7 +764,10 @@ fn execute(conn: &Connection, ctx: &Context, id: i64, opts: &RunTaskOptions, can
     match outcome {
         Ok(outcome) => {
             let artifact_path = ctx.dirs.task_artifact_path(id);
-            std::fs::write(&artifact_path, format!("{}\n--- stderr ---\n{}", outcome.stdout, outcome.stderr))?;
+            std::fs::write(
+                &artifact_path,
+                format!("{}\n--- stderr ---\n{}", outcome.stdout, outcome.stderr),
+            )?;
 
             let status = if outcome.cancelled {
                 TaskStatus::Cancelled
@@ -546,18 +787,47 @@ fn execute(conn: &Connection, ctx: &Context, id: i64, opts: &RunTaskOptions, can
                 outcome.timed_out,
                 Some(&summary),
             )?;
-            let event = if outcome.cancelled { "task.cancelled" } else if outcome.success { "task.completed" } else { "task.failed" };
+            let event = if outcome.cancelled {
+                "task.cancelled"
+            } else if outcome.success {
+                "task.completed"
+            } else {
+                "task.failed"
+            };
             crate::state::record_event(conn, event, &format!("#{id} {summary}"))?;
             // A cancellation was requested, not a real failure — no
             // lesson to learn from it, so it skips `remember_failure`.
             if !outcome.success && !outcome.cancelled {
-                remember_failure(conn, id, opts.agent, project.clone(), opts.description, &summary);
+                remember_failure(
+                    conn,
+                    id,
+                    opts.agent,
+                    project.clone(),
+                    opts.description,
+                    &summary,
+                );
             }
         }
         Err(e) => {
-            finish(conn, id, TaskStatus::Failed, worktree_path_str.as_deref(), None, None, false, Some(&format!("{e:#}")))?;
+            finish(
+                conn,
+                id,
+                TaskStatus::Failed,
+                worktree_path_str.as_deref(),
+                None,
+                None,
+                false,
+                Some(&format!("{e:#}")),
+            )?;
             crate::state::record_event(conn, "task.failed", &format!("#{id} {e:#}"))?;
-            remember_failure(conn, id, opts.agent, project.clone(), opts.description, &format!("{e:#}"));
+            remember_failure(
+                conn,
+                id,
+                opts.agent,
+                project.clone(),
+                opts.description,
+                &format!("{e:#}"),
+            );
         }
     }
 
@@ -571,27 +841,41 @@ fn execute(conn: &Connection, ctx: &Context, id: i64, opts: &RunTaskOptions, can
 /// past failures for whoever — human or agent — looks next. Best-effort:
 /// a memory-write failure must never mask the real task failure it's
 /// trying to record, so errors here are swallowed, not propagated.
-fn remember_failure(conn: &Connection, id: i64, agent: &str, project: Option<String>, description: &str, detail: &str) {
+fn remember_failure(
+    conn: &Connection,
+    id: i64,
+    agent: &str,
+    project: Option<String>,
+    description: &str,
+    detail: &str,
+) {
     let _ = memory::ensure_schema(conn);
-    let _ = memory::store(conn, memory::NewMemory {
-        scope: Some(MemoryScope::Project),
-        source: Some(MemorySource::ToolOutput),
-        project,
-        agent: Some(agent.to_string()),
-        task: Some(id.to_string()),
-        title: format!("task #{id} failed ({agent})"),
-        content: format!("prompt: {description}\nfailure: {detail}"),
-        confidence: Some(1.0),
-        expires_in_seconds: None,
-        ..Default::default()
-    });
+    let _ = memory::store(
+        conn,
+        memory::NewMemory {
+            scope: Some(MemoryScope::Project),
+            source: Some(MemorySource::ToolOutput),
+            project,
+            agent: Some(agent.to_string()),
+            task: Some(id.to_string()),
+            title: format!("task #{id} failed ({agent})"),
+            content: format!("prompt: {description}\nfailure: {detail}"),
+            confidence: Some(1.0),
+            expires_in_seconds: None,
+            ..Default::default()
+        },
+    );
 }
 
 fn summarize(stdout: &str, timed_out: bool, exit_code: Option<i32>) -> String {
     if timed_out {
         return "timed out".to_string();
     }
-    let first_line = stdout.lines().find(|l| !l.trim().is_empty()).unwrap_or("").trim();
+    let first_line = stdout
+        .lines()
+        .find(|l| !l.trim().is_empty())
+        .unwrap_or("")
+        .trim();
     let truncated: String = first_line.chars().take(200).collect();
     if truncated.is_empty() {
         format!("exit code {:?}, no output", exit_code)
@@ -618,33 +902,54 @@ mod tests {
     #[test]
     fn context_preamble_includes_relevant_memory_and_marks_notes_read() {
         let conn = test_conn();
-        memory::store(&conn, memory::NewMemory {
-            scope: Some(MemoryScope::Project),
-            project: Some("proj".into()),
-            title: "auth bug".into(),
-            content: "root cause was a token refresh race".into(),
-            ..Default::default()
-        })
+        memory::store(
+            &conn,
+            memory::NewMemory {
+                scope: Some(MemoryScope::Project),
+                project: Some("proj".into()),
+                title: "auth bug".into(),
+                content: "root cause was a token refresh race".into(),
+                ..Default::default()
+            },
+        )
         .unwrap();
-        let note_id = single_core::notes::leave(&conn, Some("proj".into()), "claude", Some("codex"), "heads up", "watch the flaky test").unwrap();
+        let note_id = single_core::notes::leave(
+            &conn,
+            Some("proj".into()),
+            "claude",
+            Some("codex"),
+            "heads up",
+            "watch the flaky test",
+        )
+        .unwrap();
 
-        let prompt = build_context_preamble(&conn, "fix the token refresh bug", "codex", Some("proj"));
+        let prompt =
+            build_context_preamble(&conn, "fix the token refresh bug", "codex", Some("proj"));
         assert!(prompt.contains("root cause was a token refresh race"));
         assert!(prompt.contains("watch the flaky test"));
         assert!(prompt.ends_with("Task: fix the token refresh bug"));
 
         let note = single_core::notes::get(&conn, note_id).unwrap().unwrap();
-        assert!(note.read_at.is_some(), "a note delivered in the preamble should be marked read");
+        assert!(
+            note.read_at.is_some(),
+            "a note delivered in the preamble should be marked read"
+        );
     }
 
     #[test]
     fn context_preamble_includes_relevant_knowledge_graph_entities() {
         let conn = test_conn();
         crate::knowledge_graph::create_entity(&conn, "token-refresh-race", "bug").unwrap();
-        crate::knowledge_graph::add_observation(&conn, "token-refresh-race", "fixed by adding a mutex around refresh").unwrap();
+        crate::knowledge_graph::add_observation(
+            &conn,
+            "token-refresh-race",
+            "fixed by adding a mutex around refresh",
+        )
+        .unwrap();
         crate::knowledge_graph::create_entity(&conn, "unrelated-thing", "note").unwrap();
 
-        let prompt = build_context_preamble(&conn, "investigate the token refresh race", "codex", None);
+        let prompt =
+            build_context_preamble(&conn, "investigate the token refresh race", "codex", None);
         assert!(prompt.contains("token-refresh-race"));
         assert!(prompt.contains("fixed by adding a mutex around refresh"));
         assert!(!prompt.contains("unrelated-thing"));
@@ -681,7 +986,11 @@ mod tests {
         let conn = test_conn();
         let dirs = single_core::SingleDirs::from_root(dir.path().to_path_buf());
         dirs.ensure_created().unwrap();
-        let ctx = Context { dirs, resolved: single_core::ResolvedConfig::default(), registry: single_core::builtin_registry() };
+        let ctx = Context {
+            dirs,
+            resolved: single_core::ResolvedConfig::default(),
+            registry: single_core::builtin_registry(),
+        };
         let result = task_run_result(&conn, &ctx, dir.path(), "ghost-agent");
         assert!(result.is_err());
         // No task row should be left dangling from an agent-name check that failed before creation.
@@ -695,15 +1004,32 @@ mod tests {
         let conn = test_conn();
         let dirs = single_core::SingleDirs::from_root(dir.path().to_path_buf());
         dirs.ensure_created().unwrap();
-        let ctx = Context { dirs, resolved: single_core::ResolvedConfig::default(), registry: single_core::builtin_registry() };
+        let ctx = Context {
+            dirs,
+            resolved: single_core::ResolvedConfig::default(),
+            registry: single_core::builtin_registry(),
+        };
 
         // "claude" is used here only as a registry entry; if it's not
         // actually installed this test would fail at the detection check
         // before ever reaching the worktree logic, so skip cleanly.
-        if !single_agent_sdk::adapters::for_agent("claude").unwrap().discover().detected {
+        if !single_agent_sdk::adapters::for_agent("claude")
+            .unwrap()
+            .discover()
+            .detected
+        {
             return;
         }
-        let opts = RunTaskOptions { description: "x", agent: "claude", cwd: dir.path(), use_worktree: true, account: None, real_home: false, no_memory_context: false, timeout: Duration::from_secs(1) };
+        let opts = RunTaskOptions {
+            description: "x",
+            agent: "claude",
+            cwd: dir.path(),
+            use_worktree: true,
+            account: None,
+            real_home: false,
+            no_memory_context: false,
+            timeout: Duration::from_secs(1),
+        };
         let task = run(&conn, &ctx, opts).unwrap();
         assert_eq!(task.status, TaskStatus::Failed);
         assert!(task.summary.unwrap().contains("not a git repository"));
@@ -716,8 +1042,26 @@ mod tests {
         assert_eq!(memories[0].agent.as_deref(), Some("claude"));
     }
 
-    fn task_run_result(conn: &Connection, ctx: &Context, cwd: &Path, agent: &str) -> Result<TaskRecord> {
-        run(conn, ctx, RunTaskOptions { description: "x", agent, cwd, use_worktree: false, account: None, real_home: false, no_memory_context: false, timeout: Duration::from_secs(1) })
+    fn task_run_result(
+        conn: &Connection,
+        ctx: &Context,
+        cwd: &Path,
+        agent: &str,
+    ) -> Result<TaskRecord> {
+        run(
+            conn,
+            ctx,
+            RunTaskOptions {
+                description: "x",
+                agent,
+                cwd,
+                use_worktree: false,
+                account: None,
+                real_home: false,
+                no_memory_context: false,
+                timeout: Duration::from_secs(1),
+            },
+        )
     }
 
     #[test]
@@ -727,9 +1071,17 @@ mod tests {
         let conn = test_conn();
         let dirs = single_core::SingleDirs::from_root(dir.path().to_path_buf());
         dirs.ensure_created().unwrap();
-        let ctx = Context { dirs, resolved: single_core::ResolvedConfig::default(), registry: single_core::builtin_registry() };
+        let ctx = Context {
+            dirs,
+            resolved: single_core::ResolvedConfig::default(),
+            registry: single_core::builtin_registry(),
+        };
 
-        if !single_agent_sdk::adapters::for_agent("claude").unwrap().discover().detected {
+        if !single_agent_sdk::adapters::for_agent("claude")
+            .unwrap()
+            .discover()
+            .detected
+        {
             return;
         }
         // Run with cwd inside this crate's own (real) git repo, and a
@@ -752,6 +1104,9 @@ mod tests {
 
         let memories = memory::search(&conn, "definitely-not-a-real-account", None, None).unwrap();
         assert_eq!(memories.len(), 1);
-        assert!(memories[0].project.is_some(), "expected the resolved repo root to be recorded as the memory's project");
+        assert!(
+            memories[0].project.is_some(),
+            "expected the resolved repo root to be recorded as the memory's project"
+        );
     }
 }
