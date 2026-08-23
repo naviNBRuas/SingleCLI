@@ -25,11 +25,31 @@ pub fn send(socket_path: &Path, request: Request) -> Result<Response> {
         Ok(stream) => send_over(stream, &request),
         Err(_) => {
             // No daemon running (or socket stale) — nothing was sent, so
-            // it's safe to run the request in-process instead.
+            // it's safe to run the request in-process instead. A
+            // `background: true` run spawns its actual work on a detached
+            // thread, but *this* process is the one-shot `single` CLI
+            // invocation itself — it exits right after printing the
+            // response below, killing that thread with it before the
+            // agent gets anywhere. Confirmed live: a background task
+            // dispatched with no daemon running left no worktree, no
+            // live-output file, and no subprocess at all. Warn rather
+            // than silently accept a request that can't do what it says.
+            if wants_background(&request) {
+                eprintln!(
+                    "warning: no single-runtimed daemon is running — `--background` has no effect here, since this one-shot command exits (and takes its background thread with it) right after this request. Start the daemon first (`single-runtimed &`) if you want a background/detached run to actually outlive this command."
+                );
+            }
             let ctx = single_runtime::Context::load()?;
             Ok(single_runtime::handle(&ctx, request))
         }
     }
+}
+
+fn wants_background(request: &Request) -> bool {
+    matches!(
+        request,
+        Request::TaskRun { background: true, .. } | Request::OrchestrateParallel { background: true, .. }
+    )
 }
 
 fn send_over(stream: UnixStream, request: &Request) -> Result<Response> {
