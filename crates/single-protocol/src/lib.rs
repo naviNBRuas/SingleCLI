@@ -124,9 +124,30 @@ pub enum Request {
         /// that need to be sent exactly as given.
         no_memory_context: bool,
         timeout_secs: u64,
+        /// When true, the daemon creates the task row, starts it on its
+        /// own thread, and responds immediately with the initial
+        /// (`Running`) record instead of blocking the connection until
+        /// the agent finishes — poll `TaskInspect`/`TaskList` for
+        /// progress, `TaskCancel` to stop it early. Off by default so
+        /// existing one-shot `single task run` callers keep today's
+        /// blocking behavior unchanged.
+        background: bool,
     },
     TaskList,
     TaskInspect { id: i64 },
+    /// Stops a `Running` task started with `background: true` (or an
+    /// in-flight `OrchestrateParallel{ background: true, .. }` sub-task):
+    /// sets its cancel flag, which the agent subprocess's own poll loop
+    /// notices and acts on the same way it already does a timeout — see
+    /// `single-agent-sdk::run::run_command_live`. A no-op success on a
+    /// task that isn't currently running (already finished, or was never
+    /// started in the background).
+    TaskCancel { id: i64 },
+    /// Removes a finished (`Completed`/`Failed`/`Cancelled`) task's git
+    /// worktree and any leftover live-output file — SingleCLI never does
+    /// this automatically, since a worktree might still be worth
+    /// inspecting after the fact. Errors if the task is still `Running`.
+    TaskCleanup { id: i64 },
     Orchestrate { goal: String, agents: Vec<String>, cwd: String, use_worktree: bool, real_home: bool, timeout_secs: u64 },
     /// Real concurrent execution (v0.1.17), as opposed to `Orchestrate`'s
     /// sequential relay: each `ParallelTaskSpec` runs on its own thread, in
@@ -134,7 +155,18 @@ pub enum Request {
     /// automatic goal decomposition here — the caller supplies each
     /// agent's own description explicitly (SingleCLI runs them, it doesn't
     /// invent the split).
-    OrchestrateParallel { tasks: Vec<ParallelTaskSpec>, cwd: String, real_home: bool, timeout_secs: u64 },
+    OrchestrateParallel {
+        tasks: Vec<ParallelTaskSpec>,
+        cwd: String,
+        real_home: bool,
+        timeout_secs: u64,
+        /// Same meaning as `TaskRun::background`: the whole batch runs on
+        /// its own thread (which still internally fans each sub-task out
+        /// to its own thread, unchanged) and the daemon responds with the
+        /// initial records immediately instead of blocking until every
+        /// sub-task finishes.
+        background: bool,
+    },
     AccountCapture { agent: String, name: String, label: Option<String> },
     AccountUse { agent: String, name: String },
     AccountList { agent: Option<String> },
@@ -660,6 +692,10 @@ pub enum TaskStatus {
     Running,
     Completed,
     Failed,
+    /// Killed by an explicit `single task cancel` before it finished on
+    /// its own — distinct from `Failed`, which means the agent ran and
+    /// exited unsuccessfully (or errored/timed out) on its own.
+    Cancelled,
 }
 
 /// One agent's explicit sub-task within a parallel orchestrate batch —
@@ -695,6 +731,10 @@ pub struct RunOutcome {
     pub stderr: String,
     pub exit_code: Option<i32>,
     pub timed_out: bool,
+    /// Killed by an explicit `single task cancel`/`TaskCancel` request
+    /// rather than running past its timeout — distinct from `timed_out`
+    /// so callers can tell "we gave up on it" from "you told it to stop".
+    pub cancelled: bool,
     pub duration_ms: u128,
 }
 

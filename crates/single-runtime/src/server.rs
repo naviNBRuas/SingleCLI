@@ -4,7 +4,7 @@
 //! multiplexed connection with a real event stream is Phase 4 scope.
 
 use crate::context::Context;
-use crate::handlers::handle;
+use crate::handlers::handle_with_registry;
 use anyhow::{Context as _, Result};
 use single_protocol::{Request, Response};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -23,17 +23,24 @@ pub async fn serve(socket_path: &std::path::Path) -> Result<()> {
         .with_context(|| format!("binding socket {}", socket_path.display()))?;
     tracing::info!(path = %socket_path.display(), "single-runtime listening");
 
+    // Created once for the daemon's whole lifetime and cloned (cheap — an
+    // `Arc` underneath) into every connection, so a `TaskCancel` sent on
+    // one connection can reach a task started with `background: true` on
+    // another — see `registry::TaskRegistry`'s doc comment.
+    let registry = crate::registry::TaskRegistry::default();
+
     loop {
         let (stream, _) = listener.accept().await?;
+        let registry = registry.clone();
         tokio::spawn(async move {
-            if let Err(e) = handle_connection(stream).await {
+            if let Err(e) = handle_connection(stream, registry).await {
                 tracing::warn!(error = %e, "connection error");
             }
         });
     }
 }
 
-async fn handle_connection(stream: UnixStream) -> Result<()> {
+async fn handle_connection(stream: UnixStream, registry: crate::registry::TaskRegistry) -> Result<()> {
     let (read_half, mut write_half) = stream.into_split();
     let mut reader = BufReader::new(read_half);
     let mut line = String::new();
@@ -47,7 +54,7 @@ async fn handle_connection(stream: UnixStream) -> Result<()> {
                 // has no long-lived mutable daemon state, so a fresh
                 // Context per request keeps config changes picked up live.
                 match Context::load() {
-                    Ok(ctx) => handle(&ctx, request),
+                    Ok(ctx) => handle_with_registry(&ctx, request, &registry),
                     Err(e) => Response::Error { message: format!("loading context: {e:#}") },
                 }
             }

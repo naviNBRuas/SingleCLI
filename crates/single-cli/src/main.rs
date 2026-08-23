@@ -143,6 +143,11 @@ enum Command {
         real_home: bool,
         #[arg(long, default_value = "300")]
         timeout_secs: u64,
+        /// Start the whole batch and return immediately instead of
+        /// blocking until every task finishes — poll `task list`/`task
+        /// inspect` for each one's progress as it lands.
+        #[arg(long)]
+        background: bool,
     },
     /// Switch between multiple logged-in accounts for an agent (e.g. two
     /// Claude Code accounts). Log in normally with the agent's own CLI
@@ -889,6 +894,11 @@ enum TaskCommand {
         no_memory_context: bool,
         #[arg(long, default_value = "300")]
         timeout_secs: u64,
+        /// Start the task and return immediately with its id instead of
+        /// blocking until the agent finishes — poll `task inspect`/`task
+        /// list` for progress, `task cancel` to stop it early.
+        #[arg(long)]
+        background: bool,
         #[arg(long)]
         json: bool,
     },
@@ -901,6 +911,10 @@ enum TaskCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Stops a task started with `--background` before it finishes on its own.
+    Cancel { id: i64 },
+    /// Removes a finished task's git worktree and any leftover live-output file.
+    Cleanup { id: i64 },
 }
 
 #[derive(Subcommand)]
@@ -1372,7 +1386,7 @@ fn main() -> anyhow::Result<()> {
             render::print(response, json);
         }
         Command::Task { action } => match action {
-            TaskCommand::Run { description, agent, cwd, worktree, account, real_home, no_memory_context, timeout_secs, json } => {
+            TaskCommand::Run { description, agent, cwd, worktree, account, real_home, no_memory_context, timeout_secs, background, json } => {
                 let cwd = cwd.unwrap_or_else(|| ".".to_string());
                 let cwd = std::fs::canonicalize(&cwd).map(|p| p.display().to_string()).unwrap_or(cwd);
                 if real_home {
@@ -1387,6 +1401,7 @@ fn main() -> anyhow::Result<()> {
                     real_home,
                     no_memory_context,
                     timeout_secs,
+                    background,
                 })?;
                 render::print(response, json);
             }
@@ -1398,6 +1413,14 @@ fn main() -> anyhow::Result<()> {
                 let response = client::send(&socket_path, Request::TaskInspect { id })?;
                 render::print(response, json);
             }
+            TaskCommand::Cancel { id } => {
+                let response = client::send(&socket_path, Request::TaskCancel { id })?;
+                render::print(response, false);
+            }
+            TaskCommand::Cleanup { id } => {
+                let response = client::send(&socket_path, Request::TaskCleanup { id })?;
+                render::print(response, false);
+            }
         },
         Command::Orchestrate { goal, agents, cwd, worktree, real_home, timeout_secs } => {
             let cwd = cwd.unwrap_or_else(|| ".".to_string());
@@ -1408,7 +1431,7 @@ fn main() -> anyhow::Result<()> {
             let response = client::send(&socket_path, Request::Orchestrate { goal, agents, cwd, use_worktree: worktree, real_home, timeout_secs })?;
             render::print(response, false);
         }
-        Command::OrchestrateParallel { tasks, cwd, real_home, timeout_secs } => {
+        Command::OrchestrateParallel { tasks, cwd, real_home, timeout_secs, background } => {
             let cwd = cwd.unwrap_or_else(|| ".".to_string());
             let cwd = std::fs::canonicalize(&cwd).map(|p| p.display().to_string()).unwrap_or(cwd);
             if real_home {
@@ -1423,7 +1446,7 @@ fn main() -> anyhow::Result<()> {
                     Ok(single_protocol::ParallelTaskSpec { agent: agent.to_string(), description: description.to_string() })
                 })
                 .collect::<anyhow::Result<Vec<_>>>()?;
-            let response = client::send(&socket_path, Request::OrchestrateParallel { tasks: parsed, cwd, real_home, timeout_secs })?;
+            let response = client::send(&socket_path, Request::OrchestrateParallel { tasks: parsed, cwd, real_home, timeout_secs, background })?;
             render::print(response, false);
         }
         Command::Provider { action } => match action {

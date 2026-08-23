@@ -49,6 +49,7 @@ fn status_as_str(status: TaskStatus) -> &'static str {
         TaskStatus::Running => "running",
         TaskStatus::Completed => "completed",
         TaskStatus::Failed => "failed",
+        TaskStatus::Cancelled => "cancelled",
     }
 }
 
@@ -58,6 +59,7 @@ fn parse_status(s: &str) -> Result<TaskStatus> {
         "running" => TaskStatus::Running,
         "completed" => TaskStatus::Completed,
         "failed" => TaskStatus::Failed,
+        "cancelled" => TaskStatus::Cancelled,
         other => anyhow::bail!("unknown task status: {other}"),
     })
 }
@@ -312,6 +314,105 @@ pub fn run(conn: &Connection, ctx: &Context, opts: RunTaskOptions) -> Result<Tas
 
     let id = create(conn, opts.description, opts.agent)?;
     crate::state::record_event(conn, "task.created", &format!("#{id} agent={} \"{}\"", opts.agent, opts.description))?;
+    execute(conn, ctx, id, &opts, None)
+}
+
+/// Owned counterpart to `RunTaskOptions`, needed because a `background`
+/// run's actual work happens on a detached `std::thread` outlasting the
+/// request handler's stack frame — the borrowed strings/paths in
+/// `RunTaskOptions<'a>` can't cross that boundary, so `run_background`
+/// takes this instead and borrows from it fresh inside the spawned thread.
+pub struct OwnedRunTaskOptions {
+    pub description: String,
+    pub agent: String,
+    pub cwd: std::path::PathBuf,
+    pub use_worktree: bool,
+    pub account: Option<String>,
+    pub real_home: bool,
+    pub no_memory_context: bool,
+    pub timeout: Duration,
+}
+
+impl OwnedRunTaskOptions {
+    fn as_borrowed(&self) -> RunTaskOptions<'_> {
+        RunTaskOptions {
+            description: &self.description,
+            agent: &self.agent,
+            cwd: &self.cwd,
+            use_worktree: self.use_worktree,
+            account: self.account.as_deref(),
+            real_home: self.real_home,
+            no_memory_context: self.no_memory_context,
+            timeout: self.timeout,
+        }
+    }
+}
+
+/// Non-blocking counterpart to `run`: creates the task record (fast — one
+/// INSERT) and returns it immediately with status `Running`, having handed
+/// the actual agent invocation to a detached thread with its own SQLite
+/// connection (SQLite connections aren't shareable across threads — same
+/// discipline `orchestrate::run_parallel` already uses). Registers a
+/// cancel flag in `registry` before spawning so a later `TaskCancel{id}`
+/// can find and flip it; `single-agent-sdk::run::run_command_live`'s poll
+/// loop notices the flip the same way it already notices a timeout.
+pub fn run_background(ctx: &Context, opts: OwnedRunTaskOptions, registry: crate::registry::TaskRegistry) -> Result<TaskRecord> {
+    let conn = crate::state::open(&ctx.dirs.db_path())?;
+    ensure_schema(&conn)?;
+
+    let Some(adapter) = for_agent_with_custom(&opts.agent, &ctx.dirs.agents_dir(), &ctx.registry) else {
+        anyhow::bail!("unknown agent: {}", opts.agent);
+    };
+    if !adapter.discover().detected {
+        anyhow::bail!("agent '{}' is not installed; run `single setup --yes` first", opts.agent);
+    }
+
+    let id = create(&conn, &opts.description, &opts.agent)?;
+    crate::state::record_event(&conn, "task.created", &format!("#{id} agent={} \"{}\" (background)", opts.agent, opts.description))?;
+    let cancel_flag = registry.register(id);
+    set_status(&conn, id, TaskStatus::Running)?;
+
+    let ctx = ctx.clone();
+    std::thread::spawn(move || {
+        if let Ok(thread_conn) = crate::state::open(&ctx.dirs.db_path()) {
+            let _ = execute(&thread_conn, &ctx, id, &opts.as_borrowed(), Some(cancel_flag.as_ref()));
+        }
+        registry.unregister(id);
+    });
+
+    get(&conn, id)?.context("task disappeared after being created")
+}
+
+/// Removes a finished task's git worktree and any leftover live-output
+/// file — never done automatically, since a worktree might still be worth
+/// inspecting right after a run. Errors on a task that's still `Running`
+/// rather than silently killing a worktree out from under a live agent.
+pub fn cleanup(conn: &Connection, ctx: &Context, id: i64) -> Result<()> {
+    let task = get(conn, id)?.context("no such task")?;
+    if task.status == TaskStatus::Running || task.status == TaskStatus::Created {
+        anyhow::bail!("task #{id} is still {}; cancel it first", status_as_str(task.status));
+    }
+    if let Some(worktree_path) = &task.worktree_path {
+        let path = Path::new(worktree_path);
+        if let Some(repo_ctx) = single_core::project_context::resolve(path).repo_root {
+            let _ = single_core::worktree::remove(Path::new(&repo_ctx), path, true);
+        }
+    }
+    let _ = std::fs::remove_file(ctx.dirs.task_live_output_path(id));
+    Ok(())
+}
+
+/// The actual work of running one task against an already-created `id`:
+/// optionally isolates it in a new git worktree, invokes the agent's real
+/// non-interactive mode (threading `cancel` through so a background run
+/// can be stopped early), captures the output as an artifact file, and
+/// records the final status. Shared by both the synchronous `run` (always
+/// `cancel: None`, since nothing outlives the blocking call that could
+/// flip it) and `run_background`.
+fn execute(conn: &Connection, ctx: &Context, id: i64, opts: &RunTaskOptions, cancel: Option<&std::sync::atomic::AtomicBool>) -> Result<TaskRecord> {
+    let Some(adapter) = for_agent_with_custom(opts.agent, &ctx.dirs.agents_dir(), &ctx.registry) else {
+        anyhow::bail!("unknown agent: {}", opts.agent);
+    };
 
     let run_cwd: std::path::PathBuf = if opts.use_worktree {
         let repo_ctx = single_core::project_context::resolve(opts.cwd);
@@ -414,8 +515,11 @@ pub fn run(conn: &Connection, ctx: &Context, opts: RunTaskOptions) -> Result<Tas
 
     std::fs::create_dir_all(ctx.dirs.artifacts_dir())?;
     let live_output_path = ctx.dirs.task_live_output_path(id);
-    let outcome = adapter.run_prompt(&run_cwd, &prompt, &backend, Some(&live_output_path), opts.timeout);
-    let _ = std::fs::remove_file(&live_output_path); // superseded by the final artifact below; best-effort cleanup
+    let outcome = adapter.run_prompt(&run_cwd, &prompt, &backend, Some(&live_output_path), opts.timeout, cancel);
+    // Left in place (not deleted here) so a task's live output stays
+    // inspectable right after it finishes, not just while it's running —
+    // an explicit `TaskCleanup{id}` removes it once the caller is done
+    // looking, see `cleanup` above.
 
     let worktree_path_str = opts.use_worktree.then(|| run_cwd.display().to_string());
 
@@ -424,7 +528,13 @@ pub fn run(conn: &Connection, ctx: &Context, opts: RunTaskOptions) -> Result<Tas
             let artifact_path = ctx.dirs.task_artifact_path(id);
             std::fs::write(&artifact_path, format!("{}\n--- stderr ---\n{}", outcome.stdout, outcome.stderr))?;
 
-            let status = if outcome.success { TaskStatus::Completed } else { TaskStatus::Failed };
+            let status = if outcome.cancelled {
+                TaskStatus::Cancelled
+            } else if outcome.success {
+                TaskStatus::Completed
+            } else {
+                TaskStatus::Failed
+            };
             let summary = summarize(&outcome.stdout, outcome.timed_out, outcome.exit_code);
             finish(
                 conn,
@@ -436,8 +546,11 @@ pub fn run(conn: &Connection, ctx: &Context, opts: RunTaskOptions) -> Result<Tas
                 outcome.timed_out,
                 Some(&summary),
             )?;
-            crate::state::record_event(conn, if outcome.success { "task.completed" } else { "task.failed" }, &format!("#{id} {summary}"))?;
-            if !outcome.success {
+            let event = if outcome.cancelled { "task.cancelled" } else if outcome.success { "task.completed" } else { "task.failed" };
+            crate::state::record_event(conn, event, &format!("#{id} {summary}"))?;
+            // A cancellation was requested, not a real failure — no
+            // lesson to learn from it, so it skips `remember_failure`.
+            if !outcome.success && !outcome.cancelled {
                 remember_failure(conn, id, opts.agent, project.clone(), opts.description, &summary);
             }
         }

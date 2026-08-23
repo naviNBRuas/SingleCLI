@@ -50,7 +50,7 @@ pub fn run_command(command: &str, args: &[String], cwd: &Path, timeout: Duration
 /// backend (see `backend::ExecBackend`'s doc comment for why that's
 /// scoped to `run_prompt` only).
 pub fn run_command_with_home(command: &str, args: &[String], cwd: &Path, home: Option<&Path>, timeout: Duration) -> Result<RunOutcome> {
-    run_command_live(command, args, cwd, &ExecBackend::host(home), None, timeout)
+    run_command_live(command, args, cwd, &ExecBackend::host(home), None, timeout, None)
 }
 
 /// Same as `run_command_with_home`, but when `live_output_path` is set,
@@ -71,6 +71,7 @@ pub fn run_command_live(
     backend: &ExecBackend,
     live_output_path: Option<&Path>,
     timeout: Duration,
+    cancel: Option<&std::sync::atomic::AtomicBool>,
 ) -> Result<RunOutcome> {
     let start = Instant::now();
     let mut cmd = match backend {
@@ -115,6 +116,15 @@ pub fn run_command_live(
         }
     };
     cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    // Puts the child in its own new process group (pgid == its own pid),
+    // so a timeout/cancel can kill the *whole* group — see `kill_child`'s
+    // doc comment for why a plain `child.kill()` isn't enough for a
+    // command like `sh -c "sleep 5"`, which forks rather than exec's.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
     let mut child = cmd.spawn().with_context(|| format!("spawning {command}"))?;
 
     let tee_file: Option<Arc<Mutex<std::fs::File>>> = live_output_path
@@ -136,13 +146,16 @@ pub fn run_command_live(
     });
 
     let deadline = start + timeout;
-    let timed_out = loop {
+    let (timed_out, cancelled) = loop {
         match child.try_wait().context("polling child process")? {
-            Some(_) => break false,
+            Some(_) => break (false, false),
             None if Instant::now() >= deadline => {
-                let _ = child.kill();
-                let _ = child.wait();
-                break true;
+                kill_child(&mut child);
+                break (true, false);
+            }
+            None if cancel.is_some_and(|c| c.load(std::sync::atomic::Ordering::Relaxed)) => {
+                kill_child(&mut child);
+                break (false, true);
             }
             None => std::thread::sleep(Duration::from_millis(100)),
         }
@@ -156,7 +169,7 @@ pub fn run_command_live(
     }
 
     let exit_code = child.wait().ok().and_then(|s| s.code());
-    let success = !timed_out && exit_code == Some(0);
+    let success = !timed_out && !cancelled && exit_code == Some(0);
     let stdout = Arc::try_unwrap(stdout_buf).map(|m| m.into_inner().unwrap_or_default()).unwrap_or_default();
     let stderr = Arc::try_unwrap(stderr_buf).map(|m| m.into_inner().unwrap_or_default()).unwrap_or_default();
 
@@ -166,6 +179,7 @@ pub fn run_command_live(
         stderr,
         exit_code,
         timed_out,
+        cancelled,
         duration_ms: start.elapsed().as_millis(),
     })
 }
@@ -181,6 +195,34 @@ pub fn run_command_live(
 /// looks at. Pinning `SINGLE_CONFIG_DIR` to the resolving process's own
 /// (real) config root keeps every nested `single` call pointed at the same
 /// central state regardless of what `$HOME` the child sees.
+/// Kills a timed-out or cancelled child and waits for it to actually exit.
+/// A plain `child.kill()` only signals the one PID we spawned directly —
+/// for a command like `sh -c "sleep 5"`, where the shell forks `sleep`
+/// as a separate child rather than exec'ing into it, that leaves `sleep`
+/// running, still holding the stdout/stderr pipes open. The `drain_into`
+/// threads then block on those pipes until `sleep` exits on its own,
+/// silently turning a "kill this now" into "wait out the full duration
+/// anyway" — confirmed live: a cancelled/timed-out run took the full
+/// remaining sleep time before this fix, because `child.wait()` returned
+/// promptly but the pipe-reader threads' `.join()` afterward did not.
+/// Since the child was spawned into its own process group (pgid == its
+/// own pid, see the `process_group(0)` call above), sending the kill to
+/// the *group* (negative pid) reaches every descendant at once. Falls
+/// back to the plain single-process kill if the group kill can't run at
+/// all (e.g. `kill` isn't on `$PATH`) or on a non-Unix target.
+fn kill_child(child: &mut std::process::Child) {
+    #[cfg(unix)]
+    {
+        let killed_group = Command::new("kill").arg("-KILL").arg(format!("-{}", child.id())).status().is_ok_and(|s| s.success());
+        if killed_group {
+            let _ = child.wait();
+            return;
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
 fn pin_real_config_dir(cmd: &mut Command) {
     if let Ok(dirs) = single_core::paths::SingleDirs::discover() {
         cmd.env("SINGLE_CONFIG_DIR", dirs.root());
@@ -264,6 +306,7 @@ mod tests {
             &ExecBackend::host(None),
             Some(&live_path),
             Duration::from_secs(5),
+            None,
         )
         .unwrap();
         assert!(outcome.success);
@@ -277,6 +320,32 @@ mod tests {
         let outcome = run_command("sh", &["-c".into(), "sleep 5".into()], dir.path(), Duration::from_millis(200)).unwrap();
         assert!(outcome.timed_out);
         assert!(!outcome.success);
+    }
+
+    /// Exercises the actual mechanism `single-runtime::task::run_background`
+    /// relies on for `single task cancel`: a long-running process is killed
+    /// early when its cancel flag flips, well before the (much longer)
+    /// timeout would have — and the outcome is marked `cancelled`, not
+    /// `timed_out`, so callers can tell the two apart.
+    #[test]
+    fn flipping_the_cancel_flag_kills_the_process_before_its_timeout() {
+        let dir = tempfile::tempdir().unwrap();
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let cancel_setter = std::sync::Arc::clone(&cancel);
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(150));
+            cancel_setter.store(true, std::sync::atomic::Ordering::Relaxed);
+        });
+
+        let start = std::time::Instant::now();
+        let outcome =
+            run_command_live("sh", &["-c".into(), "sleep 5".into()], dir.path(), &ExecBackend::host(None), None, Duration::from_secs(30), Some(&cancel))
+                .unwrap();
+
+        assert!(outcome.cancelled, "expected cancelled=true");
+        assert!(!outcome.timed_out, "a cancellation must not also be reported as a timeout");
+        assert!(!outcome.success);
+        assert!(start.elapsed() < Duration::from_secs(5), "should have been killed well before the 30s timeout or the 5s sleep finished");
     }
 
     fn docker_available() -> bool {
@@ -322,6 +391,7 @@ mod tests {
             &backend,
             None,
             Duration::from_secs(10),
+            None,
         )
         .unwrap();
 

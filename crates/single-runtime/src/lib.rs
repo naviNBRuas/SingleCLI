@@ -12,6 +12,7 @@ pub mod memory;
 pub mod orchestrate;
 pub mod qdrant_backend;
 pub mod redis_backend;
+pub mod registry;
 pub mod server;
 pub mod state;
 pub mod task;

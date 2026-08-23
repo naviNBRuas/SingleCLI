@@ -169,6 +169,7 @@ fn draw_tasks(frame: &mut Frame, area: Rect, app: &App) {
                 single_protocol::TaskStatus::Failed => ("failed", BAD),
                 single_protocol::TaskStatus::Running => ("running", WARN),
                 single_protocol::TaskStatus::Created => ("created", MUTED),
+                single_protocol::TaskStatus::Cancelled => ("cancelled", MUTED),
             };
             let style = if i == app.selected && app.tab == Tab::Tasks { selected_style() } else { Style::default() };
             Row::new(vec![
@@ -182,7 +183,7 @@ fn draw_tasks(frame: &mut Frame, area: Rect, app: &App) {
         .collect();
     let table = Table::new(rows, [Constraint::Length(6), Constraint::Length(12), Constraint::Length(12), Constraint::Min(20)])
         .header(Row::new(vec!["ID", "Status", "Agent", "Description"]).style(Style::default().add_modifier(Modifier::BOLD)))
-        .block(Block::default().borders(Borders::ALL).title(" Tasks — [n] new task  [enter] view output "));
+        .block(Block::default().borders(Borders::ALL).title(" Tasks — [n] new task  [enter] view output  [c] cancel running "));
     frame.render_widget(table, area);
 }
 
@@ -634,6 +635,7 @@ fn draw_task_detail_modal(frame: &mut Frame, area: Rect, app: &App) {
         single_protocol::TaskStatus::Failed => ("failed", BAD),
         single_protocol::TaskStatus::Running => ("running…", WARN),
         single_protocol::TaskStatus::Created => ("created", MUTED),
+        single_protocol::TaskStatus::Cancelled => ("cancelled", MUTED),
     };
 
     let outer = Block::default()

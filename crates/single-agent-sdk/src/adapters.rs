@@ -61,8 +61,17 @@ impl AgentAdapter for ClaudeAdapter {
 
     /// `claude -p "<prompt>"` — confirmed non-interactive print mode via
     /// `claude --help` on the reference machine.
-    fn run_prompt(&self, cwd: &Path, prompt: &str, backend: &ExecBackend, live_output_path: Option<&Path>, timeout: Duration) -> Result<RunOutcome> {
-        run_with_prompt_flag("claude", cwd, prompt, backend, live_output_path, timeout)
+    #[allow(clippy::too_many_arguments)]
+    fn run_prompt(
+        &self,
+        cwd: &Path,
+        prompt: &str,
+        backend: &ExecBackend,
+        live_output_path: Option<&Path>,
+        timeout: Duration,
+        cancel: Option<&std::sync::atomic::AtomicBool>,
+    ) -> Result<RunOutcome> {
+        run_with_prompt_flag("claude", cwd, prompt, backend, live_output_path, timeout, cancel)
     }
 
     /// `claude plugin install <plugin[@marketplace]>` — confirmed real via
@@ -122,7 +131,16 @@ impl AgentAdapter for CodexAdapter {
     /// `"---"`, and codex's own parser rejected that as an unrecognized
     /// argument without it — its error message even suggests this exact
     /// fix ("tip: to pass ... as a value, use '-- ...'").
-    fn run_prompt(&self, cwd: &Path, prompt: &str, backend: &ExecBackend, live_output_path: Option<&Path>, timeout: Duration) -> Result<RunOutcome> {
+    #[allow(clippy::too_many_arguments)]
+    fn run_prompt(
+        &self,
+        cwd: &Path,
+        prompt: &str,
+        backend: &ExecBackend,
+        live_output_path: Option<&Path>,
+        timeout: Duration,
+        cancel: Option<&std::sync::atomic::AtomicBool>,
+    ) -> Result<RunOutcome> {
         run_command_live(
             "codex",
             &["exec".to_string(), "--skip-git-repo-check".to_string(), "--".to_string(), prompt.to_string()],
@@ -130,6 +148,7 @@ impl AgentAdapter for CodexAdapter {
             backend,
             live_output_path,
             timeout,
+            cancel,
         )
     }
 
@@ -206,7 +225,16 @@ impl AgentAdapter for OpenCodeAdapter {
     /// preamble starts with a literal `"---"`, and without a `--`
     /// separator `opencode run` misparsed that as a flag and dumped its
     /// own help instead of running — confirmed live.
-    fn run_prompt(&self, cwd: &Path, prompt: &str, backend: &ExecBackend, live_output_path: Option<&Path>, timeout: Duration) -> Result<RunOutcome> {
+    #[allow(clippy::too_many_arguments)]
+    fn run_prompt(
+        &self,
+        cwd: &Path,
+        prompt: &str,
+        backend: &ExecBackend,
+        live_output_path: Option<&Path>,
+        timeout: Duration,
+        cancel: Option<&std::sync::atomic::AtomicBool>,
+    ) -> Result<RunOutcome> {
         run_command_live(
             "opencode",
             &["run".to_string(), "--".to_string(), prompt.to_string(), "--dir".to_string(), cwd.display().to_string()],
@@ -214,6 +242,7 @@ impl AgentAdapter for OpenCodeAdapter {
             backend,
             live_output_path,
             timeout,
+            cancel,
         )
     }
 
@@ -260,8 +289,17 @@ impl AgentAdapter for AgyAdapter {
     /// help, while `agy --print="---..."` correctly ran the prompt.
     /// (`single task run`'s memory/notes preamble literally starts with
     /// `"---"`, which is what surfaced this.)
-    fn run_prompt(&self, cwd: &Path, prompt: &str, backend: &ExecBackend, live_output_path: Option<&Path>, timeout: Duration) -> Result<RunOutcome> {
-        run_command_live("agy", &[format!("--print={prompt}")], cwd, backend, live_output_path, timeout)
+    #[allow(clippy::too_many_arguments)]
+    fn run_prompt(
+        &self,
+        cwd: &Path,
+        prompt: &str,
+        backend: &ExecBackend,
+        live_output_path: Option<&Path>,
+        timeout: Duration,
+        cancel: Option<&std::sync::atomic::AtomicBool>,
+    ) -> Result<RunOutcome> {
+        run_command_live("agy", &[format!("--print={prompt}")], cwd, backend, live_output_path, timeout, cancel)
     }
 
     /// `agy plugin install <plugin[@marketplace]>` — confirmed real via
@@ -344,8 +382,17 @@ impl AgentAdapter for CursorAdapter {
     /// option rather than treating it as `-p`'s value — clap-style
     /// parsers only accept a value that looks like a flag when it's
     /// explicitly separated from option parsing this way.
-    fn run_prompt(&self, cwd: &Path, prompt: &str, backend: &ExecBackend, live_output_path: Option<&Path>, timeout: Duration) -> Result<RunOutcome> {
-        run_command_live("cursor-agent", &["--trust".to_string(), "-p".to_string(), "--".to_string(), prompt.to_string()], cwd, backend, live_output_path, timeout)
+    #[allow(clippy::too_many_arguments)]
+    fn run_prompt(
+        &self,
+        cwd: &Path,
+        prompt: &str,
+        backend: &ExecBackend,
+        live_output_path: Option<&Path>,
+        timeout: Duration,
+        cancel: Option<&std::sync::atomic::AtomicBool>,
+    ) -> Result<RunOutcome> {
+        run_command_live("cursor-agent", &["--trust".to_string(), "-p".to_string(), "--".to_string(), prompt.to_string()], cwd, backend, live_output_path, timeout, cancel)
     }
 
     /// `cursor-agent login` — confirmed real via `cursor-agent --help` on
@@ -378,8 +425,17 @@ impl AgentAdapter for AiderAdapter {
     /// `aider --message "<prompt>" --yes-always` — confirmed non-interactive
     /// mode via `aider --help` on the reference machine (`--yes-always`
     /// skips the confirmation prompts `--message` alone would still hit).
-    fn run_prompt(&self, cwd: &Path, prompt: &str, backend: &ExecBackend, live_output_path: Option<&Path>, timeout: Duration) -> Result<RunOutcome> {
-        run_command_live("aider", &["--message".to_string(), prompt.to_string(), "--yes-always".to_string()], cwd, backend, live_output_path, timeout)
+    #[allow(clippy::too_many_arguments)]
+    fn run_prompt(
+        &self,
+        cwd: &Path,
+        prompt: &str,
+        backend: &ExecBackend,
+        live_output_path: Option<&Path>,
+        timeout: Duration,
+        cancel: Option<&std::sync::atomic::AtomicBool>,
+    ) -> Result<RunOutcome> {
+        run_command_live("aider", &["--message".to_string(), prompt.to_string(), "--yes-always".to_string()], cwd, backend, live_output_path, timeout, cancel)
     }
 
     // No `login`: aider authenticates via API-key flags/env vars
@@ -419,7 +475,16 @@ impl AgentAdapter for GooseAdapter {
     /// "---..."` (as a separate argv token) rejected it as an unexpected
     /// argument even with `--` inserted before it — confirmed live that
     /// only binding the value directly to `--text` with `=` works.
-    fn run_prompt(&self, cwd: &Path, prompt: &str, backend: &ExecBackend, live_output_path: Option<&Path>, timeout: Duration) -> Result<RunOutcome> {
+    #[allow(clippy::too_many_arguments)]
+    fn run_prompt(
+        &self,
+        cwd: &Path,
+        prompt: &str,
+        backend: &ExecBackend,
+        live_output_path: Option<&Path>,
+        timeout: Duration,
+        cancel: Option<&std::sync::atomic::AtomicBool>,
+    ) -> Result<RunOutcome> {
         run_command_live(
             "goose",
             &["run".to_string(), format!("--text={prompt}"), "--no-session".to_string(), "--quiet".to_string()],
@@ -427,6 +492,7 @@ impl AgentAdapter for GooseAdapter {
             backend,
             live_output_path,
             timeout,
+            cancel,
         )
     }
 
@@ -475,8 +541,17 @@ impl AgentAdapter for CopilotAdapter {
     /// nothing to auto-approve tool calls with and can't complete), the
     /// same "needed to function at all, not an extra permission grant"
     /// reasoning already applied to codex's `--skip-git-repo-check`.
-    fn run_prompt(&self, cwd: &Path, prompt: &str, backend: &ExecBackend, live_output_path: Option<&Path>, timeout: Duration) -> Result<RunOutcome> {
-        run_command_live("copilot", &["-p".to_string(), prompt.to_string(), "--allow-all-tools".to_string()], cwd, backend, live_output_path, timeout)
+    #[allow(clippy::too_many_arguments)]
+    fn run_prompt(
+        &self,
+        cwd: &Path,
+        prompt: &str,
+        backend: &ExecBackend,
+        live_output_path: Option<&Path>,
+        timeout: Duration,
+        cancel: Option<&std::sync::atomic::AtomicBool>,
+    ) -> Result<RunOutcome> {
+        run_command_live("copilot", &["-p".to_string(), prompt.to_string(), "--allow-all-tools".to_string()], cwd, backend, live_output_path, timeout, cancel)
     }
 
     /// `copilot login` — confirmed real via `copilot login --help` on the
@@ -522,7 +597,16 @@ impl AgentAdapter for KiroAdapter {
 
     /// `kiro-cli chat --no-interactive "<prompt>" --trust-all-tools` —
     /// confirmed real via `kiro-cli chat --help` on the reference machine.
-    fn run_prompt(&self, cwd: &Path, prompt: &str, backend: &ExecBackend, live_output_path: Option<&Path>, timeout: Duration) -> Result<RunOutcome> {
+    #[allow(clippy::too_many_arguments)]
+    fn run_prompt(
+        &self,
+        cwd: &Path,
+        prompt: &str,
+        backend: &ExecBackend,
+        live_output_path: Option<&Path>,
+        timeout: Duration,
+        cancel: Option<&std::sync::atomic::AtomicBool>,
+    ) -> Result<RunOutcome> {
         run_command_live(
             "kiro-cli",
             &["chat".to_string(), "--no-interactive".to_string(), prompt.to_string(), "--trust-all-tools".to_string()],
@@ -530,6 +614,7 @@ impl AgentAdapter for KiroAdapter {
             backend,
             live_output_path,
             timeout,
+            cancel,
         )
     }
 
@@ -562,8 +647,17 @@ impl AgentAdapter for CodyAdapter {
     /// `cody chat -m "<prompt>"` — per Sourcegraph's own Cody CLI install
     /// docs (fetched directly, not run locally — this agent is marked
     /// `unverified` in the registry for that reason).
-    fn run_prompt(&self, cwd: &Path, prompt: &str, backend: &ExecBackend, live_output_path: Option<&Path>, timeout: Duration) -> Result<RunOutcome> {
-        run_command_live("cody", &["chat".to_string(), "-m".to_string(), prompt.to_string()], cwd, backend, live_output_path, timeout)
+    #[allow(clippy::too_many_arguments)]
+    fn run_prompt(
+        &self,
+        cwd: &Path,
+        prompt: &str,
+        backend: &ExecBackend,
+        live_output_path: Option<&Path>,
+        timeout: Duration,
+        cancel: Option<&std::sync::atomic::AtomicBool>,
+    ) -> Result<RunOutcome> {
+        run_command_live("cody", &["chat".to_string(), "-m".to_string(), prompt.to_string()], cwd, backend, live_output_path, timeout, cancel)
     }
 
     /// `cody auth login --web` — per Sourcegraph's Cody CLI docs.
@@ -608,8 +702,17 @@ impl AgentAdapter for GeminiAdapter {
     /// confirmed live. Same "needed to function at all, not an extra
     /// permission grant" reasoning already applied to codex's
     /// `--skip-git-repo-check` and cursor's `--trust`.
-    fn run_prompt(&self, cwd: &Path, prompt: &str, backend: &ExecBackend, live_output_path: Option<&Path>, timeout: Duration) -> Result<RunOutcome> {
-        run_command_live("gemini", &[format!("--prompt={prompt}"), "--skip-trust".to_string()], cwd, backend, live_output_path, timeout)
+    #[allow(clippy::too_many_arguments)]
+    fn run_prompt(
+        &self,
+        cwd: &Path,
+        prompt: &str,
+        backend: &ExecBackend,
+        live_output_path: Option<&Path>,
+        timeout: Duration,
+        cancel: Option<&std::sync::atomic::AtomicBool>,
+    ) -> Result<RunOutcome> {
+        run_command_live("gemini", &[format!("--prompt={prompt}"), "--skip-trust".to_string()], cwd, backend, live_output_path, timeout, cancel)
     }
 
     // No `login`: `gemini --help` lists no `auth`/`login` subcommand —
@@ -637,8 +740,17 @@ impl AgentAdapter for QwenCodeAdapter {
     /// behavior as upstream Gemini CLI, which this is forked from —
     /// `--prompt` takes the value directly, `--` doesn't help; see
     /// `GeminiAdapter::run_prompt`'s doc comment for the confirmation).
-    fn run_prompt(&self, cwd: &Path, prompt: &str, backend: &ExecBackend, live_output_path: Option<&Path>, timeout: Duration) -> Result<RunOutcome> {
-        run_command_live("qwen", &[format!("--prompt={prompt}")], cwd, backend, live_output_path, timeout)
+    #[allow(clippy::too_many_arguments)]
+    fn run_prompt(
+        &self,
+        cwd: &Path,
+        prompt: &str,
+        backend: &ExecBackend,
+        live_output_path: Option<&Path>,
+        timeout: Duration,
+        cancel: Option<&std::sync::atomic::AtomicBool>,
+    ) -> Result<RunOutcome> {
+        run_command_live("qwen", &[format!("--prompt={prompt}")], cwd, backend, live_output_path, timeout, cancel)
     }
 
     // No `login`: `qwen auth --help` on the reference machine describes
@@ -677,8 +789,17 @@ impl AgentAdapter for AmpAdapter {
     /// rather than returning a clean auth error) — but it did stop
     /// producing the parse error, matching the same fix pattern verified
     /// end-to-end for codex/opencode/droid/crush.
-    fn run_prompt(&self, cwd: &Path, prompt: &str, backend: &ExecBackend, live_output_path: Option<&Path>, timeout: Duration) -> Result<RunOutcome> {
-        run_command_live("amp", &["-x".to_string(), "--".to_string(), prompt.to_string()], cwd, backend, live_output_path, timeout)
+    #[allow(clippy::too_many_arguments)]
+    fn run_prompt(
+        &self,
+        cwd: &Path,
+        prompt: &str,
+        backend: &ExecBackend,
+        live_output_path: Option<&Path>,
+        timeout: Duration,
+        cancel: Option<&std::sync::atomic::AtomicBool>,
+    ) -> Result<RunOutcome> {
+        run_command_live("amp", &["-x".to_string(), "--".to_string(), prompt.to_string()], cwd, backend, live_output_path, timeout, cancel)
     }
 
     /// `amp login` — confirmed real via `amp --help` ("Log in to Amp").
@@ -713,8 +834,17 @@ impl AgentAdapter for DroidAdapter {
     /// `--`) rejected as an unknown option — confirmed live, including
     /// that the fixed form correctly reaches droid's own auth check
     /// instead (a clean, expected error rather than a parse failure).
-    fn run_prompt(&self, cwd: &Path, prompt: &str, backend: &ExecBackend, live_output_path: Option<&Path>, timeout: Duration) -> Result<RunOutcome> {
-        run_command_live("droid", &["exec".to_string(), "--".to_string(), prompt.to_string()], cwd, backend, live_output_path, timeout)
+    #[allow(clippy::too_many_arguments)]
+    fn run_prompt(
+        &self,
+        cwd: &Path,
+        prompt: &str,
+        backend: &ExecBackend,
+        live_output_path: Option<&Path>,
+        timeout: Duration,
+        cancel: Option<&std::sync::atomic::AtomicBool>,
+    ) -> Result<RunOutcome> {
+        run_command_live("droid", &["exec".to_string(), "--".to_string(), prompt.to_string()], cwd, backend, live_output_path, timeout, cancel)
     }
 
     // No `login`: neither `droid --help`, `droid auth --help`, nor `droid
@@ -773,8 +903,17 @@ impl AgentAdapter for ContinueCliAdapter {
 
     /// `cn -p "<prompt>"` — confirmed via `cn --help` ("-p, --print: Print
     /// response and exit (useful for pipes)").
-    fn run_prompt(&self, cwd: &Path, prompt: &str, backend: &ExecBackend, live_output_path: Option<&Path>, timeout: Duration) -> Result<RunOutcome> {
-        run_with_prompt_flag("cn", cwd, prompt, backend, live_output_path, timeout)
+    #[allow(clippy::too_many_arguments)]
+    fn run_prompt(
+        &self,
+        cwd: &Path,
+        prompt: &str,
+        backend: &ExecBackend,
+        live_output_path: Option<&Path>,
+        timeout: Duration,
+        cancel: Option<&std::sync::atomic::AtomicBool>,
+    ) -> Result<RunOutcome> {
+        run_with_prompt_flag("cn", cwd, prompt, backend, live_output_path, timeout, cancel)
     }
 
     // No `login`: no auth/login subcommand in `cn --help` on the
@@ -802,8 +941,17 @@ impl AgentAdapter for GrokAdapter {
     /// separator doesn't help — confirmed live: `grok -p -- "---..."`
     /// errored "a value is required for '--single <PROMPT>' but none was
     /// supplied", while `grok --single="---..."` ran correctly.
-    fn run_prompt(&self, cwd: &Path, prompt: &str, backend: &ExecBackend, live_output_path: Option<&Path>, timeout: Duration) -> Result<RunOutcome> {
-        run_command_live("grok", &[format!("--single={prompt}")], cwd, backend, live_output_path, timeout)
+    #[allow(clippy::too_many_arguments)]
+    fn run_prompt(
+        &self,
+        cwd: &Path,
+        prompt: &str,
+        backend: &ExecBackend,
+        live_output_path: Option<&Path>,
+        timeout: Duration,
+        cancel: Option<&std::sync::atomic::AtomicBool>,
+    ) -> Result<RunOutcome> {
+        run_command_live("grok", &[format!("--single={prompt}")], cwd, backend, live_output_path, timeout, cancel)
     }
 
     /// `grok login` — confirmed real via `grok --help` ("Sign in to
@@ -840,8 +988,17 @@ impl AgentAdapter for CrushAdapter {
     /// rejected as bad flag syntax — confirmed live, including that the
     /// fixed form correctly reaches crush's own provider check instead
     /// (a clean, expected error rather than a parse failure).
-    fn run_prompt(&self, cwd: &Path, prompt: &str, backend: &ExecBackend, live_output_path: Option<&Path>, timeout: Duration) -> Result<RunOutcome> {
-        run_command_live("crush", &["run".to_string(), "--".to_string(), prompt.to_string()], cwd, backend, live_output_path, timeout)
+    #[allow(clippy::too_many_arguments)]
+    fn run_prompt(
+        &self,
+        cwd: &Path,
+        prompt: &str,
+        backend: &ExecBackend,
+        live_output_path: Option<&Path>,
+        timeout: Duration,
+        cancel: Option<&std::sync::atomic::AtomicBool>,
+    ) -> Result<RunOutcome> {
+        run_command_live("crush", &["run".to_string(), "--".to_string(), prompt.to_string()], cwd, backend, live_output_path, timeout, cancel)
     }
 
     /// `crush login [platform]` — confirmed real via `crush --help`
@@ -1018,7 +1175,7 @@ mod tests {
         // rather than silently claiming to run a prompt against it.
         let dir = tempfile::tempdir().unwrap();
         let adapter = PerplexityAdapter;
-        assert!(adapter.run_prompt(dir.path(), "hello", &ExecBackend::host(None), None, Duration::from_secs(1)).is_err());
+        assert!(adapter.run_prompt(dir.path(), "hello", &ExecBackend::host(None), None, Duration::from_secs(1), None).is_err());
     }
 
     #[test]

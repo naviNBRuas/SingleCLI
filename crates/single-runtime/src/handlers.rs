@@ -8,13 +8,26 @@ use single_protocol::{
 };
 
 pub fn handle(ctx: &Context, request: Request) -> Response {
-    match dispatch(ctx, request) {
+    handle_with_registry(ctx, request, &crate::registry::TaskRegistry::default())
+}
+
+/// Same as `handle`, but with an explicit `TaskRegistry` — used by the real
+/// daemon (`server.rs`), which creates one registry at startup and shares
+/// it (cloned — cheap, it's an `Arc`) across every connection so a
+/// `TaskCancel` sent on one connection can find a task started with
+/// `background: true` on another. `handle`'s throwaway per-call registry
+/// is only reachable from `client::send`'s no-daemon-running fallback,
+/// where there's no persistent process for a later `TaskCancel` to even
+/// reach anyway — a `background: true` run there still starts, but has
+/// nothing keeping it alive once the one-shot CLI invocation exits.
+pub fn handle_with_registry(ctx: &Context, request: Request, registry: &crate::registry::TaskRegistry) -> Response {
+    match dispatch(ctx, request, registry) {
         Ok(data) => Response::Ok { data },
         Err(e) => Response::Error { message: format!("{e:#}") },
     }
 }
 
-fn dispatch(ctx: &Context, request: Request) -> anyhow::Result<ResponseData> {
+fn dispatch(ctx: &Context, request: Request, registry: &crate::registry::TaskRegistry) -> anyhow::Result<ResponseData> {
     match request {
         Request::Status => Ok(ResponseData::Status(status(ctx))),
         Request::Doctor => Ok(ResponseData::Doctor(doctor::run(ctx))),
@@ -310,7 +323,24 @@ fn dispatch(ctx: &Context, request: Request) -> anyhow::Result<ResponseData> {
         Request::ContextShow { cwd } => {
             Ok(ResponseData::Context(single_core::project_context::resolve(std::path::Path::new(&cwd))))
         }
-        Request::TaskRun { description, agent, cwd, use_worktree, account, real_home, no_memory_context, timeout_secs } => {
+        Request::TaskRun { description, agent, cwd, use_worktree, account, real_home, no_memory_context, timeout_secs, background } => {
+            if background {
+                let record = crate::task::run_background(
+                    ctx,
+                    crate::task::OwnedRunTaskOptions {
+                        description,
+                        agent,
+                        cwd: std::path::PathBuf::from(cwd),
+                        use_worktree,
+                        account,
+                        real_home,
+                        no_memory_context,
+                        timeout: std::time::Duration::from_secs(timeout_secs),
+                    },
+                    registry.clone(),
+                )?;
+                return Ok(ResponseData::Task(record));
+            }
             let conn = task_db(ctx)?;
             let record = crate::task::run(&conn, ctx, crate::task::RunTaskOptions {
                 description: &description,
@@ -333,6 +363,17 @@ fn dispatch(ctx: &Context, request: Request) -> anyhow::Result<ResponseData> {
             let record = crate::task::get(&conn, id)?.ok_or_else(|| anyhow::anyhow!("no task with id {id}"))?;
             Ok(ResponseData::Task(record))
         }
+        Request::TaskCancel { id } => {
+            if !registry.cancel(id) {
+                anyhow::bail!("task #{id} isn't currently running in the background — nothing to cancel");
+            }
+            Ok(ResponseData::Empty)
+        }
+        Request::TaskCleanup { id } => {
+            let conn = task_db(ctx)?;
+            crate::task::cleanup(&conn, ctx, id)?;
+            Ok(ResponseData::Empty)
+        }
         Request::Orchestrate { goal, agents, cwd, use_worktree, real_home, timeout_secs } => {
             let conn = task_db(ctx)?;
             let records = crate::orchestrate::run(&conn, ctx, crate::orchestrate::OrchestrateOptions {
@@ -345,8 +386,28 @@ fn dispatch(ctx: &Context, request: Request) -> anyhow::Result<ResponseData> {
             })?;
             Ok(ResponseData::OrchestrateResult(records))
         }
-        Request::OrchestrateParallel { tasks, cwd, real_home, timeout_secs } => {
+        Request::OrchestrateParallel { tasks, cwd, real_home, timeout_secs, background } => {
             let task_pairs: Vec<(String, String)> = tasks.into_iter().map(|t| (t.agent, t.description)).collect();
+            if background {
+                // run_parallel is itself a blocking join() over every
+                // sub-task's own thread — unlike TaskRun::background,
+                // there's no pre-created row to hand back immediately
+                // here (each sub-task creates its own inside its thread),
+                // so the honest contract is: this returns an empty batch
+                // right away, and the real per-task records show up in
+                // `TaskList`/`TaskInspect` as each one starts and finishes.
+                let ctx = ctx.clone();
+                let cwd_buf = std::path::PathBuf::from(cwd);
+                std::thread::spawn(move || {
+                    let _ = crate::orchestrate::run_parallel(&ctx, crate::orchestrate::ParallelOrchestrateOptions {
+                        tasks: &task_pairs,
+                        cwd: &cwd_buf,
+                        real_home,
+                        timeout: std::time::Duration::from_secs(timeout_secs),
+                    });
+                });
+                return Ok(ResponseData::OrchestrateResult(Vec::new()));
+            }
             let records = crate::orchestrate::run_parallel(ctx, crate::orchestrate::ParallelOrchestrateOptions {
                 tasks: &task_pairs,
                 cwd: std::path::Path::new(&cwd),

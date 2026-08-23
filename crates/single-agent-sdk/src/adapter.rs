@@ -68,7 +68,24 @@ pub trait AgentAdapter {
     /// `single-agent-sdk::run::run_command_live`), so a concurrent reader
     /// — the TUI's task-detail view — can watch the run in progress
     /// instead of only seeing output once it finishes.
-    fn run_prompt(&self, _cwd: &Path, _prompt: &str, _backend: &ExecBackend, _live_output_path: Option<&Path>, _timeout: Duration) -> Result<RunOutcome> {
+    ///
+    /// `cancel`, when set, is polled by the same loop that already watches
+    /// `timeout` — flipping it kills the child early and marks the
+    /// outcome `cancelled` instead of `timed_out`. Only meaningful for a
+    /// task started with `background: true` (see
+    /// `single-runtime::task::run_background`); a synchronous foreground
+    /// run has nothing to flip it, so `None` there is correct, not a
+    /// missing feature.
+    #[allow(clippy::too_many_arguments)]
+    fn run_prompt(
+        &self,
+        _cwd: &Path,
+        _prompt: &str,
+        _backend: &ExecBackend,
+        _live_output_path: Option<&Path>,
+        _timeout: Duration,
+        _cancel: Option<&std::sync::atomic::AtomicBool>,
+    ) -> Result<RunOutcome> {
         anyhow::bail!("{} has no non-interactive run mode wired up", self.command())
     }
 
@@ -119,6 +136,7 @@ pub trait AgentAdapter {
 /// their own `run_prompt` rather than using this helper. Confirmed by
 /// direct execution on the reference machine for every current caller —
 /// don't assume it's safe for a new one without checking the same way.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn run_with_prompt_flag(
     command: &str,
     cwd: &Path,
@@ -126,8 +144,9 @@ pub(crate) fn run_with_prompt_flag(
     backend: &ExecBackend,
     live_output_path: Option<&Path>,
     timeout: Duration,
+    cancel: Option<&std::sync::atomic::AtomicBool>,
 ) -> Result<RunOutcome> {
-    crate::run::run_command_live(command, &["-p".to_string(), "--".to_string(), prompt.to_string()], cwd, backend, live_output_path, timeout)
+    crate::run::run_command_live(command, &["-p".to_string(), "--".to_string(), prompt.to_string()], cwd, backend, live_output_path, timeout, cancel)
 }
 
 fn unsupported_lsp(agent: &str, home: &Path) -> IntegrationWrite {
