@@ -128,8 +128,17 @@ pub fn remove(path: &Path, names: &[String]) -> Result<Option<Value>> {
 /// {"command": ["docker-langserver","--stdio"]}}`). Only `enabled`
 /// servers are written; `opencode.jsonc`'s `lsp` entries have no confirmed
 /// per-entry enable/disable field, so a disabled registry entry is simply
-/// omitted rather than guessing one. `extensions` isn't written for the
-/// same reason — not a field this project has confirmed opencode reads.
+/// omitted rather than guessing one.
+///
+/// `extensions` **is** written (as of opencode 1.18.18, confirmed live):
+/// omitting it used to be the documented, deliberate choice here — this
+/// project hadn't confirmed the field was read — but current opencode
+/// now refuses to start at all without it ("For custom LSP servers,
+/// 'extensions' array is required"), so an entry with no extensions
+/// isn't just incomplete, it's a hard startup failure for every command,
+/// not only LSP ones. Real values already exist on `LspServerSpec` for
+/// this — `single_core::lsp`'s presets — so this is filling in a field
+/// that's genuinely there, not guessing one.
 pub fn apply_lsp(path: &Path, servers: &[LspServerSpec]) -> Result<Value> {
     let mut root: Value = if path.exists() {
         let text = std::fs::read_to_string(path)
@@ -158,6 +167,7 @@ pub fn apply_lsp(path: &Path, servers: &[LspServerSpec]) -> Result<Value> {
 
         let mut entry = Map::new();
         entry.insert("command".into(), Value::Array(command_parts.into_iter().map(Value::String).collect()));
+        entry.insert("extensions".into(), Value::Array(server.extensions.iter().cloned().map(Value::String).collect()));
         lsp_obj.insert(server.name.clone(), Value::Object(entry));
     }
 
@@ -245,6 +255,10 @@ mod tests {
         ];
         let result = apply_lsp(&path, &servers).unwrap();
         assert_eq!(result["lsp"]["rust-analyzer"]["command"][0], "rust-analyzer");
+        // Regression test: opencode 1.18.18 refuses to start at all
+        // without this ("For custom LSP servers, 'extensions' array is
+        // required") — confirmed live against a real install.
+        assert_eq!(result["lsp"]["rust-analyzer"]["extensions"][0], ".rs");
         assert!(result["lsp"].get("pyright").is_none());
     }
 
