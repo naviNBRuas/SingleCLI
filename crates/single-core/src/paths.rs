@@ -77,6 +77,13 @@ impl SingleDirs {
         self.root.join("hooks.toml")
     }
 
+    /// Task-lifecycle event hooks (fire-a-command-on-completion) — see
+    /// `single_core::task_hooks`. Deliberately a different file from
+    /// `hooks_registry_file()` above; that's a different feature.
+    pub fn task_hooks_registry_file(&self) -> PathBuf {
+        self.root.join("task_hooks.toml")
+    }
+
     /// Whether `single install-integrations` should sync only the
     /// `single-mcp` dynamic gateway into agents' native MCP config,
     /// instead of every enabled server in `mcp_registry_file()` — see

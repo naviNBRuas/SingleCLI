@@ -22,6 +22,7 @@ pub mod ratelimit;
 pub mod registry;
 pub mod secrets;
 pub mod skills;
+pub mod task_hooks;
 pub mod tools;
 pub mod worktree;
 

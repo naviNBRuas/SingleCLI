@@ -115,16 +115,19 @@ pub fn run(ctx: &Context, opts: GraphOrchestrateOptions<'_>) -> Result<Vec<TaskR
                 let summary = format!("Skipped because run_if requires {condition}; this was not a user-requested cancellation.");
                 let conn = crate::state::open(&db_path)?;
                 task::ensure_schema(&conn)?;
-                completed.insert(
-                    node.id.clone(),
-                    task::record_conditionally_skipped(
-                        &conn,
-                        &node.description,
-                        &node.agent,
-                        opts.cwd,
-                        &summary,
-                    )?,
+                let record = task::record_conditionally_skipped(&conn, &node.description, &node.agent, opts.cwd, &summary)?;
+                single_core::task_hooks::fire(
+                    &ctx.dirs.task_hooks_registry_file(),
+                    &single_protocol::TaskHookPayload {
+                        id: record.id,
+                        status: "cancelled".to_string(),
+                        agent: record.agent.clone(),
+                        cwd: record.cwd.clone(),
+                        workspace_id: record.workspace_id.clone(),
+                        summary: record.summary.clone(),
+                    },
                 );
+                completed.insert(node.id.clone(), record);
             }
         }
 

@@ -327,6 +327,27 @@ fn print_data(data: ResponseData) {
                 println!("{}", entries.join(" -> "));
             }
         }
+        ResponseData::TaskHooks(hooks) => {
+            if hooks.is_empty() {
+                println!("(no task hooks configured — `single task-hook add --on completed --command '...'`)");
+            }
+            for h in hooks {
+                let scope = match (&h.agent, &h.workspace) {
+                    (Some(a), Some(w)) => format!(" [agent={a} workspace={w}]"),
+                    (Some(a), None) => format!(" [agent={a}]"),
+                    (None, Some(w)) => format!(" [workspace={w}]"),
+                    (None, None) => String::new(),
+                };
+                println!("on={:<28} {}{}", h.on.join(","), h.command, scope);
+            }
+        }
+        ResponseData::TaskHookRemoved(count) => {
+            if count == 0 {
+                println!("no task hook had that exact command");
+            } else {
+                println!("removed {count} task hook(s)");
+            }
+        }
         ResponseData::OrchestrateResult(records) => {
             println!("Relay ({} step(s)):", records.len());
             for (i, r) in records.iter().enumerate() {

@@ -1206,6 +1206,19 @@ fn dispatch(
             anyhow::ensure!(removed, "no fallback chain starts with that entry");
             Ok(ResponseData::Empty)
         }
+        Request::TaskHookAdd { on, command, agent, workspace } => {
+            single_core::task_hooks::add(&ctx.dirs.task_hooks_registry_file(), single_protocol::TaskHookRule { on, command, agent, workspace })?;
+            Ok(ResponseData::Empty)
+        }
+        Request::TaskHookList => Ok(ResponseData::TaskHooks(single_core::task_hooks::list(&ctx.dirs.task_hooks_registry_file())?)),
+        Request::TaskHookRemove { command } => {
+            let removed = single_core::task_hooks::remove(&ctx.dirs.task_hooks_registry_file(), &command)?;
+            Ok(ResponseData::TaskHookRemoved(removed))
+        }
+        Request::TaskHookTest { command } => {
+            single_core::task_hooks::test(&ctx.dirs.task_hooks_registry_file(), &command)?;
+            Ok(ResponseData::Empty)
+        }
         Request::PluginPresetList => {
             let presets = single_core::plugins::presets()
                 .into_iter()

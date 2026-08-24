@@ -112,6 +112,31 @@ pub fn list_workspaces(conn: &Connection) -> Result<Vec<single_protocol::Workspa
     Ok(rows)
 }
 
+/// Fetches `id`'s just-finished record and fires any matching
+/// `single_core::task_hooks` rules — called right before every point
+/// `execute` returns, so every real outcome (setup failure, agent
+/// failure, timeout, cancellation, success) notifies subscribers exactly
+/// once. Errors fetching the record are swallowed (logged by `fire`'s own
+/// callers would be redundant here — a missing record after a status
+/// write is already an anomaly `get(...).context(...)` upstream surfaces)
+/// since a hook-notification problem must never mask the task's own
+/// result from its caller.
+fn notify_task_hooks(conn: &Connection, ctx: &Context, id: i64) {
+    if let Ok(Some(record)) = get(conn, id) {
+        single_core::task_hooks::fire(
+            &ctx.dirs.task_hooks_registry_file(),
+            &single_protocol::TaskHookPayload {
+                id: record.id,
+                status: status_as_str(record.status).to_string(),
+                agent: record.agent,
+                cwd: record.cwd,
+                workspace_id: record.workspace_id,
+                summary: record.summary,
+            },
+        );
+    }
+}
+
 fn status_as_str(status: TaskStatus) -> &'static str {
     match status {
         TaskStatus::Created => "created",
@@ -642,6 +667,7 @@ fn execute(
                 opts.description,
                 "not a git repository; --worktree requires one",
             );
+            notify_task_hooks(conn, ctx, id);
             return get(conn, id)?.context("task disappeared after being created");
         };
         let worktree_path = ctx
@@ -674,6 +700,7 @@ fn execute(
                 opts.description,
                 &format!("worktree setup failed: {e:#}"),
             );
+            notify_task_hooks(conn, ctx, id);
             return get(conn, id)?.context("task disappeared after being created");
         }
         worktree_path
@@ -754,6 +781,7 @@ fn execute(
                     opts.description,
                     &detail,
                 );
+                notify_task_hooks(conn, ctx, id);
                 return get(conn, id)?.context("task disappeared after being created");
             }
         }
@@ -810,6 +838,7 @@ fn execute(
                             opts.description,
                             &detail,
                         );
+                        notify_task_hooks(conn, ctx, id);
                         return get(conn, id)?.context("task disappeared after being created");
                     }
                 }
@@ -934,6 +963,7 @@ fn execute(
         }
     }
 
+    notify_task_hooks(conn, ctx, id);
     get(conn, id)?.context("task disappeared after finishing")
 }
 

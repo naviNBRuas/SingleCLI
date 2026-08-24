@@ -128,6 +128,14 @@ enum Command {
         #[command(subcommand)]
         action: FallbackCommand,
     },
+    /// Task-lifecycle event hooks: fire a command when a task reaches a
+    /// terminal status, instead of polling `single task list` for it —
+    /// see `single_core::task_hooks`. Not the same thing as `single agent
+    /// hooks` (that's Claude Code's mid-run permission interception).
+    TaskHook {
+        #[command(subcommand)]
+        action: TaskHookCommand,
+    },
     /// Run several agents in sequence on one goal: each agent runs in the
     /// same shared git worktree and is handed the previous agent's real
     /// output. A sequential relay, not live parallel/bidirectional
@@ -1026,6 +1034,35 @@ enum FallbackCommand {
     Remove { first: String },
 }
 
+#[derive(Subcommand)]
+enum TaskHookCommand {
+    /// Adds one hook: `single task-hook add --on completed --on failed --command '...'`.
+    /// `--command` receives the task's JSON payload on stdin.
+    Add {
+        /// Repeatable; one of: all, completed, failed, cancelled.
+        #[arg(long = "on", required = true)]
+        on: Vec<String>,
+        #[arg(long)]
+        command: String,
+        /// Only fire for this agent.
+        #[arg(long)]
+        agent: Option<String>,
+        /// Only fire for this workspace (project) name.
+        #[arg(long)]
+        workspace: Option<String>,
+    },
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Removes every hook whose command matches exactly.
+    Remove { command: String },
+    /// Runs one already-configured hook (matched by its exact `command`)
+    /// against a synthetic payload and blocks until it finishes, so you
+    /// can confirm it actually works before relying on it live.
+    Test { command: String },
+}
+
 /// Parses `agent` or `agent:account` into an `AgentAccountRef`.
 fn parse_agent_account(s: &str) -> single_protocol::AgentAccountRef {
     match s.split_once(':') {
@@ -1913,6 +1950,24 @@ fn main() -> anyhow::Result<()> {
             }
             FallbackCommand::Remove { first } => {
                 let response = client::send(&socket_path, Request::FallbackRemove { first: parse_agent_account(&first) })?;
+                render::print(response, false);
+            }
+        },
+        Command::TaskHook { action } => match action {
+            TaskHookCommand::Add { on, command, agent, workspace } => {
+                let response = client::send(&socket_path, Request::TaskHookAdd { on, command, agent, workspace })?;
+                render::print(response, false);
+            }
+            TaskHookCommand::List { json } => {
+                let response = client::send(&socket_path, Request::TaskHookList)?;
+                render::print(response, json);
+            }
+            TaskHookCommand::Remove { command } => {
+                let response = client::send(&socket_path, Request::TaskHookRemove { command })?;
+                render::print(response, false);
+            }
+            TaskHookCommand::Test { command } => {
+                let response = client::send(&socket_path, Request::TaskHookTest { command })?;
                 render::print(response, false);
             }
         },

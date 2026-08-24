@@ -543,6 +543,24 @@ pub enum Request {
     FallbackRemove {
         first: AgentAccountRef,
     },
+    /// Adds one task-lifecycle event hook — see `single_core::task_hooks`.
+    TaskHookAdd {
+        on: Vec<String>,
+        command: String,
+        agent: Option<String>,
+        workspace: Option<String>,
+    },
+    TaskHookList,
+    /// Removes every hook whose `command` matches exactly.
+    TaskHookRemove {
+        command: String,
+    },
+    /// Fires every configured hook against a synthetic payload, ignoring
+    /// `on`/`agent`/`workspace` filters — lets a user confirm a hook
+    /// command actually works before relying on it live.
+    TaskHookTest {
+        command: String,
+    },
     PluginPresetList,
     PluginAddPreset {
         name: String,
@@ -637,6 +655,10 @@ pub enum ResponseData {
     Plugins(Vec<PluginSpec>),
     PluginPresets(Vec<PluginPresetInfo>),
     FallbackChains(Vec<Vec<AgentAccountRef>>),
+    TaskHooks(Vec<TaskHookRule>),
+    /// How many hooks a `TaskHookRemove` actually matched (0 means "no
+    /// such hook").
+    TaskHookRemoved(usize),
     PluginSyncResults(Vec<PluginInstallResult>),
     Empty,
 }
@@ -1251,6 +1273,32 @@ pub struct SkillStarterInfo {
 pub struct AgentAccountRef {
     pub agent: String,
     pub account: Option<String>,
+}
+
+/// One task-lifecycle event hook rule — see `single_core::task_hooks`.
+/// Lives here (not in `single-core`) for the same reason `AgentAccountRef`
+/// does: it crosses the CLI/daemon protocol boundary, so both sides need
+/// the same type rather than each defining their own shape.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TaskHookRule {
+    pub on: Vec<String>,
+    pub command: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<String>,
+}
+
+/// One task's outcome, as handed to a firing hook's stdin (JSON, single
+/// line) — see `single_core::task_hooks::fire`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskHookPayload {
+    pub id: i64,
+    pub status: String,
+    pub agent: String,
+    pub cwd: String,
+    pub workspace_id: String,
+    pub summary: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
