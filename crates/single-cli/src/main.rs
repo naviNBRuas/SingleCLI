@@ -128,6 +128,14 @@ enum Command {
         #[command(subcommand)]
         action: FallbackCommand,
     },
+    /// Browse the premium-web pattern library (`~/.config/single/skills/
+    /// web/premium-web/patterns/**/*.md`) — see the `single-web` crate
+    /// and `docs/web-capability-pack-architecture.md`. Local-only, reads
+    /// files directly, no daemon round trip needed.
+    Web {
+        #[command(subcommand)]
+        action: WebCommand,
+    },
     /// Run several agents in sequence on one goal: each agent runs in the
     /// same shared git worktree and is handed the previous agent's real
     /// output. A sequential relay, not live parallel/bidirectional
@@ -1026,6 +1034,36 @@ enum FallbackCommand {
     Remove { first: String },
 }
 
+#[derive(Subcommand)]
+enum WebCommand {
+    /// Lists every pattern doc in the library, grouped by category.
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Case-insensitive search over pattern name/category/content.
+    Search {
+        query: String,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+fn print_patterns(patterns: &[single_web::PatternInfo], json: bool) {
+    if json {
+        println!("{}", serde_json::to_string_pretty(patterns).unwrap());
+        return;
+    }
+    if patterns.is_empty() {
+        println!("(no patterns found — see docs/web-capability-pack-architecture.md for where they're expected: ~/.config/single/skills/web/premium-web/patterns/)");
+        return;
+    }
+    for p in patterns {
+        let cat = if p.category.is_empty() { "-" } else { p.category.as_str() };
+        println!("{:<14} {:<22} {}", cat, p.name, p.summary);
+    }
+}
+
 /// Parses `agent` or `agent:account` into an `AgentAccountRef`.
 fn parse_agent_account(s: &str) -> single_protocol::AgentAccountRef {
     match s.split_once(':') {
@@ -1916,6 +1954,20 @@ fn main() -> anyhow::Result<()> {
                 render::print(response, false);
             }
         },
+        Command::Web { action } => {
+            let dirs = SingleDirs::discover()?;
+            let patterns_dir = dirs.skills_dir().join("web").join("premium-web").join("patterns");
+            match action {
+                WebCommand::List { json } => {
+                    let patterns = single_web::list_patterns(&patterns_dir)?;
+                    print_patterns(&patterns, json);
+                }
+                WebCommand::Search { query, json } => {
+                    let patterns = single_web::search_patterns(&patterns_dir, &query)?;
+                    print_patterns(&patterns, json);
+                }
+            }
+        }
         Command::Orchestrate {
             goal,
             agents,

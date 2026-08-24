@@ -2759,6 +2759,7 @@ dependencies = [
  "single-protocol",
  "single-runtime",
  "single-tui",
+ "single-web",
  "tempfile",
  "tokio",
 ]
@@ -2837,6 +2838,16 @@ dependencies = [
  "serde_json",
  "single-core",
  "single-protocol",
+]
+
+[[package]]
+name = "single-web"
+version = "0.5.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]
