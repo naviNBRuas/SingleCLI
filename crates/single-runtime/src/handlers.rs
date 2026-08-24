@@ -471,6 +471,7 @@ fn dispatch(
             no_memory_context,
             timeout_secs,
             background,
+            allow_fallback,
         } => {
             if background {
                 let record = crate::task::run_background(
@@ -484,6 +485,7 @@ fn dispatch(
                         real_home,
                         no_memory_context,
                         timeout: std::time::Duration::from_secs(timeout_secs),
+                        allow_fallback,
                     },
                     registry.clone(),
                 )?;
@@ -502,6 +504,7 @@ fn dispatch(
                     real_home,
                     no_memory_context,
                     timeout: std::time::Duration::from_secs(timeout_secs),
+                    allow_fallback,
                 },
             )?;
             Ok(ResponseData::Task(record))
@@ -1193,6 +1196,16 @@ fn dispatch(
             }
             Ok(ResponseData::PluginSyncResults(results))
         }
+        Request::FallbackSet { chain } => {
+            single_core::fallback::set(&ctx.dirs.fallback_registry_file(), chain)?;
+            Ok(ResponseData::Empty)
+        }
+        Request::FallbackList => Ok(ResponseData::FallbackChains(single_core::fallback::load(&ctx.dirs.fallback_registry_file())?)),
+        Request::FallbackRemove { first } => {
+            let removed = single_core::fallback::remove(&ctx.dirs.fallback_registry_file(), &first)?;
+            anyhow::ensure!(removed, "no fallback chain starts with that entry");
+            Ok(ResponseData::Empty)
+        }
         Request::PluginPresetList => {
             let presets = single_core::plugins::presets()
                 .into_iter()
@@ -1618,21 +1631,31 @@ fn status(ctx: &Context) -> RuntimeStatus {
 /// every refresh. An install/uninstall of an agent CLI is picked up within
 /// one TTL window rather than instantly, same trade-off `daemon restart`
 /// already exists for ($PATH itself is only re-read at daemon spawn time).
-static DISCOVERY_CACHE: OnceLock<Mutex<HashMap<String, (Discovery, Instant)>>> = OnceLock::new();
+/// One lock per agent name (rather than one lock over the whole map) so
+/// discovering different agents never blocks on each other — but
+/// discovering the *same* agent from two concurrent requests (e.g.
+/// `Status` and `AgentList`, both parallelizing across every registered
+/// agent, fired together by `single-tui`'s `App::refresh`) now serializes
+/// on that one agent's lock instead of both redundantly shelling out
+/// `which`/`--version` for it at once: the second caller blocks until the
+/// first finishes, then sees the just-cached result and returns instantly
+/// rather than repeating the work. Without this, a cold TUI launch was
+/// paying for up to 2x the subprocess spawns every registered agent needs.
+static DISCOVERY_LOCKS: OnceLock<Mutex<HashMap<String, std::sync::Arc<Mutex<Option<(Discovery, Instant)>>>>>> = OnceLock::new();
 const DISCOVERY_TTL: Duration = Duration::from_secs(45);
 
 fn cached_discover(def: &AgentDefinition, ctx: &Context) -> Option<Discovery> {
-    let cache = DISCOVERY_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    if let Some((discovery, at)) = cache.lock().unwrap().get(&def.name) {
+    let locks = DISCOVERY_LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
+    let slot = locks.lock().unwrap().entry(def.name.clone()).or_default().clone();
+
+    let mut slot = slot.lock().unwrap();
+    if let Some((discovery, at)) = slot.as_ref() {
         if at.elapsed() < DISCOVERY_TTL {
             return Some(discovery.clone());
         }
     }
     let discovery = for_agent_with_custom(&def.name, &ctx.dirs.agents_dir(), &ctx.registry)?.discover();
-    cache
-        .lock()
-        .unwrap()
-        .insert(def.name.clone(), (discovery.clone(), Instant::now()));
+    *slot = Some((discovery.clone(), Instant::now()));
     Some(discovery)
 }
 

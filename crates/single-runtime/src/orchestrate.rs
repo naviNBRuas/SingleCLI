@@ -80,6 +80,11 @@ pub fn run(conn: &Connection, ctx: &Context, opts: OrchestrateOptions) -> Result
             real_home: opts.real_home,
             no_memory_context: false,
             timeout: opts.timeout,
+            // Relay steps hand off to the *next* agent in the sequence
+            // deliberately (that's the whole point of `orchestrate`) —
+            // fallback chains are for a single task quietly retrying
+            // itself elsewhere, a different concern.
+            allow_fallback: false,
         })?;
 
         let failed = record.status == TaskStatus::Failed;
@@ -164,6 +169,7 @@ pub fn run_parallel(ctx: &Context, opts: ParallelOrchestrateOptions) -> Result<V
                     real_home,
                     no_memory_context: false,
                     timeout,
+                    allow_fallback: false,
                 })?;
 
                 // Broadcast what this agent did to the rest of the batch's

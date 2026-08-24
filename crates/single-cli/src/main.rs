@@ -121,6 +121,13 @@ enum Command {
         #[command(subcommand)]
         action: WorkspaceCommand,
     },
+    /// Ordered agent/account chains `task run --allow-fallback` walks
+    /// through when a run hits a detected rate limit — see
+    /// `single_core::fallback` and `single_core::ratelimit`.
+    Fallback {
+        #[command(subcommand)]
+        action: FallbackCommand,
+    },
     /// Run several agents in sequence on one goal: each agent runs in the
     /// same shared git worktree and is handed the previous agent's real
     /// output. A sequential relay, not live parallel/bidirectional
@@ -1003,6 +1010,31 @@ enum WorkspaceCommand {
 }
 
 #[derive(Subcommand)]
+enum FallbackCommand {
+    /// Saves one ordered chain — each entry is `agent` or `agent:account`,
+    /// e.g. `single fallback set claude:work claude:personal codex`.
+    /// Replaces any existing chain starting with the same first entry.
+    Set {
+        #[arg(required = true, num_args = 2..)]
+        chain: Vec<String>,
+    },
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Removes the chain whose first entry matches `first`.
+    Remove { first: String },
+}
+
+/// Parses `agent` or `agent:account` into an `AgentAccountRef`.
+fn parse_agent_account(s: &str) -> single_protocol::AgentAccountRef {
+    match s.split_once(':') {
+        Some((agent, account)) => single_protocol::AgentAccountRef { agent: agent.to_string(), account: Some(account.to_string()) },
+        None => single_protocol::AgentAccountRef { agent: s.to_string(), account: None },
+    }
+}
+
+#[derive(Subcommand)]
 enum TaskCommand {
     /// Run a prompt against a real agent CLI and block until it finishes.
     Run {
@@ -1036,6 +1068,13 @@ enum TaskCommand {
         /// list` for progress, `task cancel` to stop it early.
         #[arg(long)]
         background: bool,
+        /// When this run fails or times out in a way that looks like a
+        /// rate limit and a fallback chain is configured for this
+        /// agent/account (see `single fallback set`), automatically mark
+        /// the account rate-limited and start a linked follow-up task
+        /// against the chain's next entry. Off by default.
+        #[arg(long)]
+        allow_fallback: bool,
         #[arg(long)]
         json: bool,
     },
@@ -1812,6 +1851,7 @@ fn main() -> anyhow::Result<()> {
                 no_memory_context,
                 timeout_secs,
                 background,
+                allow_fallback,
                 json,
             } => {
                 let cwd = cwd.unwrap_or_else(|| ".".to_string());
@@ -1833,6 +1873,7 @@ fn main() -> anyhow::Result<()> {
                         no_memory_context,
                         timeout_secs,
                         background,
+                        allow_fallback,
                     },
                 )?;
                 render::print(response, json);
@@ -1858,6 +1899,21 @@ fn main() -> anyhow::Result<()> {
             WorkspaceCommand::List { json } => {
                 let response = client::send(&socket_path, Request::WorkspaceList)?;
                 render::print(response, json);
+            }
+        },
+        Command::Fallback { action } => match action {
+            FallbackCommand::Set { chain } => {
+                let chain: Vec<_> = chain.iter().map(|s| parse_agent_account(s)).collect();
+                let response = client::send(&socket_path, Request::FallbackSet { chain })?;
+                render::print(response, false);
+            }
+            FallbackCommand::List { json } => {
+                let response = client::send(&socket_path, Request::FallbackList)?;
+                render::print(response, json);
+            }
+            FallbackCommand::Remove { first } => {
+                let response = client::send(&socket_path, Request::FallbackRemove { first: parse_agent_account(&first) })?;
+                render::print(response, false);
             }
         },
         Command::Orchestrate {

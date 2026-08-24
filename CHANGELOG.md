@@ -9,6 +9,27 @@ patch version (`0.0.x`) carries fixes, per [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## [Unreleased]
 
+## [0.5.0]
+
+- Added: `task run --allow-fallback` fails over to another agent/account
+  when a run hits a detected rate limit — `single fallback set
+  <agent[:account]>...` saves the ordered chain to try. Detection honors
+  an account already marked `rate_limited` (`single account set-status`)
+  and, best-effort, generic rate-limit signals in a failed run's output.
+  A follow-up task is created and linked, never a silent retry.
+- Fixed: the TUI blocked on every tab's data before drawing anything —
+  on a cold daemon this could take several seconds with a blank
+  terminal. `App::new()` now draws the tab shell immediately with an
+  animated loading spinner while the first fetch runs in the background;
+  every later `[r]` refresh is non-blocking too.
+- Fixed: `Status` and `AgentList` each independently re-discovered every
+  registered agent when fired together (as the TUI's startup fetch
+  does), doubling the subprocess spawns needed on a cold cache — now
+  single-flighted per agent.
+- Fixed: MCP, LSP, Plugins, Tools, Providers, Accounts, and the Tasks
+  tab's workspace list had no column headers, unlike Agents/Tasks —
+  every list in the TUI is a proper table now.
+
 ## [0.4.0]
 
 - Added: tasks are now grouped by workspace (a stable identity — git

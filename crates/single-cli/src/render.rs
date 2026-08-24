@@ -312,6 +312,21 @@ fn print_data(data: ResponseData) {
                 println!("{:<16} {:<4} tasks  last active {:<25} {}", w.name, w.task_count, w.last_activity_at, w.path);
             }
         }
+        ResponseData::FallbackChains(chains) => {
+            if chains.is_empty() {
+                println!("(no fallback chains configured — `single fallback set <agent[:account]>...`)");
+            }
+            for chain in chains {
+                let entries: Vec<String> = chain
+                    .iter()
+                    .map(|e| match &e.account {
+                        Some(account) => format!("{}:{account}", e.agent),
+                        None => e.agent.clone(),
+                    })
+                    .collect();
+                println!("{}", entries.join(" -> "));
+            }
+        }
         ResponseData::OrchestrateResult(records) => {
             println!("Relay ({} step(s)):", records.len());
             for (i, r) in records.iter().enumerate() {

@@ -154,6 +154,7 @@ pub fn run(ctx: &Context, opts: GraphOrchestrateOptions<'_>) -> Result<Vec<TaskR
                             real_home,
                             no_memory_context: false,
                             timeout,
+                            allow_fallback: false,
                         },
                     )?;
                     Ok((node.id, record))
@@ -263,6 +264,7 @@ pub fn plan_and_run(
             real_home,
             no_memory_context: true,
             timeout,
+            allow_fallback: false,
         },
     )?;
     if planned.status != TaskStatus::Completed {

@@ -113,6 +113,12 @@ impl SingleDirs {
         self.root.join("providers.toml")
     }
 
+    /// Ordered agent/account fallback chains (`single_core::fallback`) —
+    /// what to try next when a task run hits a detected rate limit.
+    pub fn fallback_registry_file(&self) -> PathBuf {
+        self.root.join("fallback.toml")
+    }
+
     /// Labeled per-agent provider keys (`single_core::provider_keys`) — a
     /// separate registry from `providers.toml`'s single shared key per
     /// provider, so existing single-key setups are untouched by this file

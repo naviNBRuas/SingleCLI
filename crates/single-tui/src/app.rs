@@ -240,6 +240,46 @@ pub struct App {
     pub task_detail: TaskDetailFlow,
     pub backup: BackupFlow,
     pub last_refresh: Instant,
+    /// True from construction until the first `refresh()` completes — a
+    /// cold daemon can take a few seconds to answer (agent discovery
+    /// shells out `which`/`--version` per registered agent), and blocking
+    /// `App::new()` on that meant nothing drew at all until it finished.
+    /// `draw_content` shows a loading spinner instead while this is true;
+    /// left `false` on every refresh after the first, so a `[r]` reload
+    /// or a background action's post-completion refresh updates data in
+    /// place rather than blanking the screen again.
+    pub loading: bool,
+    /// Fixed reference point for the loading spinner's animation phase —
+    /// picking a frame from elapsed time needs no mutable state touched
+    /// from the (immutable) render path.
+    started_at: Instant,
+    refresh_rx: Option<mpsc::Receiver<RefreshBundle>>,
+}
+
+/// Every field `refresh()` fetches, bundled so the background thread that
+/// does the actual fetching can send one message back instead of `App`
+/// needing `Send`. Built on that thread, applied to `App` on the main
+/// thread by `poll_refresh` — the exact same assignment logic `refresh()`
+/// used to run inline before it became non-blocking.
+struct RefreshBundle {
+    status: Option<RuntimeStatus>,
+    agents: Vec<AgentInfo>,
+    tasks: Vec<TaskRecord>,
+    workspaces: Vec<WorkspaceInfo>,
+    mcp_servers: Vec<McpServerInfo>,
+    mcp_gateway_enabled: Option<bool>,
+    lsp_servers: Vec<LspServerSpec>,
+    plugins: Vec<PluginSpec>,
+    tools: Vec<ToolSpec>,
+    providers: Vec<ProviderSpec>,
+    accounts: Vec<AccountProfileInfo>,
+    kg_entity_count: Option<usize>,
+    /// `None` when the `CacheStatus` request itself errored — kept as
+    /// "no change" rather than resetting to `(false, false)`, same as the
+    /// synchronous `refresh()` this replaced.
+    cache: Option<(bool, bool)>,
+    vector: Option<(bool, bool)>,
+    error: Option<String>,
 }
 
 impl App {
@@ -278,113 +318,189 @@ impl App {
             task_detail: TaskDetailFlow::Idle,
             backup: BackupFlow::Idle,
             last_refresh: Instant::now(),
+            loading: true,
+            started_at: Instant::now(),
+            refresh_rx: None,
         };
         app.refresh();
         app
     }
 
+    /// A slowly-cycling braille spinner frame, derived from elapsed time
+    /// rather than a counter `ui.rs` would need `&mut App` to advance.
+    pub fn spinner_frame(&self) -> char {
+        const FRAMES: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+        let idx = (self.started_at.elapsed().as_millis() / 80) as usize % FRAMES.len();
+        FRAMES[idx]
+    }
+
+    /// Kicks off a fresh fetch of every tab's data on a background thread
+    /// and returns immediately — never blocks the render loop, including
+    /// on the very first call from `new()`. See `RefreshBundle` and
+    /// `poll_refresh`, which applies the result once it arrives. A refresh
+    /// already in flight is left to finish rather than piling another one
+    /// on top of it (the common case: several key presses each calling
+    /// `refresh()` before the daemon has answered the first one).
     pub fn refresh(&mut self) {
         self.error = None;
-
-        // Every request below is an independent UnixStream round trip (see
-        // `client::call`) with no shared connection state, so there's no
-        // reason to make the TUI wait on them one at a time — fired
-        // concurrently here and joined before any `self` field is touched,
-        // so this is still single-threaded from `self`'s point of view.
-        // (The daemon does its own parallelizing of AgentList/Status's
-        // per-agent discovery — see `single-runtime`'s `cached_discover` —
-        // so this and that combine rather than duplicate effort.)
+        if self.refresh_rx.is_some() {
+            return;
+        }
         let socket_path = self.socket_path.clone();
-        let requests = [
-            Request::Status,
-            Request::AgentList,
-            Request::TaskList,
-            Request::WorkspaceList,
-            Request::McpList,
-            Request::McpGatewayStatus,
-            Request::LspList,
-            Request::PluginList,
-            Request::ToolList,
-            Request::ConfiguredProviderList,
-            Request::AccountList { agent: None },
-            Request::KgReadGraph,
-            Request::CacheStatus,
-            Request::VectorStatus,
-        ];
-        let responses: Vec<_> = std::thread::scope(|scope| {
-            let handles: Vec<_> = requests
-                .into_iter()
-                .map(|req| {
-                    let socket_path = socket_path.clone();
-                    scope.spawn(move || call(&socket_path, &req))
-                })
-                .collect();
-            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            // Every request below is an independent UnixStream round trip
+            // (see `client::call`) with no shared connection state, so
+            // there's no reason to wait on them one at a time — fired
+            // concurrently and joined before building the bundle sent
+            // back to the main thread. (The daemon does its own
+            // parallelizing of AgentList/Status's per-agent discovery —
+            // see `single-runtime`'s `cached_discover` — so this and that
+            // combine rather than duplicate effort.)
+            let requests = [
+                Request::Status,
+                Request::AgentList,
+                Request::TaskList,
+                Request::WorkspaceList,
+                Request::McpList,
+                Request::McpGatewayStatus,
+                Request::LspList,
+                Request::PluginList,
+                Request::ToolList,
+                Request::ConfiguredProviderList,
+                Request::AccountList { agent: None },
+                Request::KgReadGraph,
+                Request::CacheStatus,
+                Request::VectorStatus,
+            ];
+            let responses: Vec<_> = std::thread::scope(|scope| {
+                let handles: Vec<_> = requests
+                    .into_iter()
+                    .map(|req| {
+                        let socket_path = socket_path.clone();
+                        scope.spawn(move || call(&socket_path, &req))
+                    })
+                    .collect();
+                handles.into_iter().map(|h| h.join().unwrap()).collect()
+            });
+
+            // Unpacked in the same order `requests` was built.
+            let mut responses = responses.into_iter();
+            let mut error: Option<String> = None;
+            let mut next = |error: &mut Option<String>| -> Option<ResponseData> {
+                match responses.next().expect("one response per request") {
+                    Ok(Response::Ok { data }) => Some(data),
+                    Ok(Response::Error { message }) => {
+                        *error = Some(message);
+                        None
+                    }
+                    Err(e) => {
+                        *error = Some(e.to_string());
+                        None
+                    }
+                }
+            };
+
+            let status = next(&mut error).and_then(|d| match d { ResponseData::Status(s) => Some(s), _ => None });
+            let agents = next(&mut error).and_then(|d| match d { ResponseData::Agents(a) => Some(a), _ => None }).unwrap_or_default();
+            let tasks = next(&mut error).and_then(|d| match d { ResponseData::Tasks(t) => Some(t), _ => None }).unwrap_or_default();
+            let workspaces = next(&mut error).and_then(|d| match d { ResponseData::Workspaces(w) => Some(w), _ => None }).unwrap_or_default();
+            let mcp_servers = next(&mut error).and_then(|d| match d { ResponseData::McpServers(s) => Some(s), _ => None }).unwrap_or_default();
+            let mcp_gateway_enabled = match next(&mut error) {
+                Some(ResponseData::McpGatewayMode(enabled)) => Some(enabled),
+                _ => None,
+            };
+            let lsp_servers = next(&mut error).and_then(|d| match d { ResponseData::LspServers(s) => Some(s), _ => None }).unwrap_or_default();
+            let plugins = next(&mut error).and_then(|d| match d { ResponseData::Plugins(p) => Some(p), _ => None }).unwrap_or_default();
+            let tools = next(&mut error).and_then(|d| match d { ResponseData::Tools(t) => Some(t), _ => None }).unwrap_or_default();
+            // Configured-only, not the full preset catalog: `providers.toml`
+            // carries every built-in preset unconditionally (ProviderSpec has
+            // no `enabled` field, unlike MCP/LSP/Tools), so plain
+            // Request::ProviderList can't tell "known preset name" apart from
+            // "actually has a key stored" — the full catalog is still what
+            // the [a] add-provider flow shows (ProviderPresetList, a
+            // separate fetch, unaffected by this).
+            let providers = next(&mut error).and_then(|d| match d { ResponseData::Providers(p) => Some(p), _ => None }).unwrap_or_default();
+            let accounts = next(&mut error).and_then(|d| match d { ResponseData::AccountProfiles(p) => Some(p), _ => None }).unwrap_or_default();
+            let kg_entity_count = next(&mut error).and_then(|d| match d { ResponseData::KgGraph(g) => Some(g), _ => None }).map(|g| g.entities.len());
+            let cache = match next(&mut error) {
+                Some(ResponseData::CacheStatus { configured, reachable, .. }) => Some((configured, reachable)),
+                _ => None,
+            };
+            let vector = match next(&mut error) {
+                Some(ResponseData::VectorStatus { configured, reachable, .. }) => Some((configured, reachable)),
+                _ => None,
+            };
+
+            let _ = tx.send(RefreshBundle {
+                status,
+                agents,
+                tasks,
+                workspaces,
+                mcp_servers,
+                mcp_gateway_enabled,
+                lsp_servers,
+                plugins,
+                tools,
+                providers,
+                accounts,
+                kg_entity_count,
+                cache,
+                vector,
+                error,
+            });
         });
+        self.refresh_rx = Some(rx);
+    }
 
-        // Unpacked in the same order `requests` was built, sequentially —
-        // this is exactly the assignment logic `refresh` had before
-        // parallelizing the I/O above, just reading from the pre-fetched
-        // `responses` instead of blocking on `self.fetch`/`self.raw`.
-        let mut responses = responses.into_iter();
-        let mut next = |this: &mut Self| -> Option<ResponseData> {
-            match responses.next().expect("one response per request") {
-                Ok(Response::Ok { data }) => Some(data),
-                Ok(Response::Error { message }) => {
-                    this.error = Some(message);
-                    None
-                }
-                Err(e) => {
-                    this.error = Some(e.to_string());
-                    None
-                }
-            }
-        };
+    /// Applies a completed background `refresh()`, if one has arrived.
+    /// Call every tick, same as `poll_install`/`poll_provider_add`/etc.
+    /// Returns true if a redraw-worthy state change happened.
+    pub fn poll_refresh(&mut self) -> bool {
+        let Some(rx) = &self.refresh_rx else { return false };
+        let Ok(bundle) = rx.try_recv() else { return false };
 
-        self.status = next(self).and_then(|d| match d { ResponseData::Status(s) => Some(s), _ => None });
-        self.agents = next(self).and_then(|d| match d { ResponseData::Agents(a) => Some(a), _ => None }).unwrap_or_default();
-        self.tasks = next(self).and_then(|d| match d { ResponseData::Tasks(t) => Some(t), _ => None }).unwrap_or_default();
-        self.workspaces = next(self).and_then(|d| match d { ResponseData::Workspaces(w) => Some(w), _ => None }).unwrap_or_default();
-        self.mcp_servers = next(self).and_then(|d| match d { ResponseData::McpServers(s) => Some(s), _ => None }).unwrap_or_default();
-        if let Some(ResponseData::McpGatewayMode(enabled)) = next(self) {
+        self.status = bundle.status;
+        self.agents = bundle.agents;
+        self.tasks = bundle.tasks;
+        self.workspaces = bundle.workspaces;
+        self.mcp_servers = bundle.mcp_servers;
+        if let Some(enabled) = bundle.mcp_gateway_enabled {
             self.mcp_gateway_enabled = enabled;
         }
-        self.lsp_servers = next(self).and_then(|d| match d { ResponseData::LspServers(s) => Some(s), _ => None }).unwrap_or_default();
-        self.plugins = next(self).and_then(|d| match d { ResponseData::Plugins(p) => Some(p), _ => None }).unwrap_or_default();
-        self.tools = next(self).and_then(|d| match d { ResponseData::Tools(t) => Some(t), _ => None }).unwrap_or_default();
-        // Configured-only, not the full preset catalog: `providers.toml`
-        // carries every built-in preset unconditionally (ProviderSpec has
-        // no `enabled` field, unlike MCP/LSP/Tools), so plain
-        // Request::ProviderList can't tell "known preset name" apart from
-        // "actually has a key stored" — the full catalog is still what
-        // the [a] add-provider flow shows (ProviderPresetList, a
-        // separate fetch, unaffected by this).
-        self.providers = next(self).and_then(|d| match d { ResponseData::Providers(p) => Some(p), _ => None }).unwrap_or_default();
-        self.accounts = next(self).and_then(|d| match d { ResponseData::AccountProfiles(p) => Some(p), _ => None }).unwrap_or_default();
+        self.lsp_servers = bundle.lsp_servers;
+        self.plugins = bundle.plugins;
+        self.tools = bundle.tools;
+        self.providers = bundle.providers;
+        self.accounts = bundle.accounts;
+        self.kg_entity_count = bundle.kg_entity_count;
+        if let Some((configured, reachable)) = bundle.cache {
+            self.cache_configured = configured;
+            self.cache_reachable = reachable;
+        }
+        if let Some((configured, reachable)) = bundle.vector {
+            self.vector_configured = configured;
+            self.vector_reachable = reachable;
+        }
+        if bundle.error.is_some() {
+            self.error = bundle.error;
+        }
         // Real billing-API calls are comparatively slow/rate-limited (the
         // Anthropic Usage & Cost API's own docs recommend at most once a
         // minute) and, once a billing key is configured, involve a live
         // HTTP round trip the daemon makes on this request's behalf —
-        // unlike every other tab's data, this is never fetched inline
-        // here. It's kicked off on a background thread (see
-        // begin_usage_fetch/poll_usage) so a slow provider API can't
-        // freeze the whole event loop the way a blocking call here would,
-        // the same discipline every other slow/background action in this
-        // file already follows (install, provider add, task add, backup).
+        // unlike every other tab's data, this is never fetched as part of
+        // the bundle above. It's kicked off on its own background thread
+        // (see begin_usage_fetch/poll_usage) so a slow provider API can't
+        // hold up the rest of the tabs' data the way bundling it in would.
         if self.tab == Tab::Usage {
             self.begin_usage_fetch();
         }
-        self.kg_entity_count = next(self).and_then(|d| match d { ResponseData::KgGraph(g) => Some(g), _ => None }).map(|g| g.entities.len());
-        if let Some(ResponseData::CacheStatus { configured, reachable, .. }) = next(self) {
-            self.cache_configured = configured;
-            self.cache_reachable = reachable;
-        }
-        if let Some(ResponseData::VectorStatus { configured, reachable, .. }) = next(self) {
-            self.vector_configured = configured;
-            self.vector_reachable = reachable;
-        }
         self.last_refresh = Instant::now();
+        self.loading = false;
+        self.refresh_rx = None;
         self.clamp_selection();
+        true
     }
 
     fn fetch<T>(&mut self, req: Request, extract: impl FnOnce(ResponseData) -> Option<T>) -> Option<T> {
@@ -738,7 +854,7 @@ impl App {
         std::thread::spawn(move || {
             let result = (|| -> anyhow::Result<usize> {
                 if selected.len() == 1 {
-                    match call(&socket_path, &Request::TaskRun { description, agent: selected[0].clone(), cwd, use_worktree: false, account: None, real_home, no_memory_context: false, timeout_secs: 300, background: false })? {
+                    match call(&socket_path, &Request::TaskRun { description, agent: selected[0].clone(), cwd, use_worktree: false, account: None, real_home, no_memory_context: false, timeout_secs: 300, background: false, allow_fallback: false })? {
                         Response::Ok { .. } => Ok(1),
                         Response::Error { message } => anyhow::bail!(message),
                     }

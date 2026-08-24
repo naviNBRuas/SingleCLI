@@ -225,6 +225,17 @@ pub enum Request {
         /// existing one-shot `single task run` callers keep today's
         /// blocking behavior unchanged.
         background: bool,
+        /// Opt-in (default off): when this run fails or times out in a way
+        /// that looks like a rate limit — see `single_core::ratelimit` —
+        /// and a fallback chain is configured for `agent`/`account` (see
+        /// `Request::FallbackSet`), automatically marks that account
+        /// `rate_limited` and creates a linked follow-up task against the
+        /// chain's next entry, visible as its own task row rather than a
+        /// silent retry. Off by default: failing over to a different
+        /// agent/account is a real behavior change a user should choose,
+        /// not something that happens under a plain `task run`.
+        #[serde(default)]
+        allow_fallback: bool,
     },
     TaskList,
     TaskInspect {
@@ -520,6 +531,18 @@ pub enum Request {
         agents: Vec<String>,
         dry_run: bool,
     },
+    /// Saves one ordered fallback chain, replacing any existing chain that
+    /// starts with the same first entry (so `fallback set` is idempotent —
+    /// re-running it with a new tail updates the chain rather than
+    /// accumulating duplicates). See `single_core::fallback`.
+    FallbackSet {
+        chain: Vec<AgentAccountRef>,
+    },
+    FallbackList,
+    /// Removes the chain whose first entry matches `first`.
+    FallbackRemove {
+        first: AgentAccountRef,
+    },
     PluginPresetList,
     PluginAddPreset {
         name: String,
@@ -613,6 +636,7 @@ pub enum ResponseData {
     Plugin(PluginSpec),
     Plugins(Vec<PluginSpec>),
     PluginPresets(Vec<PluginPresetInfo>),
+    FallbackChains(Vec<Vec<AgentAccountRef>>),
     PluginSyncResults(Vec<PluginInstallResult>),
     Empty,
 }
@@ -1220,6 +1244,15 @@ pub struct SkillStarterInfo {
 /// for OpenCode, whose real plugin command (`opencode plugin <module>`)
 /// takes a plain npm module name instead — a genuinely different
 /// addressing scheme, not a naming inconsistency this project invented.
+/// One entry in a fallback chain (`single_core::fallback`): an agent, and
+/// optionally a specific captured account of it (`None` means that
+/// agent's default isolated home, not any particular named account).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentAccountRef {
+    pub agent: String,
+    pub account: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PluginSpec {
     pub name: String,

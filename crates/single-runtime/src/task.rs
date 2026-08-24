@@ -322,6 +322,10 @@ pub struct RunTaskOptions<'a> {
     /// default — see `build_context_preamble`).
     pub no_memory_context: bool,
     pub timeout: Duration,
+    /// Opt-in (default off): fail over to the next entry in a configured
+    /// fallback chain (`single_core::fallback`) when this run's failure
+    /// looks like a rate limit — see `execute`'s `maybe_fail_over`.
+    pub allow_fallback: bool,
 }
 
 /// Cap on the injected memory/notes/knowledge preamble so it can't dwarf
@@ -496,6 +500,7 @@ pub struct OwnedRunTaskOptions {
     pub real_home: bool,
     pub no_memory_context: bool,
     pub timeout: Duration,
+    pub allow_fallback: bool,
 }
 
 impl OwnedRunTaskOptions {
@@ -509,6 +514,7 @@ impl OwnedRunTaskOptions {
             real_home: self.real_home,
             no_memory_context: self.no_memory_context,
             timeout: self.timeout,
+            allow_fallback: self.allow_fallback,
         }
     }
 }
@@ -846,6 +852,10 @@ fn execute(
 
     let worktree_path_str = opts.use_worktree.then(|| run_cwd.display().to_string());
 
+    // Set inside the failure arms below (never on success/cancellation),
+    // then checked once after the match — see `maybe_fail_over`.
+    let mut failure_text: Option<String> = None;
+
     match outcome {
         Ok(outcome) => {
             let artifact_path = ctx.dirs.task_artifact_path(id);
@@ -891,6 +901,7 @@ fn execute(
                     opts.description,
                     &summary,
                 );
+                failure_text = Some(format!("{}\n{}\n{summary}", outcome.stdout, outcome.stderr));
             }
         }
         Err(e) => {
@@ -913,10 +924,86 @@ fn execute(
                 opts.description,
                 &format!("{e:#}"),
             );
+            failure_text = Some(format!("{e:#}"));
+        }
+    }
+
+    if opts.allow_fallback {
+        if let Some(text) = failure_text {
+            maybe_fail_over(conn, ctx, id, opts, &text, cancel);
         }
     }
 
     get(conn, id)?.context("task disappeared after finishing")
+}
+
+/// One hop of `task run --allow-fallback`: if `id`'s failure looks like a
+/// rate limit (the account was already marked `rate_limited`, or the
+/// output matches `single_core::ratelimit`'s generic signals) and a
+/// fallback chain has an entry after `opts.agent`/`opts.account`, marks
+/// the account rate-limited (if not already) and runs a linked follow-up
+/// task against the chain's next entry. The follow-up also carries
+/// `allow_fallback: true`, so a chain of several hops walks itself one
+/// link at a time via this same function — bounded automatically, since
+/// `single_core::fallback::next_after` only ever advances forward through
+/// a finite saved chain (see its doc comment for why that can't loop).
+/// Errors are logged as an event rather than propagated — a failed
+/// failover attempt must never mask the original task's own recorded
+/// failure.
+fn maybe_fail_over(conn: &Connection, ctx: &Context, id: i64, opts: &RunTaskOptions, failure_text: &str, cancel: Option<&std::sync::atomic::AtomicBool>) {
+    let already_rate_limited = opts.account.is_some_and(|account_name| {
+        single_core::account::list(&ctx.dirs.accounts_dir(), Some(opts.agent))
+            .unwrap_or_default()
+            .into_iter()
+            .any(|a| a.name == account_name && a.status == single_protocol::AccountStatus::RateLimited)
+    });
+    if !already_rate_limited && !single_core::ratelimit::looks_like_rate_limit(failure_text) {
+        return;
+    }
+
+    let current = single_protocol::AgentAccountRef { agent: opts.agent.to_string(), account: opts.account.map(String::from) };
+    let fallback_path = ctx.dirs.fallback_registry_file();
+    let next = match single_core::fallback::next_after(&fallback_path, &current) {
+        Ok(next) => next,
+        Err(e) => {
+            let _ = crate::state::record_event(conn, "task.fallback_error", &format!("#{id} reading fallback registry: {e:#}"));
+            return;
+        }
+    };
+    let Some(next) = next else { return };
+    let detected = for_agent_with_custom(&next.agent, &ctx.dirs.agents_dir(), &ctx.registry).is_some_and(|a| a.discover().detected);
+    if !detected {
+        let _ = crate::state::record_event(conn, "task.fallback_error", &format!("#{id} fallback target '{}' isn't installed", next.agent));
+        return;
+    }
+
+    if let Some(account) = &opts.account {
+        if let Err(e) = single_core::account::set_status(&ctx.dirs.accounts_dir(), opts.agent, account, single_protocol::AccountStatus::RateLimited) {
+            let _ = crate::state::record_event(conn, "task.fallback_error", &format!("#{id} marking {}/{account} rate_limited: {e:#}", opts.agent));
+        }
+    }
+
+    let description = format!("[fallback from #{id}, {} looked rate-limited] {}", opts.agent, opts.description);
+    let next_opts = RunTaskOptions {
+        description: &description,
+        agent: &next.agent,
+        cwd: opts.cwd,
+        use_worktree: opts.use_worktree,
+        account: next.account.as_deref(),
+        real_home: opts.real_home,
+        no_memory_context: opts.no_memory_context,
+        timeout: opts.timeout,
+        allow_fallback: true,
+    };
+    match create_for_cwd(conn, next_opts.description, next_opts.agent, next_opts.cwd) {
+        Ok(next_id) => {
+            let _ = crate::state::record_event(conn, "task.fallback_started", &format!("#{id} -> #{next_id} agent={}", next.agent));
+            let _ = execute(conn, ctx, next_id, &next_opts, cancel);
+        }
+        Err(e) => {
+            let _ = crate::state::record_event(conn, "task.fallback_error", &format!("#{id} starting follow-up task: {e:#}"));
+        }
+    }
 }
 
 /// "Learn from errors": every task failure is also written to the memory
@@ -1114,6 +1201,7 @@ mod tests {
             real_home: false,
             no_memory_context: false,
             timeout: Duration::from_secs(1),
+            allow_fallback: false,
         };
         let task = run(&conn, &ctx, opts).unwrap();
         assert_eq!(task.status, TaskStatus::Failed);
@@ -1145,6 +1233,7 @@ mod tests {
                 real_home: false,
                 no_memory_context: false,
                 timeout: Duration::from_secs(1),
+                allow_fallback: false,
             },
         )
     }
@@ -1183,6 +1272,7 @@ mod tests {
             real_home: false,
             no_memory_context: false,
             timeout: Duration::from_secs(1),
+            allow_fallback: false,
         };
         let task = run(&conn, &ctx, opts).unwrap();
         assert_eq!(task.status, TaskStatus::Failed);
@@ -1193,5 +1283,102 @@ mod tests {
             memories[0].project.is_some(),
             "expected the resolved repo root to be recorded as the memory's project"
         );
+    }
+
+    #[test]
+    fn fail_over_starts_a_linked_follow_up_task_when_the_chain_has_one() {
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("SINGLE_CONFIG_DIR", dir.path());
+        let conn = test_conn();
+        let dirs = single_core::SingleDirs::from_root(dir.path().to_path_buf());
+        dirs.ensure_created().unwrap();
+        let ctx = Context {
+            dirs,
+            resolved: single_core::ResolvedConfig::default(),
+            registry: single_core::builtin_registry(),
+        };
+
+        if !single_agent_sdk::adapters::for_agent("claude").unwrap().discover().detected {
+            return;
+        }
+        // Two entries for the same agent (no named account, just the
+        // default isolated home) — exercises the chain-walk and follow-up
+        // creation without needing a real captured account profile, which
+        // `set_status` (called only when `opts.account` is `Some`) would
+        // otherwise require to already exist.
+        single_core::fallback::set(
+            &ctx.dirs.fallback_registry_file(),
+            vec![
+                single_protocol::AgentAccountRef { agent: "claude".into(), account: None },
+                single_protocol::AgentAccountRef { agent: "codex".into(), account: None },
+            ],
+        )
+        .unwrap();
+
+        let this_repo = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let id = create_for_cwd(&conn, "do the thing", "claude", &this_repo).unwrap();
+        let opts = RunTaskOptions {
+            description: "do the thing",
+            agent: "claude",
+            cwd: &this_repo,
+            use_worktree: false,
+            account: None,
+            real_home: false,
+            no_memory_context: true,
+            timeout: Duration::from_secs(1),
+            allow_fallback: true,
+        };
+        maybe_fail_over(&conn, &ctx, id, &opts, "Error: rate limit exceeded, try again later", None);
+
+        let tasks = list(&conn).unwrap();
+        if !single_agent_sdk::adapters::for_agent("codex").unwrap().discover().detected {
+            // The chain's next hop isn't installed either — maybe_fail_over
+            // correctly declines rather than starting a doomed task.
+            assert_eq!(tasks.len(), 1);
+            return;
+        }
+        assert_eq!(tasks.len(), 2, "the original task plus one linked follow-up");
+        let follow_up = tasks.iter().find(|t| t.id != id).unwrap();
+        assert_eq!(follow_up.agent, "codex");
+        assert!(follow_up.description.contains(&format!("fallback from #{id}")));
+    }
+
+    #[test]
+    fn fail_over_does_nothing_when_the_failure_does_not_look_like_a_rate_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("SINGLE_CONFIG_DIR", dir.path());
+        let conn = test_conn();
+        let dirs = single_core::SingleDirs::from_root(dir.path().to_path_buf());
+        dirs.ensure_created().unwrap();
+        let ctx = Context {
+            dirs,
+            resolved: single_core::ResolvedConfig::default(),
+            registry: single_core::builtin_registry(),
+        };
+        single_core::fallback::set(
+            &ctx.dirs.fallback_registry_file(),
+            vec![
+                single_protocol::AgentAccountRef { agent: "claude".into(), account: None },
+                single_protocol::AgentAccountRef { agent: "codex".into(), account: None },
+            ],
+        )
+        .unwrap();
+
+        let this_repo = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let id = create_for_cwd(&conn, "do the thing", "claude", &this_repo).unwrap();
+        let opts = RunTaskOptions {
+            description: "do the thing",
+            agent: "claude",
+            cwd: &this_repo,
+            use_worktree: false,
+            account: None,
+            real_home: false,
+            no_memory_context: true,
+            timeout: Duration::from_secs(1),
+            allow_fallback: true,
+        };
+        maybe_fail_over(&conn, &ctx, id, &opts, "error: file not found", None);
+
+        assert_eq!(list(&conn).unwrap().len(), 1, "an ordinary failure must not trigger a follow-up task");
     }
 }

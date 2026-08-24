@@ -2,7 +2,7 @@ use crate::app::{App, BackupFlow, BackupMode, BackupOutcome, InstallFlow, Provid
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Cell, Clear, List, ListItem, Paragraph, Row, Table, Wrap};
+use ratatui::widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, Wrap};
 use ratatui::Frame;
 
 const ACCENT: Color = Color::Cyan;
@@ -47,14 +47,20 @@ pub fn draw(frame: &mut Frame, app: &App) {
 }
 
 fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
-    let text = match &app.status {
-        Some(s) => format!(
-            "SingleCLI  ·  profile: {}  ·  agents: {}/{} detected  ·  v{}",
-            s.active_profile, s.agents_detected, s.agents_known, s.version
+    let (text, style) = match (&app.status, app.loading) {
+        (Some(s), _) => (
+            format!(
+                "SingleCLI  ·  profile: {}  ·  agents: {}/{} detected  ·  v{}",
+                s.active_profile, s.agents_detected, s.agents_known, s.version
+            ),
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
         ),
-        None => "SingleCLI  ·  runtime unreachable".to_string(),
+        // Status hasn't arrived yet because the first refresh is still in
+        // flight — not the same as the daemon actually being unreachable,
+        // so this stays neutral instead of alarming red.
+        (None, true) => (format!("SingleCLI  ·  {} connecting…", app.spinner_frame()), Style::default().fg(ACCENT)),
+        (None, false) => ("SingleCLI  ·  runtime unreachable".to_string(), Style::default().fg(BAD)),
     };
-    let style = if app.status.is_some() { Style::default().fg(ACCENT).add_modifier(Modifier::BOLD) } else { Style::default().fg(BAD) };
     let header = Paragraph::new(Line::from(Span::styled(text, style)))
         .alignment(Alignment::Center)
         .block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(ACCENT)));
@@ -84,7 +90,24 @@ fn draw_tabs(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(tabs, area);
 }
 
+/// Shown in place of every tab while the first `refresh()` is still in
+/// flight — a cold daemon can take a couple of seconds to answer (agent
+/// discovery shells out to every registered agent's CLI), and the tab
+/// bar/borders already drew instantly around this, so this is the only
+/// part of the first frame that's actually waiting on anything.
+fn draw_loading(frame: &mut Frame, area: Rect, app: &App) {
+    let text = format!("{} loading…", app.spinner_frame());
+    let p = Paragraph::new(Line::from(Span::styled(text, Style::default().fg(ACCENT))))
+        .alignment(Alignment::Center)
+        .block(Block::default().borders(Borders::ALL));
+    frame.render_widget(p, area);
+}
+
 fn draw_content(frame: &mut Frame, area: Rect, app: &App) {
+    if app.loading {
+        draw_loading(frame, area, app);
+        return;
+    }
     match app.tab {
         Tab::Agents => draw_agents(frame, area, app),
         Tab::Tasks => match &app.task_view {
@@ -191,25 +214,27 @@ fn draw_agents(frame: &mut Frame, area: Rect, app: &App) {
 /// tasks that all happen to be the same project show as one row here
 /// instead of one flat list mixing every project together.
 fn draw_workspaces(frame: &mut Frame, area: Rect, app: &App) {
-    let window = visible_window(app.workspaces.len(), app.selected, area.height.saturating_sub(2) as usize);
-    let items: Vec<ListItem> = app.workspaces[window.clone()]
+    let window = visible_window(app.workspaces.len(), app.selected, area.height.saturating_sub(3) as usize);
+    let rows: Vec<Row> = app.workspaces[window.clone()]
         .iter()
         .enumerate()
         .map(|(rel_i, w)| {
             let i = window.start + rel_i;
             let style = if i == app.selected && app.tab == Tab::Tasks { selected_style() } else { Style::default() };
-            ListItem::new(Line::from(vec![
-                Span::styled(format!("{:<20} ", w.name), Style::default().add_modifier(Modifier::BOLD)),
-                Span::styled(format!("{:<4} tasks  ", w.task_count), Style::default().fg(ACCENT)),
-                Span::raw(format!("last active {:<25} ", w.last_activity_at)),
-                Span::styled(w.path.clone(), Style::default().fg(MUTED)),
-            ]))
+            Row::new(vec![
+                Cell::from(Span::styled(w.name.clone(), Style::default().add_modifier(Modifier::BOLD))),
+                Cell::from(Span::styled(w.task_count.to_string(), Style::default().fg(ACCENT))),
+                Cell::from(w.last_activity_at.clone()),
+                Cell::from(Span::styled(w.path.clone(), Style::default().fg(MUTED))),
+            ])
             .style(style)
         })
         .collect();
     let title = if app.workspaces.is_empty() { " Tasks — no workspaces yet; [n] new task ".to_string() } else { " Workspaces — [enter] open  [n] new task ".to_string() };
-    let list = List::new(items).block(Block::default().borders(Borders::ALL).title(with_scroll_indicator(title, app.workspaces.len(), &window)));
-    frame.render_widget(list, area);
+    let table = Table::new(rows, [Constraint::Length(20), Constraint::Length(8), Constraint::Length(25), Constraint::Min(20)])
+        .header(Row::new(vec!["Workspace", "Tasks", "Last Active", "Path"]).style(Style::default().add_modifier(Modifier::BOLD)))
+        .block(Block::default().borders(Borders::ALL).title(with_scroll_indicator(title, app.workspaces.len(), &window)));
+    frame.render_widget(table, area);
 }
 
 /// Tasks tab, drilled into one workspace: the same per-task table the
@@ -248,19 +273,19 @@ fn draw_tasks(frame: &mut Frame, area: Rect, app: &App) {
 }
 
 fn draw_mcp(frame: &mut Frame, area: Rect, app: &App) {
-    let window = visible_window(app.mcp_servers.len(), app.selected, area.height.saturating_sub(2) as usize);
-    let items: Vec<ListItem> = app.mcp_servers[window.clone()]
+    let window = visible_window(app.mcp_servers.len(), app.selected, area.height.saturating_sub(3) as usize);
+    let rows: Vec<Row> = app.mcp_servers[window.clone()]
         .iter()
         .enumerate()
         .map(|(rel_i, s)| {
             let i = window.start + rel_i;
             let (flag, color) = if s.enabled { ("enabled", OK) } else { ("disabled", MUTED) };
             let style = if i == app.selected && app.tab == Tab::Mcp { selected_style() } else { Style::default() };
-            ListItem::new(Line::from(vec![
-                Span::styled(format!("{:<14}", s.name), Style::default().add_modifier(Modifier::BOLD)),
-                Span::raw(format!("{:<40} ", s.command)),
-                Span::styled(format!("[{flag}]"), Style::default().fg(color)),
-            ]))
+            Row::new(vec![
+                Cell::from(Span::styled(s.name.clone(), Style::default().add_modifier(Modifier::BOLD))),
+                Cell::from(s.command.clone()),
+                Cell::from(Span::styled(flag, Style::default().fg(color))),
+            ])
             .style(style)
         })
         .collect();
@@ -270,57 +295,63 @@ fn draw_mcp(frame: &mut Frame, area: Rect, app: &App) {
         app.mcp_servers.len(),
         &window,
     );
-    let list = List::new(items).block(Block::default().borders(Borders::ALL).title(title));
-    frame.render_widget(list, area);
+    let table = Table::new(rows, [Constraint::Length(20), Constraint::Min(20), Constraint::Length(10)])
+        .header(Row::new(vec!["Name", "Command", "Status"]).style(Style::default().add_modifier(Modifier::BOLD)))
+        .block(Block::default().borders(Borders::ALL).title(title));
+    frame.render_widget(table, area);
 }
 
 fn draw_lsp(frame: &mut Frame, area: Rect, app: &App) {
-    let window = visible_window(app.lsp_servers.len(), app.selected, area.height.saturating_sub(2) as usize);
-    let items: Vec<ListItem> = app.lsp_servers[window.clone()]
+    let window = visible_window(app.lsp_servers.len(), app.selected, area.height.saturating_sub(3) as usize);
+    let rows: Vec<Row> = app.lsp_servers[window.clone()]
         .iter()
         .enumerate()
         .map(|(rel_i, s)| {
             let i = window.start + rel_i;
             let (flag, color) = if s.enabled { ("enabled", OK) } else { ("disabled", MUTED) };
             let style = if i == app.selected && app.tab == Tab::Lsp { selected_style() } else { Style::default() };
-            ListItem::new(Line::from(vec![
-                Span::styled(format!("{:<14}", s.name), Style::default().add_modifier(Modifier::BOLD)),
-                Span::raw(format!("{:<26} ", s.command)),
-                Span::raw(format!("{:<20} ", s.extensions.join(","))),
-                Span::styled(format!("[{flag}]"), Style::default().fg(color)),
-            ]))
+            Row::new(vec![
+                Cell::from(Span::styled(s.name.clone(), Style::default().add_modifier(Modifier::BOLD))),
+                Cell::from(s.command.clone()),
+                Cell::from(s.extensions.join(",")),
+                Cell::from(Span::styled(flag, Style::default().fg(color))),
+            ])
             .style(style)
         })
         .collect();
     let title = with_scroll_indicator(" LSP servers — [a] add  [d] remove ".to_string(), app.lsp_servers.len(), &window);
-    let list = List::new(items).block(Block::default().borders(Borders::ALL).title(title));
-    frame.render_widget(list, area);
+    let table = Table::new(rows, [Constraint::Length(18), Constraint::Length(26), Constraint::Min(16), Constraint::Length(10)])
+        .header(Row::new(vec!["Name", "Command", "Extensions", "Status"]).style(Style::default().add_modifier(Modifier::BOLD)))
+        .block(Block::default().borders(Borders::ALL).title(title));
+    frame.render_widget(table, area);
 }
 
 fn draw_plugins(frame: &mut Frame, area: Rect, app: &App) {
-    let window = visible_window(app.plugins.len(), app.selected, area.height.saturating_sub(2) as usize);
-    let items: Vec<ListItem> = app.plugins[window.clone()]
+    let window = visible_window(app.plugins.len(), app.selected, area.height.saturating_sub(3) as usize);
+    let rows: Vec<Row> = app.plugins[window.clone()]
         .iter()
         .enumerate()
         .map(|(rel_i, p)| {
             let i = window.start + rel_i;
             let style = if i == app.selected && app.tab == Tab::Plugins { selected_style() } else { Style::default() };
-            ListItem::new(Line::from(vec![
-                Span::styled(format!("{:<16}", p.name), Style::default().add_modifier(Modifier::BOLD)),
-                Span::raw(format!("{:<28} ", p.target)),
-                Span::styled(p.opencode_module.clone().unwrap_or_else(|| "-".into()), Style::default().fg(MUTED)),
-            ]))
+            Row::new(vec![
+                Cell::from(Span::styled(p.name.clone(), Style::default().add_modifier(Modifier::BOLD))),
+                Cell::from(p.target.clone()),
+                Cell::from(Span::styled(p.opencode_module.clone().unwrap_or_else(|| "-".into()), Style::default().fg(MUTED))),
+            ])
             .style(style)
         })
         .collect();
     let title = with_scroll_indicator(" Plugins — [a] add  [s] sync to all agents  [d] remove ".to_string(), app.plugins.len(), &window);
-    let list = List::new(items).block(Block::default().borders(Borders::ALL).title(title));
-    frame.render_widget(list, area);
+    let table = Table::new(rows, [Constraint::Length(20), Constraint::Length(30), Constraint::Min(16)])
+        .header(Row::new(vec!["Name", "Target", "OpenCode Module"]).style(Style::default().add_modifier(Modifier::BOLD)))
+        .block(Block::default().borders(Borders::ALL).title(title));
+    frame.render_widget(table, area);
 }
 
 fn draw_tools(frame: &mut Frame, area: Rect, app: &App) {
-    let window = visible_window(app.tools.len(), app.selected, area.height.saturating_sub(2) as usize);
-    let items: Vec<ListItem> = app.tools[window.clone()]
+    let window = visible_window(app.tools.len(), app.selected, area.height.saturating_sub(3) as usize);
+    let rows: Vec<Row> = app.tools[window.clone()]
         .iter()
         .enumerate()
         .map(|(rel_i, t)| {
@@ -332,53 +363,57 @@ fn draw_tools(frame: &mut Frame, area: Rect, app: &App) {
                 single_protocol::RiskLevel::High => ("high", BAD),
             };
             let style = if i == app.selected && app.tab == Tab::Tools { selected_style() } else { Style::default() };
-            ListItem::new(Line::from(vec![
-                Span::styled(format!("{:<14}", t.name), Style::default().add_modifier(Modifier::BOLD)),
-                Span::raw(format!("{:<34} ", t.description)),
-                Span::styled(format!("{risk_label:<8}"), Style::default().fg(risk_color)),
-                Span::styled(format!("[{flag}]"), Style::default().fg(color)),
-            ]))
+            Row::new(vec![
+                Cell::from(Span::styled(t.name.clone(), Style::default().add_modifier(Modifier::BOLD))),
+                Cell::from(t.description.clone()),
+                Cell::from(Span::styled(risk_label, Style::default().fg(risk_color))),
+                Cell::from(Span::styled(flag, Style::default().fg(color))),
+            ])
             .style(style)
         })
         .collect();
     let title = with_scroll_indicator(" Tools — [a] add  [e] enable/disable ".to_string(), app.tools.len(), &window);
-    let list = List::new(items).block(Block::default().borders(Borders::ALL).title(title));
-    frame.render_widget(list, area);
+    let table = Table::new(rows, [Constraint::Length(18), Constraint::Min(20), Constraint::Length(10), Constraint::Length(10)])
+        .header(Row::new(vec!["Name", "Description", "Risk", "Status"]).style(Style::default().add_modifier(Modifier::BOLD)))
+        .block(Block::default().borders(Borders::ALL).title(title));
+    frame.render_widget(table, area);
 }
 
 fn draw_providers(frame: &mut Frame, area: Rect, app: &App) {
     if app.providers.is_empty() {
-        let items = vec![ListItem::new(Span::styled(
+        let p = Paragraph::new(Span::styled(
             "(no providers configured yet — press [a] to add one from the full preset catalog)",
             Style::default().fg(MUTED),
-        ))];
-        let list = List::new(items).block(Block::default().borders(Borders::ALL).title(" Providers (configured) — [a] add "));
-        frame.render_widget(list, area);
+        ))
+        .block(Block::default().borders(Borders::ALL).title(" Providers (configured) — [a] add "));
+        frame.render_widget(p, area);
         return;
     }
-    let window = visible_window(app.providers.len(), app.selected, area.height.saturating_sub(2) as usize);
-    let items: Vec<ListItem> = app.providers[window.clone()]
+    let window = visible_window(app.providers.len(), app.selected, area.height.saturating_sub(3) as usize);
+    let rows: Vec<Row> = app.providers[window.clone()]
         .iter()
         .enumerate()
         .map(|(rel_i, p)| {
             let i = window.start + rel_i;
             let style = if i == app.selected && app.tab == Tab::Providers { selected_style() } else { Style::default() };
-            ListItem::new(Line::from(vec![
-                Span::styled(format!("{:<16}", p.name), Style::default().add_modifier(Modifier::BOLD)),
-                Span::raw(format!("{:<22} ", p.env_var_name)),
-                Span::styled(p.base_url.clone().unwrap_or_else(|| "-".into()), Style::default().fg(MUTED)),
-            ]))
+            Row::new(vec![
+                Cell::from(Span::styled(p.name.clone(), Style::default().add_modifier(Modifier::BOLD))),
+                Cell::from(p.env_var_name.clone()),
+                Cell::from(Span::styled(p.base_url.clone().unwrap_or_else(|| "-".into()), Style::default().fg(MUTED))),
+            ])
             .style(style)
         })
         .collect();
     let title = with_scroll_indicator(" Providers (configured) — [a] add ".to_string(), app.providers.len(), &window);
-    let list = List::new(items).block(Block::default().borders(Borders::ALL).title(title));
-    frame.render_widget(list, area);
+    let table = Table::new(rows, [Constraint::Length(18), Constraint::Length(24), Constraint::Min(16)])
+        .header(Row::new(vec!["Name", "Env Var", "Base URL"]).style(Style::default().add_modifier(Modifier::BOLD)))
+        .block(Block::default().borders(Borders::ALL).title(title));
+    frame.render_widget(table, area);
 }
 
 fn draw_accounts(frame: &mut Frame, area: Rect, app: &App) {
-    let window = visible_window(app.accounts.len(), app.selected, area.height.saturating_sub(2) as usize);
-    let items: Vec<ListItem> = app.accounts[window.clone()]
+    let window = visible_window(app.accounts.len(), app.selected, area.height.saturating_sub(3) as usize);
+    let rows: Vec<Row> = app.accounts[window.clone()]
         .iter()
         .enumerate()
         .map(|(rel_i, a)| {
@@ -391,19 +426,24 @@ fn draw_accounts(frame: &mut Frame, area: Rect, app: &App) {
                 single_protocol::AccountStatus::Unknown => ("unknown", MUTED),
             };
             let style = if i == app.selected && app.tab == Tab::Accounts { selected_style() } else { Style::default() };
-            ListItem::new(Line::from(vec![
-                Span::styled(format!("{:<12}", a.agent), Style::default().add_modifier(Modifier::BOLD)),
-                Span::raw(format!("{:<16} ", a.name)),
-                Span::raw(format!("{:<24} ", a.label.as_deref().unwrap_or("-"))),
-                Span::styled(format!("[{status_label}] "), Style::default().fg(status_color)),
-                Span::styled(format!("{}{flag}", a.captured_at), Style::default().fg(MUTED)),
-            ]))
+            Row::new(vec![
+                Cell::from(Span::styled(a.agent.clone(), Style::default().add_modifier(Modifier::BOLD))),
+                Cell::from(a.name.clone()),
+                Cell::from(a.label.clone().unwrap_or_else(|| "-".into())),
+                Cell::from(Span::styled(status_label, Style::default().fg(status_color))),
+                Cell::from(Span::styled(format!("{}{flag}", a.captured_at), Style::default().fg(MUTED))),
+            ])
             .style(style)
         })
         .collect();
     let title = with_scroll_indicator(" Accounts — single account capture/use <agent> <name> ".to_string(), app.accounts.len(), &window);
-    let list = List::new(items).block(Block::default().borders(Borders::ALL).title(title));
-    frame.render_widget(list, area);
+    let table = Table::new(
+        rows,
+        [Constraint::Length(12), Constraint::Length(16), Constraint::Length(24), Constraint::Length(14), Constraint::Min(20)],
+    )
+    .header(Row::new(vec!["Agent", "Name", "Label", "Status", "Captured At"]).style(Style::default().add_modifier(Modifier::BOLD)))
+    .block(Block::default().borders(Borders::ALL).title(title));
+    frame.render_widget(table, area);
 }
 
 fn draw_usage(frame: &mut Frame, area: Rect, app: &App) {
@@ -440,20 +480,22 @@ fn draw_usage(frame: &mut Frame, area: Rect, app: &App) {
         .block(Block::default().borders(Borders::ALL).title(title));
     frame.render_widget(table, chunks[0]);
 
-    let items: Vec<ListItem> = usage
+    let rows: Vec<Row> = usage
         .agent_local_stats
         .iter()
         .map(|a| {
-            ListItem::new(Line::from(vec![
-                Span::styled(format!("{:<14}", a.agent), Style::default().add_modifier(Modifier::BOLD)),
-                Span::raw(format!("runs: {:<5} ", a.run_count)),
-                Span::raw(format!("avg: {}ms  ", a.avg_duration_ms)),
-                Span::styled(format!("last: {}", a.last_run_at.as_deref().unwrap_or("never")), Style::default().fg(MUTED)),
-            ]))
+            Row::new(vec![
+                Cell::from(Span::styled(a.agent.clone(), Style::default().add_modifier(Modifier::BOLD))),
+                Cell::from(a.run_count.to_string()),
+                Cell::from(format!("{}ms", a.avg_duration_ms)),
+                Cell::from(Span::styled(a.last_run_at.clone().unwrap_or_else(|| "never".into()), Style::default().fg(MUTED))),
+            ])
         })
         .collect();
-    let list = List::new(items).block(Block::default().borders(Borders::ALL).title(" Connected agents — local stats only, no billing API "));
-    frame.render_widget(list, chunks[1]);
+    let table = Table::new(rows, [Constraint::Length(14), Constraint::Length(8), Constraint::Length(14), Constraint::Min(20)])
+        .header(Row::new(vec!["Agent", "Runs", "Avg Duration", "Last Run"]).style(Style::default().add_modifier(Modifier::BOLD)))
+        .block(Block::default().borders(Borders::ALL).title(" Connected agents — local stats only, no billing API "));
+    frame.render_widget(table, chunks[1]);
 }
 
 fn draw_backup(frame: &mut Frame, area: Rect, _app: &App) {
@@ -794,7 +836,7 @@ fn draw_task_add_modal(frame: &mut Frame, area: Rect, app: &App) {
                 Line::from(Span::styled(description.clone(), Style::default().fg(MUTED))),
                 Line::from(Span::styled(format!("cwd: {cwd}"), Style::default().fg(MUTED))),
                 Line::from(""),
-                Line::from("Agents (space to toggle; picking >1 orchestrates them together):"),
+                Line::from("Agents (space to toggle; pick more than one to run them all concurrently, each in its own git worktree):"),
             ];
             if agent_names.is_empty() {
                 lines.push(Line::from(Span::styled("  (no detected agents)", Style::default().fg(BAD))));
