@@ -17,6 +17,18 @@
 //! every registered server just to build an upfront catalog would spawn
 //! exactly the N processes this design exists to avoid.
 //!
+//! **Idle eviction**: a spawned server stays in `sessions` (and its child
+//! process alive) only while something's actually using it — a background
+//! sweep (`spawn_idle_sweeper`) drops any session untouched for longer than
+//! `IDLE_TIMEOUT`, so a task that used `postgres` for ten minutes and moved
+//! on doesn't keep that process (and every other server it ever touched)
+//! resident for the rest of the agent's session. Eviction is just removing
+//! the map entry: once nothing else holds the `Arc<ChildSession>`,
+//! `RunningService`'s own `Drop` cancels its background task and closes the
+//! child process asynchronously (see rmcp's `service.rs` — this is its
+//! documented cleanup path, not a shortcut taken here). A later call for
+//! the same server just respawns it, same as first use.
+//!
 //! **`notes_leave`/`notes_read` (v0.1.17)** are not proxied to anything —
 //! implemented directly here against `single_core::notes`, the same
 //! SQLite-backed inbox `task::run`'s prompt preamble already reads from at
@@ -43,17 +55,33 @@ use rmcp::{RoleClient, RoleServer, ServerHandler, ServiceExt};
 use serde_json::{json, Map, Value};
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 
 type ChildSession = rmcp::service::RunningService<RoleClient, ()>;
 
+/// How long a spawned server may sit unused before the sweep evicts it.
+/// Generous enough that a task pausing between tool calls doesn't thrash
+/// respawns, short enough that an agent's whole session doesn't keep every
+/// server it ever touched resident.
+const IDLE_TIMEOUT: Duration = Duration::from_secs(600);
+/// How often the sweep checks for idle sessions.
+const SWEEP_INTERVAL: Duration = Duration::from_secs(60);
+
+struct SessionEntry {
+    session: Arc<ChildSession>,
+    last_used: Instant,
+}
+
 pub struct Gateway {
-    sessions: Mutex<HashMap<String, Arc<ChildSession>>>,
+    sessions: Arc<Mutex<HashMap<String, SessionEntry>>>,
 }
 
 impl Gateway {
     pub fn new() -> Self {
-        Gateway { sessions: Mutex::new(HashMap::new()) }
+        let sessions = Arc::new(Mutex::new(HashMap::new()));
+        spawn_idle_sweeper(sessions.clone());
+        Gateway { sessions }
     }
 
     /// Registry servers, honoring `enabled` the same way the rest of
@@ -67,8 +95,9 @@ impl Gateway {
 
     async fn ensure_session(&self, name: &str) -> Result<Arc<ChildSession>> {
         let mut sessions = self.sessions.lock().await;
-        if let Some(existing) = sessions.get(name) {
-            return Ok(existing.clone());
+        if let Some(existing) = sessions.get_mut(name) {
+            existing.last_used = Instant::now();
+            return Ok(existing.session.clone());
         }
         let servers = Self::registry()?;
         let spec = servers.into_iter().find(|s| s.name == name).with_context(|| {
@@ -93,7 +122,7 @@ impl Gateway {
         let transport = TokioChildProcess::new(command.configure(|_| {})).with_context(|| format!("spawning mcp server '{name}'"))?;
         let session = ().serve(transport).await.with_context(|| format!("initializing mcp server '{name}'"))?;
         let session = Arc::new(session);
-        sessions.insert(name.to_string(), session.clone());
+        sessions.insert(name.to_string(), SessionEntry { session: session.clone(), last_used: Instant::now() });
         Ok(session)
     }
 
@@ -212,6 +241,29 @@ impl Gateway {
     }
 }
 
+/// True once `last_used` is far enough in the past to evict — split out
+/// from the sweep loop so the threshold logic is testable without a real
+/// timer/tokio runtime.
+fn is_idle(last_used: Instant, now: Instant, timeout: Duration) -> bool {
+    now.saturating_duration_since(last_used) >= timeout
+}
+
+/// Runs for the lifetime of the gateway process, dropping any spawned
+/// server's session once it's been unused for `IDLE_TIMEOUT`. Holds its own
+/// `Arc` clone of the map rather than a reference to `Gateway`, so it can be
+/// started from `Gateway::new()` before the `Gateway` itself is handed to
+/// `.serve()`.
+fn spawn_idle_sweeper(sessions: Arc<Mutex<HashMap<String, SessionEntry>>>) {
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(SWEEP_INTERVAL).await;
+            let now = Instant::now();
+            let mut sessions = sessions.lock().await;
+            sessions.retain(|_, entry| !is_idle(entry.last_used, now, IDLE_TIMEOUT));
+        }
+    });
+}
+
 /// The real first caller of `permissions::evaluate` (via
 /// `preferences::evaluate_and_learn`) — every `invoke_mcp` tool call is
 /// checked against `permissions.toml`'s `tools` rules, then learned
@@ -264,6 +316,15 @@ mod tests {
         assert!(servers.iter().all(|s| s.enabled));
         assert!(servers.iter().any(|s| s.name == "git"));
         assert!(!servers.iter().any(|s| s.name == "filesystem"), "disabled servers must not appear");
+    }
+
+    #[test]
+    fn is_idle_evicts_only_once_the_timeout_has_actually_elapsed() {
+        let last_used = Instant::now();
+        let timeout = Duration::from_secs(600);
+        assert!(!is_idle(last_used, last_used + Duration::from_secs(599), timeout));
+        assert!(is_idle(last_used, last_used + Duration::from_secs(600), timeout));
+        assert!(is_idle(last_used, last_used + Duration::from_secs(601), timeout));
     }
 
     #[test]

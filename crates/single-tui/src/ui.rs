@@ -1,4 +1,4 @@
-use crate::app::{App, BackupFlow, BackupMode, BackupOutcome, InstallFlow, ProviderAddFlow, QuickAddFlow, Tab, TaskAddFlow, TaskDetailFlow};
+use crate::app::{App, BackupFlow, BackupMode, BackupOutcome, InstallFlow, ProviderAddFlow, QuickAddFlow, Tab, TaskAddFlow, TaskDetailFlow, TaskView};
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -87,7 +87,10 @@ fn draw_tabs(frame: &mut Frame, area: Rect, app: &App) {
 fn draw_content(frame: &mut Frame, area: Rect, app: &App) {
     match app.tab {
         Tab::Agents => draw_agents(frame, area, app),
-        Tab::Tasks => draw_tasks(frame, area, app),
+        Tab::Tasks => match &app.task_view {
+            TaskView::Workspaces => draw_workspaces(frame, area, app),
+            TaskView::Tasks { .. } => draw_tasks(frame, area, app),
+        },
         Tab::Mcp => draw_mcp(frame, area, app),
         Tab::Lsp => draw_lsp(frame, area, app),
         Tab::Plugins => draw_plugins(frame, area, app),
@@ -105,12 +108,38 @@ fn selected_style() -> Style {
     Style::default().bg(Color::DarkGray).add_modifier(Modifier::BOLD)
 }
 
+/// Keeps the selected row inside the visible window of a long list/table,
+/// recomputed fresh every frame rather than tracked as persisted state —
+/// the fix for selection silently running off the bottom of the viewport
+/// with nothing ever scrolling into view (every `List`/`Table` here used
+/// to render the full, unsliced item vec with no viewport awareness at
+/// all).
+fn visible_window(total: usize, selected: usize, viewport_rows: usize) -> std::ops::Range<usize> {
+    if viewport_rows == 0 || total <= viewport_rows {
+        return 0..total;
+    }
+    let max_start = total - viewport_rows;
+    let start = selected.saturating_sub(viewport_rows - 1).min(max_start);
+    start..(start + viewport_rows)
+}
+
+/// Appends a "(12-30 of 214)" indicator to a block title, only when the
+/// list is actually scrolled — so a short list's title stays unchanged.
+fn with_scroll_indicator(title: String, total: usize, window: &std::ops::Range<usize>) -> String {
+    if total <= window.end - window.start {
+        title
+    } else {
+        format!("{title}({}-{} of {total}) ", window.start + 1, window.end)
+    }
+}
+
 fn draw_agents(frame: &mut Frame, area: Rect, app: &App) {
-    let rows: Vec<Row> = app
-        .agents
+    let window = visible_window(app.agents.len(), app.selected, area.height.saturating_sub(3) as usize);
+    let rows: Vec<Row> = app.agents[window.clone()]
         .iter()
         .enumerate()
-        .map(|(i, a)| {
+        .map(|(rel_i, a)| {
+            let i = window.start + rel_i;
             let (dot, color) = if a.detected { ("●", OK) } else { ("○", MUTED) };
             let caps = [
                 (a.capabilities.mcp, "mcp"),
@@ -154,16 +183,46 @@ fn draw_agents(frame: &mut Frame, area: Rect, app: &App) {
         ],
     )
     .header(Row::new(vec!["", "Agent", "Version", "Auth", "Capabilities", ""]).style(Style::default().add_modifier(Modifier::BOLD)))
-    .block(Block::default().borders(Borders::ALL).title(" Agents — [i] install selected, [enter] inspect "));
+    .block(Block::default().borders(Borders::ALL).title(with_scroll_indicator(" Agents — [i] install selected, [enter] inspect ".to_string(), app.agents.len(), &window)));
     frame.render_widget(table, area);
 }
 
-fn draw_tasks(frame: &mut Frame, area: Rect, app: &App) {
-    let rows: Vec<Row> = app
-        .tasks
+/// Tasks tab, top level: every workspace with at least one task, so 20+
+/// tasks that all happen to be the same project show as one row here
+/// instead of one flat list mixing every project together.
+fn draw_workspaces(frame: &mut Frame, area: Rect, app: &App) {
+    let window = visible_window(app.workspaces.len(), app.selected, area.height.saturating_sub(2) as usize);
+    let items: Vec<ListItem> = app.workspaces[window.clone()]
         .iter()
         .enumerate()
-        .map(|(i, t)| {
+        .map(|(rel_i, w)| {
+            let i = window.start + rel_i;
+            let style = if i == app.selected && app.tab == Tab::Tasks { selected_style() } else { Style::default() };
+            ListItem::new(Line::from(vec![
+                Span::styled(format!("{:<20} ", w.name), Style::default().add_modifier(Modifier::BOLD)),
+                Span::styled(format!("{:<4} tasks  ", w.task_count), Style::default().fg(ACCENT)),
+                Span::raw(format!("last active {:<25} ", w.last_activity_at)),
+                Span::styled(w.path.clone(), Style::default().fg(MUTED)),
+            ]))
+            .style(style)
+        })
+        .collect();
+    let title = if app.workspaces.is_empty() { " Tasks — no workspaces yet; [n] new task ".to_string() } else { " Workspaces — [enter] open  [n] new task ".to_string() };
+    let list = List::new(items).block(Block::default().borders(Borders::ALL).title(with_scroll_indicator(title, app.workspaces.len(), &window)));
+    frame.render_widget(list, area);
+}
+
+/// Tasks tab, drilled into one workspace: the same per-task table the
+/// Tasks tab always showed, just scoped to `App::visible_tasks()` instead
+/// of every task ever run.
+fn draw_tasks(frame: &mut Frame, area: Rect, app: &App) {
+    let tasks = app.visible_tasks();
+    let window = visible_window(tasks.len(), app.selected, area.height.saturating_sub(3) as usize);
+    let rows: Vec<Row> = tasks[window.clone()]
+        .iter()
+        .enumerate()
+        .map(|(rel_i, t)| {
+            let i = window.start + rel_i;
             let (label, color) = match t.status {
                 single_protocol::TaskStatus::Completed => ("completed", OK),
                 single_protocol::TaskStatus::Failed => ("failed", BAD),
@@ -181,18 +240,20 @@ fn draw_tasks(frame: &mut Frame, area: Rect, app: &App) {
             .style(style)
         })
         .collect();
+    let title = with_scroll_indicator(" Tasks — [esc] back to workspaces  [n] new task  [enter] view output  [c] cancel running ".to_string(), tasks.len(), &window);
     let table = Table::new(rows, [Constraint::Length(6), Constraint::Length(12), Constraint::Length(12), Constraint::Min(20)])
         .header(Row::new(vec!["ID", "Status", "Agent", "Description"]).style(Style::default().add_modifier(Modifier::BOLD)))
-        .block(Block::default().borders(Borders::ALL).title(" Tasks — [n] new task  [enter] view output  [c] cancel running "));
+        .block(Block::default().borders(Borders::ALL).title(title));
     frame.render_widget(table, area);
 }
 
 fn draw_mcp(frame: &mut Frame, area: Rect, app: &App) {
-    let items: Vec<ListItem> = app
-        .mcp_servers
+    let window = visible_window(app.mcp_servers.len(), app.selected, area.height.saturating_sub(2) as usize);
+    let items: Vec<ListItem> = app.mcp_servers[window.clone()]
         .iter()
         .enumerate()
-        .map(|(i, s)| {
+        .map(|(rel_i, s)| {
+            let i = window.start + rel_i;
             let (flag, color) = if s.enabled { ("enabled", OK) } else { ("disabled", MUTED) };
             let style = if i == app.selected && app.tab == Tab::Mcp { selected_style() } else { Style::default() };
             ListItem::new(Line::from(vec![
@@ -203,16 +264,23 @@ fn draw_mcp(frame: &mut Frame, area: Rect, app: &App) {
             .style(style)
         })
         .collect();
-    let list = List::new(items).block(Block::default().borders(Borders::ALL).title(" MCP servers — [a] add  [e] enable/disable  [d] remove "));
+    let gateway_label = if app.mcp_gateway_enabled { "gateway: on" } else { "gateway: off" };
+    let title = with_scroll_indicator(
+        format!(" MCP servers — [a] add  [e] enable/disable  [d] remove  [g] toggle {gateway_label} "),
+        app.mcp_servers.len(),
+        &window,
+    );
+    let list = List::new(items).block(Block::default().borders(Borders::ALL).title(title));
     frame.render_widget(list, area);
 }
 
 fn draw_lsp(frame: &mut Frame, area: Rect, app: &App) {
-    let items: Vec<ListItem> = app
-        .lsp_servers
+    let window = visible_window(app.lsp_servers.len(), app.selected, area.height.saturating_sub(2) as usize);
+    let items: Vec<ListItem> = app.lsp_servers[window.clone()]
         .iter()
         .enumerate()
-        .map(|(i, s)| {
+        .map(|(rel_i, s)| {
+            let i = window.start + rel_i;
             let (flag, color) = if s.enabled { ("enabled", OK) } else { ("disabled", MUTED) };
             let style = if i == app.selected && app.tab == Tab::Lsp { selected_style() } else { Style::default() };
             ListItem::new(Line::from(vec![
@@ -224,16 +292,18 @@ fn draw_lsp(frame: &mut Frame, area: Rect, app: &App) {
             .style(style)
         })
         .collect();
-    let list = List::new(items).block(Block::default().borders(Borders::ALL).title(" LSP servers — [a] add  [d] remove "));
+    let title = with_scroll_indicator(" LSP servers — [a] add  [d] remove ".to_string(), app.lsp_servers.len(), &window);
+    let list = List::new(items).block(Block::default().borders(Borders::ALL).title(title));
     frame.render_widget(list, area);
 }
 
 fn draw_plugins(frame: &mut Frame, area: Rect, app: &App) {
-    let items: Vec<ListItem> = app
-        .plugins
+    let window = visible_window(app.plugins.len(), app.selected, area.height.saturating_sub(2) as usize);
+    let items: Vec<ListItem> = app.plugins[window.clone()]
         .iter()
         .enumerate()
-        .map(|(i, p)| {
+        .map(|(rel_i, p)| {
+            let i = window.start + rel_i;
             let style = if i == app.selected && app.tab == Tab::Plugins { selected_style() } else { Style::default() };
             ListItem::new(Line::from(vec![
                 Span::styled(format!("{:<16}", p.name), Style::default().add_modifier(Modifier::BOLD)),
@@ -243,16 +313,18 @@ fn draw_plugins(frame: &mut Frame, area: Rect, app: &App) {
             .style(style)
         })
         .collect();
-    let list = List::new(items).block(Block::default().borders(Borders::ALL).title(" Plugins — [a] add  [s] sync to all agents  [d] remove "));
+    let title = with_scroll_indicator(" Plugins — [a] add  [s] sync to all agents  [d] remove ".to_string(), app.plugins.len(), &window);
+    let list = List::new(items).block(Block::default().borders(Borders::ALL).title(title));
     frame.render_widget(list, area);
 }
 
 fn draw_tools(frame: &mut Frame, area: Rect, app: &App) {
-    let items: Vec<ListItem> = app
-        .tools
+    let window = visible_window(app.tools.len(), app.selected, area.height.saturating_sub(2) as usize);
+    let items: Vec<ListItem> = app.tools[window.clone()]
         .iter()
         .enumerate()
-        .map(|(i, t)| {
+        .map(|(rel_i, t)| {
+            let i = window.start + rel_i;
             let (flag, color) = if t.enabled { ("enabled", OK) } else { ("disabled", MUTED) };
             let (risk_label, risk_color) = match t.risk_level {
                 single_protocol::RiskLevel::Low => ("low", OK),
@@ -269,37 +341,48 @@ fn draw_tools(frame: &mut Frame, area: Rect, app: &App) {
             .style(style)
         })
         .collect();
-    let list = List::new(items).block(Block::default().borders(Borders::ALL).title(" Tools — [a] add  [e] enable/disable "));
+    let title = with_scroll_indicator(" Tools — [a] add  [e] enable/disable ".to_string(), app.tools.len(), &window);
+    let list = List::new(items).block(Block::default().borders(Borders::ALL).title(title));
     frame.render_widget(list, area);
 }
 
 fn draw_providers(frame: &mut Frame, area: Rect, app: &App) {
-    let items: Vec<ListItem> = if app.providers.is_empty() {
-        vec![ListItem::new(Span::styled(
+    if app.providers.is_empty() {
+        let items = vec![ListItem::new(Span::styled(
             "(no providers configured yet — press [a] to add one from the full preset catalog)",
             Style::default().fg(MUTED),
-        ))]
-    } else {
-        app.providers
-            .iter()
-            .map(|p| {
-                ListItem::new(Line::from(vec![
-                    Span::styled(format!("{:<16}", p.name), Style::default().add_modifier(Modifier::BOLD)),
-                    Span::raw(format!("{:<22} ", p.env_var_name)),
-                    Span::styled(p.base_url.clone().unwrap_or_else(|| "-".into()), Style::default().fg(MUTED)),
-                ]))
-            })
-            .collect()
-    };
-    let list = List::new(items).block(Block::default().borders(Borders::ALL).title(" Providers (configured) — [a] add "));
+        ))];
+        let list = List::new(items).block(Block::default().borders(Borders::ALL).title(" Providers (configured) — [a] add "));
+        frame.render_widget(list, area);
+        return;
+    }
+    let window = visible_window(app.providers.len(), app.selected, area.height.saturating_sub(2) as usize);
+    let items: Vec<ListItem> = app.providers[window.clone()]
+        .iter()
+        .enumerate()
+        .map(|(rel_i, p)| {
+            let i = window.start + rel_i;
+            let style = if i == app.selected && app.tab == Tab::Providers { selected_style() } else { Style::default() };
+            ListItem::new(Line::from(vec![
+                Span::styled(format!("{:<16}", p.name), Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(format!("{:<22} ", p.env_var_name)),
+                Span::styled(p.base_url.clone().unwrap_or_else(|| "-".into()), Style::default().fg(MUTED)),
+            ]))
+            .style(style)
+        })
+        .collect();
+    let title = with_scroll_indicator(" Providers (configured) — [a] add ".to_string(), app.providers.len(), &window);
+    let list = List::new(items).block(Block::default().borders(Borders::ALL).title(title));
     frame.render_widget(list, area);
 }
 
 fn draw_accounts(frame: &mut Frame, area: Rect, app: &App) {
-    let items: Vec<ListItem> = app
-        .accounts
+    let window = visible_window(app.accounts.len(), app.selected, area.height.saturating_sub(2) as usize);
+    let items: Vec<ListItem> = app.accounts[window.clone()]
         .iter()
-        .map(|a| {
+        .enumerate()
+        .map(|(rel_i, a)| {
+            let i = window.start + rel_i;
             let flag = if a.unverified_complete { " (best-effort)" } else { "" };
             let (status_label, status_color) = match a.status {
                 single_protocol::AccountStatus::Available => ("available", OK),
@@ -307,6 +390,7 @@ fn draw_accounts(frame: &mut Frame, area: Rect, app: &App) {
                 single_protocol::AccountStatus::NeedsTopup => ("needs_topup", BAD),
                 single_protocol::AccountStatus::Unknown => ("unknown", MUTED),
             };
+            let style = if i == app.selected && app.tab == Tab::Accounts { selected_style() } else { Style::default() };
             ListItem::new(Line::from(vec![
                 Span::styled(format!("{:<12}", a.agent), Style::default().add_modifier(Modifier::BOLD)),
                 Span::raw(format!("{:<16} ", a.name)),
@@ -314,9 +398,11 @@ fn draw_accounts(frame: &mut Frame, area: Rect, app: &App) {
                 Span::styled(format!("[{status_label}] "), Style::default().fg(status_color)),
                 Span::styled(format!("{}{flag}", a.captured_at), Style::default().fg(MUTED)),
             ]))
+            .style(style)
         })
         .collect();
-    let list = List::new(items).block(Block::default().borders(Borders::ALL).title(" Accounts — single account capture/use <agent> <name> "));
+    let title = with_scroll_indicator(" Accounts — single account capture/use <agent> <name> ".to_string(), app.accounts.len(), &window);
+    let list = List::new(items).block(Block::default().borders(Borders::ALL).title(title));
     frame.render_widget(list, area);
 }
 
@@ -443,6 +529,8 @@ fn draw_help(frame: &mut Frame, area: Rect) {
         Line::from("  d                    remove the selected entry (MCP/LSP/Plugins)"),
         Line::from("  e                    toggle enabled/disabled (MCP/Tools)"),
         Line::from("  s                    sync the selected plugin into every registered agent (Plugins tab)"),
+        Line::from("  g                    toggle single-mcp's dynamic gateway (MCP tab) — one synced entry per agent instead of every"),
+        Line::from("                       enabled server; takes effect on the next `single install-integrations`"),
         Line::from(""),
         Line::from(Span::styled("Usage tab", Style::default().add_modifier(Modifier::BOLD))),
         Line::from("  refetches on tab entry / r    real $ spend needs a billing admin key: `single provider set-billing-key <name> <key>`"),

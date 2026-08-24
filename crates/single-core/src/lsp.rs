@@ -304,6 +304,17 @@ pub fn sync_missing_presets_disabled(path: &Path) -> Result<usize> {
     Ok(added)
 }
 
+/// Sets `enabled` on a named server. Returns `false` if no server had that name.
+pub fn set_enabled(path: &Path, name: &str, enabled: bool) -> Result<bool> {
+    let mut servers = load(path)?;
+    let Some(server) = servers.iter_mut().find(|s| s.name == name) else {
+        return Ok(false);
+    };
+    server.enabled = enabled;
+    save(path, &servers)?;
+    Ok(true)
+}
+
 pub fn find(path: &Path, name: &str) -> Result<Option<LspServerSpec>> {
     Ok(load(path)?.into_iter().find(|s| s.name == name))
 }

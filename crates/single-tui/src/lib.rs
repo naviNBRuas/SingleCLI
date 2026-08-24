@@ -3,7 +3,7 @@ pub mod client;
 pub mod ui;
 
 use anyhow::Result;
-use app::{App, BackupFlow, InstallFlow, ProviderAddFlow, QuickAddFlow, Tab, TaskAddFlow, TaskDetailFlow};
+use app::{App, BackupFlow, InstallFlow, ProviderAddFlow, QuickAddFlow, Tab, TaskAddFlow, TaskDetailFlow, TaskView};
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use crossterm::execute;
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
@@ -76,6 +76,15 @@ fn handle_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> bool {
         return false;
     }
 
+    // Drilled into one workspace's tasks (Tasks tab): Esc backs out to the
+    // workspace list instead of quitting the whole app — checked ahead of
+    // the generic `Esc => return true` below, which still applies at the
+    // workspace-list level and everywhere else.
+    if app.tab == Tab::Tasks && code == KeyCode::Esc && app.task_view != TaskView::Workspaces {
+        app.exit_workspace();
+        return false;
+    }
+
     match code {
         KeyCode::Char('q') => return true,
         KeyCode::Esc => return true,
@@ -90,10 +99,11 @@ fn handle_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> bool {
         KeyCode::Char('a') if app.tab == Tab::Providers => app.begin_add_provider(),
         KeyCode::Char('a') if matches!(app.tab, Tab::Mcp | Tab::Lsp | Tab::Plugins | Tab::Tools) => app.begin_quick_add(),
         KeyCode::Char('n') if app.tab == Tab::Tasks => app.begin_add_task(),
-        KeyCode::Enter if app.tab == Tab::Tasks => app.begin_view_task(),
+        KeyCode::Enter if app.tab == Tab::Tasks => app.tasks_enter(),
         KeyCode::Char('d') if matches!(app.tab, Tab::Mcp | Tab::Lsp | Tab::Plugins | Tab::Providers | Tab::Accounts) => app.delete_selected(),
         KeyCode::Char('e') if matches!(app.tab, Tab::Mcp | Tab::Tools) => app.toggle_selected(),
         KeyCode::Char('s') if app.tab == Tab::Plugins => app.sync_selected_plugin(),
+        KeyCode::Char('g') if app.tab == Tab::Mcp => app.toggle_mcp_gateway(),
         KeyCode::Char('x') if app.tab == Tab::Backup => app.begin_backup_export(),
         KeyCode::Char('i') if app.tab == Tab::Backup => app.begin_backup_import(),
         _ => {}

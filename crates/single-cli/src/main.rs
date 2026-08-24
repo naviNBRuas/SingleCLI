@@ -5,7 +5,9 @@ mod update;
 
 use clap::{Parser, Subcommand};
 use single_core::SingleDirs;
-use single_protocol::{LspServerSpec, McpServerSpec, Request, Response, RiskLevel, ToolSpec};
+use single_protocol::{
+    LspServerSpec, McpServerSpec, Request, Response, ResponseData, RiskLevel, ToolSpec,
+};
 use std::collections::BTreeMap;
 
 #[derive(Parser)]
@@ -111,6 +113,13 @@ enum Command {
     Task {
         #[command(subcommand)]
         action: TaskCommand,
+    },
+    /// Workspaces (projects) tasks have run against — the grouping `single
+    /// task list` doesn't show on its own. A workspace's identity survives
+    /// its directory moving; see `single_core::project_context`.
+    Workspace {
+        #[command(subcommand)]
+        action: WorkspaceCommand,
     },
     /// Run several agents in sequence on one goal: each agent runs in the
     /// same shared git worktree and is handed the previous agent's real
@@ -364,6 +373,15 @@ enum McpCommand {
     Disable {
         name: String,
     },
+    /// Enables every currently-disabled registered server that doesn't need a secret it
+    /// doesn't already have — i.e. `secret_env` is empty, or every key in it already
+    /// resolves to a stored secret (`single secret set`). Safe to re-run any time you add
+    /// more presets or set a new secret; already-enabled/already-skipped servers are untouched.
+    EnableAll {
+        /// Print what would be enabled without changing anything.
+        #[arg(long)]
+        dry_run: bool,
+    },
     Inspect {
         name: String,
         #[arg(long)]
@@ -415,6 +433,21 @@ enum LspCommand {
     },
     Remove {
         name: String,
+    },
+    Enable {
+        name: String,
+    },
+    Disable {
+        name: String,
+    },
+    /// Enables every currently-disabled registered server, unconditionally — language
+    /// servers have no auth concept, and each agent's own LSP client only spawns one when
+    /// a matching file is actually opened, so an uninstalled server just never gets used.
+    /// Safe to re-run any time you add more presets.
+    EnableAll {
+        /// Print what would be enabled without changing anything.
+        #[arg(long)]
+        dry_run: bool,
     },
     Inspect {
         name: String,
@@ -961,6 +994,15 @@ enum AccountCommand {
 }
 
 #[derive(Subcommand)]
+enum WorkspaceCommand {
+    /// List every workspace with at least one task, newest activity first.
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
 enum TaskCommand {
     /// Run a prompt against a real agent CLI and block until it finishes.
     Run {
@@ -1223,6 +1265,59 @@ fn main() -> anyhow::Result<()> {
                 let response = client::send(&socket_path, Request::McpDisable { name })?;
                 render::print(response, false);
             }
+            McpCommand::EnableAll { dry_run } => {
+                let Response::Ok {
+                    data: ResponseData::McpServers(servers),
+                } = client::send(&socket_path, Request::McpList)?
+                else {
+                    anyhow::bail!("failed to list mcp servers");
+                };
+                let mut enabled = Vec::new();
+                let mut skipped_needs_auth = Vec::new();
+                for s in servers.into_iter().filter(|s| !s.enabled) {
+                    let Response::Ok {
+                        data: ResponseData::McpServer(spec),
+                    } = client::send(&socket_path, Request::McpInspect { name: s.name.clone() })?
+                    else {
+                        continue;
+                    };
+                    let mut has_all_secrets = true;
+                    for secret_key in spec.secret_env.values() {
+                        let has_value = matches!(
+                            client::send(
+                                &socket_path,
+                                Request::SecretGet {
+                                    name: secret_key.clone()
+                                }
+                            )?,
+                            Response::Ok {
+                                data: ResponseData::SecretValue(Some(_))
+                            }
+                        );
+                        if !has_value {
+                            has_all_secrets = false;
+                            break;
+                        }
+                    }
+                    if !has_all_secrets {
+                        skipped_needs_auth.push(s.name);
+                        continue;
+                    }
+                    if !dry_run {
+                        client::send(&socket_path, Request::McpEnable { name: s.name.clone() })?;
+                    }
+                    enabled.push(s.name);
+                }
+                let verb = if dry_run { "would enable" } else { "enabled" };
+                println!("{verb} {} mcp server(s): {}", enabled.len(), enabled.join(", "));
+                if !skipped_needs_auth.is_empty() {
+                    println!(
+                        "left {} disabled (missing a required secret — see `single secret set`): {}",
+                        skipped_needs_auth.len(),
+                        skipped_needs_auth.join(", ")
+                    );
+                }
+            }
             McpCommand::Inspect { name, json } => {
                 let response = client::send(&socket_path, Request::McpInspect { name })?;
                 render::print(response, json);
@@ -1282,6 +1377,31 @@ fn main() -> anyhow::Result<()> {
             LspCommand::Remove { name } => {
                 let response = client::send(&socket_path, Request::LspRemove { name })?;
                 render::print(response, false);
+            }
+            LspCommand::Enable { name } => {
+                let response = client::send(&socket_path, Request::LspEnable { name })?;
+                render::print(response, false);
+            }
+            LspCommand::Disable { name } => {
+                let response = client::send(&socket_path, Request::LspDisable { name })?;
+                render::print(response, false);
+            }
+            LspCommand::EnableAll { dry_run } => {
+                let Response::Ok {
+                    data: ResponseData::LspServers(servers),
+                } = client::send(&socket_path, Request::LspList)?
+                else {
+                    anyhow::bail!("failed to list lsp servers");
+                };
+                let mut enabled = Vec::new();
+                for s in servers.into_iter().filter(|s| !s.enabled) {
+                    if !dry_run {
+                        client::send(&socket_path, Request::LspEnable { name: s.name.clone() })?;
+                    }
+                    enabled.push(s.name);
+                }
+                let verb = if dry_run { "would enable" } else { "enabled" };
+                println!("{verb} {} lsp server(s): {}", enabled.len(), enabled.join(", "));
             }
             LspCommand::Inspect { name, json } => {
                 let response = client::send(&socket_path, Request::LspInspect { name })?;
@@ -1732,6 +1852,12 @@ fn main() -> anyhow::Result<()> {
             TaskCommand::Cleanup { id } => {
                 let response = client::send(&socket_path, Request::TaskCleanup { id })?;
                 render::print(response, false);
+            }
+        },
+        Command::Workspace { action } => match action {
+            WorkspaceCommand::List { json } => {
+                let response = client::send(&socket_path, Request::WorkspaceList)?;
+                render::print(response, json);
             }
         },
         Command::Orchestrate {

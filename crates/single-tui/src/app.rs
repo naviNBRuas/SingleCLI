@@ -3,10 +3,18 @@ use single_core::SingleDirs;
 use single_protocol::{
     AccountProfileInfo, AgentInfo, LspServerSpec, McpServerInfo, PluginSpec, ProviderPresetInfo,
     ProviderSpec, Request, Response, ResponseData, RuntimeStatus, SetupAction, TaskRecord, TaskStatus, ToolSpec, UsageSummary,
+    WorkspaceInfo,
 };
 use std::path::PathBuf;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
+
+/// Which level of the Tasks tab the user is looking at — see `App::task_view`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TaskView {
+    Workspaces,
+    Tasks { workspace_id: String },
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tab {
@@ -197,7 +205,20 @@ pub struct App {
     pub status: Option<RuntimeStatus>,
     pub agents: Vec<AgentInfo>,
     pub tasks: Vec<TaskRecord>,
+    pub workspaces: Vec<WorkspaceInfo>,
+    /// Which level of the Tasks tab is showing — the workspace list, or
+    /// one workspace's tasks after drilling in. Reset to `Workspaces`
+    /// whenever the tab changes (same as `selected`), but deliberately
+    /// left alone across a plain `refresh()` so an in-progress action
+    /// (adding a task, watching one run) doesn't kick the view back out
+    /// to the workspace list underneath the user.
+    pub task_view: TaskView,
     pub mcp_servers: Vec<McpServerInfo>,
+    /// Whether `single-mcp`'s dynamic gateway is on — see
+    /// `Request::McpGatewayStatus`'s doc comment. Fetched every `refresh()`
+    /// so the Mcp tab's title reflects a toggle made from another `single`
+    /// invocation, not just this one.
+    pub mcp_gateway_enabled: bool,
     pub lsp_servers: Vec<LspServerSpec>,
     pub plugins: Vec<PluginSpec>,
     pub tools: Vec<ToolSpec>,
@@ -232,7 +253,10 @@ impl App {
             status: None,
             agents: Vec::new(),
             tasks: Vec::new(),
+            workspaces: Vec::new(),
+            task_view: TaskView::Workspaces,
             mcp_servers: Vec::new(),
+            mcp_gateway_enabled: false,
             lsp_servers: Vec::new(),
             plugins: Vec::new(),
             tools: Vec::new(),
@@ -261,13 +285,73 @@ impl App {
 
     pub fn refresh(&mut self) {
         self.error = None;
-        self.status = self.fetch_status();
-        self.agents = self.fetch_agents();
-        self.tasks = self.fetch(Request::TaskList, |d| match d { ResponseData::Tasks(t) => Some(t), _ => None }).unwrap_or_default();
-        self.mcp_servers = self.fetch(Request::McpList, |d| match d { ResponseData::McpServers(s) => Some(s), _ => None }).unwrap_or_default();
-        self.lsp_servers = self.fetch(Request::LspList, |d| match d { ResponseData::LspServers(s) => Some(s), _ => None }).unwrap_or_default();
-        self.plugins = self.fetch(Request::PluginList, |d| match d { ResponseData::Plugins(p) => Some(p), _ => None }).unwrap_or_default();
-        self.tools = self.fetch(Request::ToolList, |d| match d { ResponseData::Tools(t) => Some(t), _ => None }).unwrap_or_default();
+
+        // Every request below is an independent UnixStream round trip (see
+        // `client::call`) with no shared connection state, so there's no
+        // reason to make the TUI wait on them one at a time — fired
+        // concurrently here and joined before any `self` field is touched,
+        // so this is still single-threaded from `self`'s point of view.
+        // (The daemon does its own parallelizing of AgentList/Status's
+        // per-agent discovery — see `single-runtime`'s `cached_discover` —
+        // so this and that combine rather than duplicate effort.)
+        let socket_path = self.socket_path.clone();
+        let requests = [
+            Request::Status,
+            Request::AgentList,
+            Request::TaskList,
+            Request::WorkspaceList,
+            Request::McpList,
+            Request::McpGatewayStatus,
+            Request::LspList,
+            Request::PluginList,
+            Request::ToolList,
+            Request::ConfiguredProviderList,
+            Request::AccountList { agent: None },
+            Request::KgReadGraph,
+            Request::CacheStatus,
+            Request::VectorStatus,
+        ];
+        let responses: Vec<_> = std::thread::scope(|scope| {
+            let handles: Vec<_> = requests
+                .into_iter()
+                .map(|req| {
+                    let socket_path = socket_path.clone();
+                    scope.spawn(move || call(&socket_path, &req))
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+
+        // Unpacked in the same order `requests` was built, sequentially —
+        // this is exactly the assignment logic `refresh` had before
+        // parallelizing the I/O above, just reading from the pre-fetched
+        // `responses` instead of blocking on `self.fetch`/`self.raw`.
+        let mut responses = responses.into_iter();
+        let mut next = |this: &mut Self| -> Option<ResponseData> {
+            match responses.next().expect("one response per request") {
+                Ok(Response::Ok { data }) => Some(data),
+                Ok(Response::Error { message }) => {
+                    this.error = Some(message);
+                    None
+                }
+                Err(e) => {
+                    this.error = Some(e.to_string());
+                    None
+                }
+            }
+        };
+
+        self.status = next(self).and_then(|d| match d { ResponseData::Status(s) => Some(s), _ => None });
+        self.agents = next(self).and_then(|d| match d { ResponseData::Agents(a) => Some(a), _ => None }).unwrap_or_default();
+        self.tasks = next(self).and_then(|d| match d { ResponseData::Tasks(t) => Some(t), _ => None }).unwrap_or_default();
+        self.workspaces = next(self).and_then(|d| match d { ResponseData::Workspaces(w) => Some(w), _ => None }).unwrap_or_default();
+        self.mcp_servers = next(self).and_then(|d| match d { ResponseData::McpServers(s) => Some(s), _ => None }).unwrap_or_default();
+        if let Some(ResponseData::McpGatewayMode(enabled)) = next(self) {
+            self.mcp_gateway_enabled = enabled;
+        }
+        self.lsp_servers = next(self).and_then(|d| match d { ResponseData::LspServers(s) => Some(s), _ => None }).unwrap_or_default();
+        self.plugins = next(self).and_then(|d| match d { ResponseData::Plugins(p) => Some(p), _ => None }).unwrap_or_default();
+        self.tools = next(self).and_then(|d| match d { ResponseData::Tools(t) => Some(t), _ => None }).unwrap_or_default();
         // Configured-only, not the full preset catalog: `providers.toml`
         // carries every built-in preset unconditionally (ProviderSpec has
         // no `enabled` field, unlike MCP/LSP/Tools), so plain
@@ -275,8 +359,8 @@ impl App {
         // "actually has a key stored" — the full catalog is still what
         // the [a] add-provider flow shows (ProviderPresetList, a
         // separate fetch, unaffected by this).
-        self.providers = self.fetch(Request::ConfiguredProviderList, |d| match d { ResponseData::Providers(p) => Some(p), _ => None }).unwrap_or_default();
-        self.accounts = self.fetch(Request::AccountList { agent: None }, |d| match d { ResponseData::AccountProfiles(p) => Some(p), _ => None }).unwrap_or_default();
+        self.providers = next(self).and_then(|d| match d { ResponseData::Providers(p) => Some(p), _ => None }).unwrap_or_default();
+        self.accounts = next(self).and_then(|d| match d { ResponseData::AccountProfiles(p) => Some(p), _ => None }).unwrap_or_default();
         // Real billing-API calls are comparatively slow/rate-limited (the
         // Anthropic Usage & Cost API's own docs recommend at most once a
         // minute) and, once a billing key is configured, involve a live
@@ -290,27 +374,17 @@ impl App {
         if self.tab == Tab::Usage {
             self.begin_usage_fetch();
         }
-        self.kg_entity_count = self
-            .fetch(Request::KgReadGraph, |d| match d { ResponseData::KgGraph(g) => Some(g), _ => None })
-            .map(|g| g.entities.len());
-        if let Some(ResponseData::CacheStatus { configured, reachable, .. }) = self.raw(Request::CacheStatus) {
+        self.kg_entity_count = next(self).and_then(|d| match d { ResponseData::KgGraph(g) => Some(g), _ => None }).map(|g| g.entities.len());
+        if let Some(ResponseData::CacheStatus { configured, reachable, .. }) = next(self) {
             self.cache_configured = configured;
             self.cache_reachable = reachable;
         }
-        if let Some(ResponseData::VectorStatus { configured, reachable, .. }) = self.raw(Request::VectorStatus) {
+        if let Some(ResponseData::VectorStatus { configured, reachable, .. }) = next(self) {
             self.vector_configured = configured;
             self.vector_reachable = reachable;
         }
         self.last_refresh = Instant::now();
         self.clamp_selection();
-    }
-
-    fn fetch_status(&mut self) -> Option<RuntimeStatus> {
-        self.fetch(Request::Status, |d| match d { ResponseData::Status(s) => Some(s), _ => None })
-    }
-
-    fn fetch_agents(&mut self) -> Vec<AgentInfo> {
-        self.fetch(Request::AgentList, |d| match d { ResponseData::Agents(a) => Some(a), _ => None }).unwrap_or_default()
     }
 
     fn fetch<T>(&mut self, req: Request, extract: impl FnOnce(ResponseData) -> Option<T>) -> Option<T> {
@@ -334,10 +408,21 @@ impl App {
         }
     }
 
+    /// The tasks belonging to whichever workspace is currently drilled
+    /// into (Tasks tab, `TaskView::Tasks`) — `self.tasks` itself always
+    /// holds every task ever run, unfiltered.
+    pub fn visible_tasks(&self) -> Vec<&TaskRecord> {
+        let TaskView::Tasks { workspace_id } = &self.task_view else { return Vec::new() };
+        self.tasks.iter().filter(|t| &t.workspace_id == workspace_id).collect()
+    }
+
     pub fn current_len(&self) -> usize {
         match self.tab {
             Tab::Agents => self.agents.len(),
-            Tab::Tasks => self.tasks.len(),
+            Tab::Tasks => match &self.task_view {
+                TaskView::Workspaces => self.workspaces.len(),
+                TaskView::Tasks { .. } => self.visible_tasks().len(),
+            },
             Tab::Mcp => self.mcp_servers.len(),
             Tab::Lsp => self.lsp_servers.len(),
             Tab::Plugins => self.plugins.len(),
@@ -360,6 +445,7 @@ impl App {
     pub fn next_tab(&mut self) {
         self.tab = self.tab.next();
         self.selected = 0;
+        self.task_view = TaskView::Workspaces;
         if self.tab == Tab::Usage {
             self.begin_usage_fetch();
         }
@@ -368,9 +454,28 @@ impl App {
     pub fn prev_tab(&mut self) {
         self.tab = self.tab.prev();
         self.selected = 0;
+        self.task_view = TaskView::Workspaces;
         if self.tab == Tab::Usage {
             self.begin_usage_fetch();
         }
+    }
+
+    /// Drills into the selected workspace's own task list (Tasks tab,
+    /// `Enter` at the workspace-list level).
+    pub fn enter_workspace(&mut self) {
+        if self.tab != Tab::Tasks || self.task_view != TaskView::Workspaces {
+            return;
+        }
+        let Some(workspace) = self.workspaces.get(self.selected) else { return };
+        self.task_view = TaskView::Tasks { workspace_id: workspace.id.clone() };
+        self.selected = 0;
+    }
+
+    /// Backs out of a workspace's task list to the workspace list (Tasks
+    /// tab, `Esc` while drilled in).
+    pub fn exit_workspace(&mut self) {
+        self.task_view = TaskView::Workspaces;
+        self.selected = 0;
     }
 
     pub fn move_selection(&mut self, delta: i32) {
@@ -769,6 +874,18 @@ impl App {
         self.refresh();
     }
 
+    /// Flips `single-mcp`'s dynamic gateway on/off (Mcp tab). Only changes
+    /// the stored setting — like the CLI's `single mcp gateway enable`, it
+    /// takes effect on the next `single install-integrations`, not
+    /// retroactively, so this doesn't touch any agent's synced config.
+    pub fn toggle_mcp_gateway(&mut self) {
+        if self.tab != Tab::Mcp {
+            return;
+        }
+        self.raw(Request::McpGatewaySetEnabled { enabled: !self.mcp_gateway_enabled });
+        self.refresh();
+    }
+
     /// Syncs the selected plugin into every registered agent (Plugins tab).
     pub fn sync_selected_plugin(&mut self) {
         if self.tab != Tab::Plugins {
@@ -779,12 +896,23 @@ impl App {
         self.refresh();
     }
 
-    /// Opens the task-detail viewer for the selected row (Tasks tab).
-    pub fn begin_view_task(&mut self) {
+    /// `Enter` on the Tasks tab: drills into the selected workspace at the
+    /// workspace-list level, or opens the task-detail viewer once already
+    /// drilled into one workspace's task list.
+    pub fn tasks_enter(&mut self) {
         if self.tab != Tab::Tasks {
             return;
         }
-        let Some(task) = self.tasks.get(self.selected).cloned() else { return };
+        match self.task_view {
+            TaskView::Workspaces => self.enter_workspace(),
+            TaskView::Tasks { .. } => self.begin_view_task(),
+        }
+    }
+
+    /// Opens the task-detail viewer for the selected row within the
+    /// currently drilled-into workspace (Tasks tab).
+    fn begin_view_task(&mut self) {
+        let Some(task) = self.visible_tasks().get(self.selected).map(|t| (*t).clone()) else { return };
         let output = self.read_task_output(&task);
         self.task_detail = TaskDetailFlow::Viewing { task, output, last_polled: Instant::now() };
     }

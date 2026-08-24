@@ -2,8 +2,12 @@ use crate::context::Context;
 use crate::{bootstrap, doctor, integrations, memory};
 use anyhow::Context as _;
 use single_agent_sdk::adapters::for_agent_with_custom;
+use single_agent_sdk::Discovery;
 use single_core::registry::AgentDefinition;
 use single_protocol::{AgentInfo, McpServerInfo, Request, Response, ResponseData, RuntimeStatus};
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 pub fn handle(ctx: &Context, request: Request) -> Response {
     handle_with_registry(ctx, request, &crate::registry::TaskRegistry::default())
@@ -43,11 +47,16 @@ fn dispatch(
         // flushed to the client — see its handle_connection.
         Request::Shutdown => Ok(ResponseData::Empty),
         Request::AgentList => {
-            let agents = ctx
-                .registry
-                .iter()
-                .map(|def| to_agent_info(def, ctx))
-                .collect();
+            // Parallelized across agents for the same reason `status()` is
+            // — see `cached_discover`'s doc comment.
+            let agents = std::thread::scope(|scope| {
+                let handles: Vec<_> = ctx
+                    .registry
+                    .iter()
+                    .map(|def| scope.spawn(|| to_agent_info(def, ctx)))
+                    .collect();
+                handles.into_iter().map(|h| h.join().unwrap()).collect()
+            });
             Ok(ResponseData::Agents(agents))
         }
         Request::AgentInspect { name } => {
@@ -133,6 +142,18 @@ fn dispatch(
         }
         Request::LspRemove { name } => {
             if !single_core::lsp::remove(&ctx.dirs.lsp_registry_file(), &name)? {
+                anyhow::bail!("no such lsp server: {name}");
+            }
+            Ok(ResponseData::Empty)
+        }
+        Request::LspEnable { name } => {
+            if !single_core::lsp::set_enabled(&ctx.dirs.lsp_registry_file(), &name, true)? {
+                anyhow::bail!("no such lsp server: {name}");
+            }
+            Ok(ResponseData::Empty)
+        }
+        Request::LspDisable { name } => {
+            if !single_core::lsp::set_enabled(&ctx.dirs.lsp_registry_file(), &name, false)? {
                 anyhow::bail!("no such lsp server: {name}");
             }
             Ok(ResponseData::Empty)
@@ -488,6 +509,10 @@ fn dispatch(
         Request::TaskList => {
             let conn = task_db(ctx)?;
             Ok(ResponseData::Tasks(crate::task::list(&conn)?))
+        }
+        Request::WorkspaceList => {
+            let conn = task_db(ctx)?;
+            Ok(ResponseData::Workspaces(crate::task::list_workspaces(&conn)?))
         }
         Request::TaskInspect { id } => {
             let conn = task_db(ctx)?;
@@ -1558,15 +1583,22 @@ fn kg_db(ctx: &Context) -> anyhow::Result<rusqlite::Connection> {
 }
 
 fn status(ctx: &Context) -> RuntimeStatus {
-    let detected = ctx
-        .registry
-        .iter()
-        .filter(|a| {
-            for_agent_with_custom(&a.name, &ctx.dirs.agents_dir(), &ctx.registry)
-                .map(|ad| ad.discover().detected)
-                .unwrap_or(false)
-        })
-        .count();
+    // Parallelized across agents (see `cached_discover`'s doc comment) so a
+    // cold cache costs roughly one agent's `which`+`--version` latency, not
+    // the sum of all of them; a warm cache costs nothing but HashMap
+    // lookups either way.
+    let detected = std::thread::scope(|scope| {
+        let handles: Vec<_> = ctx
+            .registry
+            .iter()
+            .map(|a| scope.spawn(|| cached_discover(a, ctx).is_some_and(|d| d.detected)))
+            .collect();
+        handles
+            .into_iter()
+            .map(|h| h.join().unwrap_or(false))
+            .filter(|detected| *detected)
+            .count()
+    });
     RuntimeStatus {
         version: env!("CARGO_PKG_VERSION").to_string(),
         active_profile: ctx.resolved.active_profile.clone(),
@@ -1577,9 +1609,35 @@ fn status(ctx: &Context) -> RuntimeStatus {
     }
 }
 
+/// Per-agent discovery result, cached for `DISCOVERY_TTL`: `Discovery`
+/// shells out `which` + `<cmd> --version` (two subprocess spawns), and
+/// `Context::load()` builds a fresh `Context` on every single request (see
+/// `server.rs`'s `handle_connection`) — without this cache, every
+/// `Status`/`AgentList` call re-spawns those two processes for every
+/// registered agent (15+ agents today), and the TUI fires both requests on
+/// every refresh. An install/uninstall of an agent CLI is picked up within
+/// one TTL window rather than instantly, same trade-off `daemon restart`
+/// already exists for ($PATH itself is only re-read at daemon spawn time).
+static DISCOVERY_CACHE: OnceLock<Mutex<HashMap<String, (Discovery, Instant)>>> = OnceLock::new();
+const DISCOVERY_TTL: Duration = Duration::from_secs(45);
+
+fn cached_discover(def: &AgentDefinition, ctx: &Context) -> Option<Discovery> {
+    let cache = DISCOVERY_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some((discovery, at)) = cache.lock().unwrap().get(&def.name) {
+        if at.elapsed() < DISCOVERY_TTL {
+            return Some(discovery.clone());
+        }
+    }
+    let discovery = for_agent_with_custom(&def.name, &ctx.dirs.agents_dir(), &ctx.registry)?.discover();
+    cache
+        .lock()
+        .unwrap()
+        .insert(def.name.clone(), (discovery.clone(), Instant::now()));
+    Some(discovery)
+}
+
 fn to_agent_info(def: &AgentDefinition, ctx: &Context) -> AgentInfo {
-    let discovery = for_agent_with_custom(&def.name, &ctx.dirs.agents_dir(), &ctx.registry)
-        .map(|a| a.discover());
+    let discovery = cached_discover(def, ctx);
     let isolated_home = ctx.dirs.homes_dir().join(&def.name);
     let authenticated = single_core::account::is_authenticated(&isolated_home, &def.name);
     AgentInfo {

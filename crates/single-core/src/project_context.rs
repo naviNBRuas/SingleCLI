@@ -32,6 +32,39 @@ pub fn resolve(cwd: &Path) -> ProjectContext {
     ProjectContext { cwd: cwd.display().to_string(), repo_root, branch, changed_files, project_docs }
 }
 
+/// A workspace identity that survives the repo being moved, renamed, or
+/// re-cloned somewhere else on disk — deliberately *not* the raw `cwd`
+/// path, since that changes the moment a project directory moves and would
+/// otherwise fragment one project's task history across "workspaces" that
+/// are really the same repo. Prefers `git remote get-url origin` (stable
+/// across every local clone/move of the same remote); falls back to the
+/// repo's root commit hash (stable across moves/renames even with no
+/// remote configured, since history doesn't change); falls back to the
+/// resolved absolute path only when there's no git repository to anchor
+/// to at all (the one case with no stable identity available).
+pub fn stable_workspace_id(cwd: &Path) -> String {
+    if let Some(remote) = git_output(cwd, &["remote", "get-url", "origin"]) {
+        return remote;
+    }
+    if let Some(root_commits) = git_output(cwd, &["rev-list", "--max-parents=0", "HEAD"]) {
+        // A history can have more than one root commit (merged unrelated
+        // histories); take the first line so this is deterministic across
+        // calls rather than depending on git's internal ordering.
+        if let Some(first) = root_commits.lines().next() {
+            return first.to_string();
+        }
+    }
+    git_output(cwd, &["rev-parse", "--show-toplevel"]).unwrap_or_else(|| cwd.display().to_string())
+}
+
+/// Human-readable label for a workspace: the final path component of
+/// wherever it currently lives on disk, e.g. `"SingleCLI"` for
+/// `/home/.../Repositories/naviNBRuas/SingleCLI`. Falls back to the whole
+/// string for identities that aren't paths (a remote URL, a commit hash).
+pub fn workspace_display_name(path: &str) -> String {
+    Path::new(path).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| path.to_string())
+}
+
 fn git_output(cwd: &Path, args: &[&str]) -> Option<String> {
     let output = Command::new("git").current_dir(cwd).args(args).output().ok()?;
     if !output.status.success() {
@@ -88,5 +121,27 @@ mod tests {
         let ctx = resolve(here);
         assert!(ctx.repo_root.is_some(), "expected this crate to resolve inside a real git repo");
         assert!(ctx.branch.is_some());
+    }
+
+    #[test]
+    fn non_git_directory_falls_back_to_its_own_path_as_workspace_id() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(stable_workspace_id(dir.path()), dir.path().display().to_string());
+    }
+
+    #[test]
+    fn stable_workspace_id_is_identical_for_the_same_repo_from_two_different_paths() {
+        // The whole point: a repo moved (or accessed via a symlink/second
+        // clone) must resolve to the same id, not one keyed off the path.
+        let here = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let id_from_crate_dir = stable_workspace_id(here);
+        let id_from_repo_root = stable_workspace_id(here.parent().unwrap().parent().unwrap());
+        assert_eq!(id_from_crate_dir, id_from_repo_root);
+    }
+
+    #[test]
+    fn workspace_display_name_takes_the_final_path_component() {
+        assert_eq!(workspace_display_name("/home/user/code/SingleCLI"), "SingleCLI");
+        assert_eq!(workspace_display_name("git@github.com:naviNBRuas/SingleCLI.git"), "SingleCLI.git");
     }
 }

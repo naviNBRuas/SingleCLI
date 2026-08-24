@@ -59,6 +59,12 @@ pub enum Request {
     LspRemove {
         name: String,
     },
+    LspEnable {
+        name: String,
+    },
+    LspDisable {
+        name: String,
+    },
     LspInspect {
         name: String,
     },
@@ -224,6 +230,12 @@ pub enum Request {
     TaskInspect {
         id: i64,
     },
+    /// Every distinct workspace (project) a task has ever run against — the
+    /// grouping the TUI's Tasks tab drills through, since `TaskList` alone
+    /// dumps every task ever run with nothing distinguishing which project
+    /// each belongs to. See `single_core::project_context::stable_workspace_id`
+    /// for how a workspace's identity survives the project directory moving.
+    WorkspaceList,
     /// Stops a `Running` task started with `background: true` (or an
     /// in-flight `OrchestrateParallel{ background: true, .. }` sub-task):
     /// sets its cancel flag, which the agent subprocess's own poll loop
@@ -591,6 +603,7 @@ pub enum ResponseData {
         reachable: bool,
     },
     Tasks(Vec<TaskRecord>),
+    Workspaces(Vec<WorkspaceInfo>),
     OrchestrateResult(Vec<TaskRecord>),
     OrchestrateGraphResult(Vec<TaskRecord>),
     AgentInstallResult(SetupAction),
@@ -1022,6 +1035,35 @@ pub struct TaskRecord {
     pub summary: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+    /// The directory this task actually ran against, as given to `task
+    /// run`/orchestrate — not necessarily the same as the workspace's
+    /// current path (see `workspace_id`), since a task might run from a
+    /// subdirectory of the project.
+    #[serde(default)]
+    pub cwd: String,
+    /// The stable identity of the workspace (project) this task ran
+    /// against — see `single_core::project_context::stable_workspace_id`.
+    /// Never the raw `cwd`, so grouping tasks by workspace survives the
+    /// project directory being moved. Empty for tasks recorded before this
+    /// field existed and never backfilled.
+    #[serde(default)]
+    pub workspace_id: String,
+}
+
+/// One workspace (project) that at least one task has run against — the
+/// grouping shown by the TUI's Tasks tab before drilling into that
+/// workspace's own task list. `path` is *last-known*, not fixed: it's
+/// re-recorded every time a new task runs against this workspace, so it
+/// self-heals to wherever the project currently lives after a move — see
+/// `single_core::project_context::stable_workspace_id`'s doc comment for
+/// why `id` itself doesn't change when that happens.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkspaceInfo {
+    pub id: String,
+    pub name: String,
+    pub path: String,
+    pub task_count: i64,
+    pub last_activity_at: String,
 }
 
 /// The result of running an agent CLI non-interactively against a single

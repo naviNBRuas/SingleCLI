@@ -31,15 +31,27 @@ impl Context {
         // One-time (per-preset) migration: bring the real registries up to
         // date with the built-in preset catalogs, disabled, so `list`/the
         // TUI actually show what's available instead of only the original
-        // hand-picked entries. Idempotent — each call only adds presets
-        // missing by name, so this is cheap to run on every load. Errors
-        // here (e.g. an unwritable config dir) are surfaced elsewhere
-        // (`doctor`) and shouldn't block every other request, so they're
-        // swallowed rather than propagated.
-        let _ = single_core::mcp::sync_missing_presets_disabled(&dirs.mcp_registry_file());
-        let _ = single_core::lsp::sync_missing_presets_disabled(&dirs.lsp_registry_file());
-        let _ = single_core::plugins::sync_missing_presets(&dirs.plugins_registry_file());
-        let _ = single_core::providers::sync_missing_presets(&dirs.providers_registry_file());
+        // hand-picked entries. Gated to once per daemon process (see
+        // `PRESETS_SYNCED` below) rather than run on every `Context::load()`
+        // — each preset catalog now runs to hundreds of entries, so
+        // "cheap to run on every load" stopped being true: this was
+        // re-parsing every registry file in full on every single request
+        // (`server.rs` builds a fresh `Context` per connection), which
+        // compounds badly once a client fires a dozen requests on startup
+        // (see `single-tui`'s `App::refresh`). New built-in presets only
+        // ship with a SingleCLI upgrade, which already needs `single daemon
+        // restart` to be picked up (same reasoning as `$PATH` in
+        // `cached_discover`), so once-per-process loses nothing real.
+        // Errors here (e.g. an unwritable config dir) are surfaced
+        // elsewhere (`doctor`) and shouldn't block every other request, so
+        // they're swallowed rather than propagated.
+        static PRESETS_SYNCED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+        PRESETS_SYNCED.get_or_init(|| {
+            let _ = single_core::mcp::sync_missing_presets_disabled(&dirs.mcp_registry_file());
+            let _ = single_core::lsp::sync_missing_presets_disabled(&dirs.lsp_registry_file());
+            let _ = single_core::plugins::sync_missing_presets(&dirs.plugins_registry_file());
+            let _ = single_core::providers::sync_missing_presets(&dirs.providers_registry_file());
+        });
 
         Ok(Self { dirs, resolved, registry })
     }

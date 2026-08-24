@@ -121,6 +121,7 @@ pub fn run(ctx: &Context, opts: GraphOrchestrateOptions<'_>) -> Result<Vec<TaskR
                         &conn,
                         &node.description,
                         &node.agent,
+                        opts.cwd,
                         &summary,
                     )?,
                 );
@@ -417,6 +418,8 @@ mod tests {
             summary: None,
             created_at: String::new(),
             updated_at: String::new(),
+            cwd: String::new(),
+            workspace_id: String::new(),
         }
     }
 }

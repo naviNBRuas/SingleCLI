@@ -304,6 +304,14 @@ fn print_data(data: ResponseData) {
                 );
             }
         }
+        ResponseData::Workspaces(workspaces) => {
+            if workspaces.is_empty() {
+                println!("(no workspaces — run a task first)");
+            }
+            for w in workspaces {
+                println!("{:<16} {:<4} tasks  last active {:<25} {}", w.name, w.task_count, w.last_activity_at, w.path);
+            }
+        }
         ResponseData::OrchestrateResult(records) => {
             println!("Relay ({} step(s)):", records.len());
             for (i, r) in records.iter().enumerate() {

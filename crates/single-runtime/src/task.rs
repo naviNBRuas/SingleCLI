@@ -40,7 +40,76 @@ pub fn ensure_schema(conn: &Connection) -> Result<()> {
         )",
         (),
     )?;
+    // Added for workspace-scoped tasks: a task predating this migration
+    // gets '' for both (never NULL — `TaskRecord::cwd`/`workspace_id` are
+    // plain `String`s, not `Option`), which the TUI shows as an explicit
+    // "(unknown workspace)" bucket rather than silently misattributing it.
+    add_column_if_missing(conn, "tasks", "cwd", "TEXT NOT NULL DEFAULT ''")?;
+    add_column_if_missing(conn, "tasks", "workspace_id", "TEXT NOT NULL DEFAULT ''")?;
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS workspaces (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            path TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )",
+        (),
+    )?;
     Ok(())
+}
+
+/// SQLite has no `ADD COLUMN IF NOT EXISTS`; check `PRAGMA table_info`
+/// first so re-running `ensure_schema` against an already-migrated
+/// database (every daemon startup) doesn't error trying to re-add a
+/// column that's already there.
+fn add_column_if_missing(conn: &Connection, table: &str, column: &str, ddl: &str) -> Result<()> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let exists = stmt
+        .query_map([], |row| row.get::<_, String>("name"))?
+        .collect::<rusqlite::Result<Vec<_>>>()?
+        .iter()
+        .any(|name| name == column);
+    if !exists {
+        conn.execute(&format!("ALTER TABLE {table} ADD COLUMN {column} {ddl}"), ())?;
+    }
+    Ok(())
+}
+
+/// Records (or refreshes) a workspace's last-known display path — called
+/// every time a task runs against it, so a project that's been moved on
+/// disk self-heals back to showing its current location without anyone
+/// having to fix it up by hand.
+fn upsert_workspace(conn: &Connection, id: &str, path: &str, name: &str) -> Result<()> {
+    let now = chrono::Utc::now().to_rfc3339();
+    conn.execute(
+        "INSERT INTO workspaces (id, name, path, updated_at) VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(id) DO UPDATE SET name = excluded.name, path = excluded.path, updated_at = excluded.updated_at",
+        params![id, name, path, now],
+    )?;
+    Ok(())
+}
+
+/// Every workspace with at least one task, newest activity first — the
+/// grouping the TUI's Tasks tab shows before drilling into one workspace's
+/// tasks (see `single_protocol::WorkspaceInfo`).
+pub fn list_workspaces(conn: &Connection) -> Result<Vec<single_protocol::WorkspaceInfo>> {
+    let mut stmt = conn.prepare(
+        "SELECT w.id, w.name, w.path, COUNT(t.id) AS task_count, MAX(t.updated_at) AS last_activity_at
+         FROM workspaces w JOIN tasks t ON t.workspace_id = w.id
+         GROUP BY w.id ORDER BY last_activity_at DESC",
+    )?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(single_protocol::WorkspaceInfo {
+                id: row.get("id")?,
+                name: row.get("name")?,
+                path: row.get("path")?,
+                task_count: row.get("task_count")?,
+                last_activity_at: row.get("last_activity_at")?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
 }
 
 fn status_as_str(status: TaskStatus) -> &'static str {
@@ -80,6 +149,8 @@ fn row_to_task(row: &rusqlite::Row) -> rusqlite::Result<TaskRecord> {
         summary: row.get("summary")?,
         created_at: row.get("created_at")?,
         updated_at: row.get("updated_at")?,
+        cwd: row.get("cwd")?,
+        workspace_id: row.get("workspace_id")?,
     })
 }
 
@@ -153,14 +224,27 @@ pub fn local_stats_by_agent(conn: &Connection) -> Result<Vec<single_protocol::Ag
     Ok(stats)
 }
 
-fn create(conn: &Connection, description: &str, agent: &str) -> Result<i64> {
+fn create(conn: &Connection, description: &str, agent: &str, cwd: &str, workspace_id: &str) -> Result<i64> {
     let now = chrono::Utc::now().to_rfc3339();
     conn.execute(
-        "INSERT INTO tasks (description, agent, status, timed_out, created_at, updated_at)
-         VALUES (?1, ?2, ?3, 0, ?4, ?4)",
-        params![description, agent, status_as_str(TaskStatus::Created), now],
+        "INSERT INTO tasks (description, agent, status, timed_out, created_at, updated_at, cwd, workspace_id)
+         VALUES (?1, ?2, ?3, 0, ?4, ?4, ?5, ?6)",
+        params![description, agent, status_as_str(TaskStatus::Created), now, cwd, workspace_id],
     )?;
     Ok(conn.last_insert_rowid())
+}
+
+/// `create()` plus the workspace bookkeeping every real call site needs:
+/// resolves `cwd`'s stable workspace identity (survives the project
+/// directory moving — see `stable_workspace_id`'s doc comment) and
+/// records/refreshes that workspace's last-known display path.
+fn create_for_cwd(conn: &Connection, description: &str, agent: &str, cwd: &Path) -> Result<i64> {
+    let workspace_id = single_core::project_context::stable_workspace_id(cwd);
+    let display_path = single_core::project_context::resolve(cwd).repo_root.unwrap_or_else(|| cwd.display().to_string());
+    let name = single_core::project_context::workspace_display_name(&display_path);
+    let id = create(conn, description, agent, &cwd.display().to_string(), &workspace_id)?;
+    upsert_workspace(conn, &workspace_id, &display_path, &name)?;
+    Ok(id)
 }
 
 /// Persists a graph node that deliberately did not run. `Cancelled` is used
@@ -170,9 +254,10 @@ pub fn record_conditionally_skipped(
     conn: &Connection,
     description: &str,
     agent: &str,
+    cwd: &Path,
     summary: &str,
 ) -> Result<TaskRecord> {
-    let id = create(conn, description, agent)?;
+    let id = create_for_cwd(conn, description, agent, cwd)?;
     finish(
         conn,
         id,
@@ -388,7 +473,7 @@ pub fn run(conn: &Connection, ctx: &Context, opts: RunTaskOptions) -> Result<Tas
         );
     }
 
-    let id = create(conn, opts.description, opts.agent)?;
+    let id = create_for_cwd(conn, opts.description, opts.agent, opts.cwd)?;
     crate::state::record_event(
         conn,
         "task.created",
@@ -455,7 +540,7 @@ pub fn run_background(
         );
     }
 
-    let id = create(&conn, &opts.description, &opts.agent)?;
+    let id = create_for_cwd(&conn, &opts.description, &opts.agent, &opts.cwd)?;
     crate::state::record_event(
         &conn,
         "task.created",
@@ -973,7 +1058,7 @@ mod tests {
     #[test]
     fn create_then_get_round_trips_as_created() {
         let conn = test_conn();
-        let id = create(&conn, "test task", "claude").unwrap();
+        let id = create(&conn, "test task", "claude", "/tmp/test-cwd", "workspace-1").unwrap();
         let task = get(&conn, id).unwrap().unwrap();
         assert_eq!(task.status, TaskStatus::Created);
         assert_eq!(task.agent, "claude");

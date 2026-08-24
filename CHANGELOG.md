@@ -9,6 +9,29 @@ patch version (`0.0.x`) carries fixes, per [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## [Unreleased]
 
+## [0.4.0]
+
+- Added: tasks are now grouped by workspace (a stable identity — git
+  remote URL, or root commit hash with no remote — that survives the
+  project directory moving) instead of one flat list; the TUI's Tasks tab
+  drills from a workspace list into that workspace's tasks. New `single
+  workspace list`.
+- Added: `single mcp enable-all` / `single lsp enable-all` bulk-enable
+  every registered server, skipping only MCP servers still missing a
+  required secret.
+- Added: MCP gateway mode is now backed by real idle eviction — a lazily
+  spawned server unused for 10 minutes is dropped instead of staying
+  alive for the whole agent session. The TUI's MCP tab shows gateway
+  status and toggles it with `[g]`.
+- Fixed: every scrollable list/table in the TUI (Agents, Tasks, MCP, LSP,
+  Plugins, Tools, Providers, Accounts) silently truncated past the
+  visible height with no way to scroll further; they now show a proper
+  scroll window and position indicator.
+- Fixed: the daemon re-ran full agent discovery (`which`/`--version` per
+  agent) and re-parsed the entire MCP/LSP/plugin/provider registries on
+  every single request instead of once per process, making `single`
+  slow to open — both are now cached/parallelized.
+
 ## [0.3.3]
 
 - Fixed: encrypted backup restore rejected path traversal.
