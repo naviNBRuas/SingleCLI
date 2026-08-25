@@ -1179,6 +1179,26 @@ fn dispatch(
                                     &agent,
                                 )?
                             };
+                            // `install_plugin` shells out to the agent's own CLI
+                            // (e.g. `claude plugin install`), which writes that
+                            // agent's config file itself — unlike the direct
+                            // in-process writes elsewhere in this handler, that
+                            // write never goes through `write_with_backup`'s
+                            // `backup_before_write` call. When `real_home` is
+                            // set this is about to touch a real, in-daily-use
+                            // config, so snapshot the file we know it's going
+                            // to modify before invoking the external command.
+                            // Only `claude`'s config path is confirmed here
+                            // (`~/.claude/settings.json`, per `claude plugin
+                            // --help` on the reference machine); other agents'
+                            // plugin-install config paths aren't confirmed
+                            // (see `adapters.rs`'s per-adapter doc comments),
+                            // so this snapshot is scoped to `claude` only.
+                            if real_home && agent == "claude" {
+                                single_agent_sdk::backup::backup_before_write(
+                                    &home.join(".claude").join("settings.json"),
+                                )?;
+                            }
                             match adapter.install_plugin(
                                 &selector,
                                 &home,
@@ -1734,6 +1754,74 @@ mod tests {
         assert!(matches!(response, Response::Ok { .. }));
         assert!(real_home.path().join(".claude/settings.json").exists());
         assert!(!dir.path().join("homes").join("claude").join(".claude/settings.json").exists());
+
+        std::env::remove_var("HOME");
+    }
+
+    #[test]
+    fn plugin_sync_real_home_backs_up_claude_settings_before_install_plugin_runs() {
+        // Fix 2: `install_plugin` shells out to `claude plugin install`,
+        // which writes ~/.claude/settings.json itself — outside
+        // `write_with_backup`'s `backup_before_write` call. This proves the
+        // handler snapshots that file *before* invoking the external
+        // command when `real_home` is set, regardless of whether the
+        // subprocess call itself succeeds (it won't in this sandbox, since
+        // no real `claude` binary is on PATH — that's fine, the backup must
+        // still have happened).
+        let _guard = crate::HOME_ENV_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = test_ctx(dir.path());
+        let real_home = tempfile::tempdir().unwrap();
+        std::env::set_var("HOME", real_home.path());
+
+        let settings_path = real_home.path().join(".claude").join("settings.json");
+        std::fs::create_dir_all(settings_path.parent().unwrap()).unwrap();
+        std::fs::write(&settings_path, r#"{"pre_existing": true}"#).unwrap();
+
+        single_core::plugins::add(
+            &ctx.dirs.plugins_registry_file(),
+            single_protocol::PluginSpec { name: "test-plugin".into(), target: "test-plugin@marketplace".into(), opencode_module: None },
+        )
+        .unwrap();
+
+        let response = handle(&ctx, Request::PluginSync { name: "test-plugin".into(), agents: vec!["claude".into()], dry_run: false, real_home: true });
+        assert!(matches!(response, Response::Ok { .. }));
+
+        // The original file is untouched (install_plugin never actually ran
+        // successfully against it in this sandbox) but a backup snapshot of
+        // its pre-install content must now exist alongside it.
+        assert_eq!(std::fs::read_to_string(&settings_path).unwrap(), r#"{"pre_existing": true}"#);
+        let backups: Vec<_> = std::fs::read_dir(settings_path.parent().unwrap())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().contains(".bak-"))
+            .collect();
+        assert_eq!(backups.len(), 1, "expected exactly one backup snapshot of settings.json before install_plugin ran");
+        assert_eq!(std::fs::read_to_string(backups[0].path()).unwrap(), r#"{"pre_existing": true}"#);
+
+        std::env::remove_var("HOME");
+    }
+
+    #[test]
+    fn plugin_sync_real_home_does_not_back_up_when_no_pre_existing_settings() {
+        // A fresh install (no prior settings.json) has nothing to back up —
+        // `backup_before_write` returns `None` rather than erroring, and
+        // `PluginSync` must not fail because of it.
+        let _guard = crate::HOME_ENV_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = test_ctx(dir.path());
+        let real_home = tempfile::tempdir().unwrap();
+        std::env::set_var("HOME", real_home.path());
+
+        single_core::plugins::add(
+            &ctx.dirs.plugins_registry_file(),
+            single_protocol::PluginSpec { name: "test-plugin".into(), target: "test-plugin@marketplace".into(), opencode_module: None },
+        )
+        .unwrap();
+
+        let response = handle(&ctx, Request::PluginSync { name: "test-plugin".into(), agents: vec!["claude".into()], dry_run: false, real_home: true });
+        assert!(matches!(response, Response::Ok { .. }));
+        assert!(!real_home.path().join(".claude").join("settings.json").exists());
 
         std::env::remove_var("HOME");
     }
