@@ -2727,7 +2727,7 @@ dependencies = [
 
 [[package]]
 name = "single-agent-sdk"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2742,7 +2742,7 @@ dependencies = [
 
 [[package]]
 name = "single-cli"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "age",
  "anyhow",
@@ -2766,7 +2766,7 @@ dependencies = [
 
 [[package]]
 name = "single-core"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "age",
  "anyhow",
@@ -2786,7 +2786,7 @@ dependencies = [
 
 [[package]]
 name = "single-lsp"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "serde_json",
@@ -2796,7 +2796,7 @@ dependencies = [
 
 [[package]]
 name = "single-mcp"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "rmcp",
@@ -2810,7 +2810,7 @@ dependencies = [
 
 [[package]]
 name = "single-protocol"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -2818,7 +2818,7 @@ dependencies = [
 
 [[package]]
 name = "single-runtime"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2840,7 +2840,7 @@ dependencies = [
 
 [[package]]
 name = "single-tui"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "age",
  "anyhow",
@@ -2853,7 +2853,7 @@ dependencies = [
 
 [[package]]
 name = "single-web"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "serde",
@@ -2863,7 +2863,7 @@ dependencies = [
 
 [[package]]
 name = "singlecli-mcp"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "rmcp",
