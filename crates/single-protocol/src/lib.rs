@@ -410,6 +410,7 @@ pub enum Request {
         name: String,
         agents: Vec<String>,
         dry_run: bool,
+        real_home: bool,
     },
     /// Stores one *labeled* key for a provider (see `ProviderKeySpec`),
     /// distinct from `ProviderSetKey`'s single shared key.
@@ -533,6 +534,7 @@ pub enum Request {
         name: String,
         agents: Vec<String>,
         dry_run: bool,
+        real_home: bool,
     },
     /// Saves one ordered fallback chain, replacing any existing chain that
     /// starts with the same first entry (so `fallback set` is idempotent —

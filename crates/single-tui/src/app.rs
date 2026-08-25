@@ -1008,7 +1008,7 @@ impl App {
             return;
         }
         let Some(plugin) = self.plugins.get(self.selected) else { return };
-        self.raw(Request::PluginSync { name: plugin.name.clone(), agents: Vec::new(), dry_run: false });
+        self.raw(Request::PluginSync { name: plugin.name.clone(), agents: Vec::new(), dry_run: false, real_home: false });
         self.refresh();
     }
 

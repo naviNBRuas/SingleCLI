@@ -875,6 +875,11 @@ enum ProviderCommand {
         agents: Vec<String>,
         #[arg(long)]
         yes: bool,
+        /// Write into the real, ambient $HOME instead of the SingleCLI-managed
+        /// isolated home. Off by default: same posture as
+        /// `single task run --real-home`.
+        #[arg(long)]
+        real_home: bool,
     },
     /// List built-in provider presets (OpenAI, Anthropic, OpenCode Zen, NVIDIA).
     Presets,
@@ -982,6 +987,11 @@ enum PluginCommand {
         agents: Vec<String>,
         #[arg(long)]
         yes: bool,
+        /// Write into the real, ambient $HOME instead of the SingleCLI-managed
+        /// isolated home. Off by default: same posture as
+        /// `single task run --real-home`.
+        #[arg(long)]
+        real_home: bool,
     },
 }
 
@@ -2184,7 +2194,7 @@ fn main() -> anyhow::Result<()> {
                 let response = client::send(&socket_path, Request::ProviderSetKey { name, value })?;
                 render::print(response, false);
             }
-            ProviderCommand::Sync { name, agents, yes } => {
+            ProviderCommand::Sync { name, agents, yes, real_home } => {
                 if !yes {
                     eprintln!("Dry run (pass --yes to actually write the key into agent config files; backups are made either way).");
                 }
@@ -2194,6 +2204,7 @@ fn main() -> anyhow::Result<()> {
                         name,
                         agents,
                         dry_run: !yes,
+                        real_home,
                     },
                 )?;
                 render::print(response, false);
@@ -2301,7 +2312,7 @@ fn main() -> anyhow::Result<()> {
                 let response = client::send(&socket_path, Request::PluginInspect { name })?;
                 render::print(response, json);
             }
-            PluginCommand::Sync { name, agents, yes } => {
+            PluginCommand::Sync { name, agents, yes, real_home } => {
                 if !yes {
                     eprintln!(
                         "Dry run (pass --yes to actually install the plugin into agent CLIs)."
@@ -2313,6 +2324,7 @@ fn main() -> anyhow::Result<()> {
                         name,
                         agents,
                         dry_run: !yes,
+                        real_home,
                     },
                 )?;
                 render::print(response, false);

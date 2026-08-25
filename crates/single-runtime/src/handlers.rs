@@ -966,6 +966,7 @@ fn dispatch(
             name,
             agents,
             dry_run,
+            real_home,
         } => {
             let provider =
                 single_core::providers::find(&ctx.dirs.providers_registry_file(), &name)?
@@ -973,7 +974,7 @@ fn dispatch(
             let store = single_core::secrets::SecretTool;
             let value = single_core::secrets::SecretStore::get(&store, &provider.secret_name)?
                 .ok_or_else(|| anyhow::anyhow!("no key stored for provider '{name}'; run `single provider set-key {name} <value>` first"))?;
-            let real_home = integrations::home_dir()?;
+            let home_root = integrations::home_dir()?;
             let target_agents: Vec<String> = if agents.is_empty() {
                 ctx.registry.iter().map(|a| a.name.clone()).collect()
             } else {
@@ -981,11 +982,15 @@ fn dispatch(
             };
             let mut results = Vec::new();
             for agent in target_agents {
-                let home = single_core::agent_home::ensure_bootstrapped(
-                    &ctx.dirs.homes_dir(),
-                    &real_home,
-                    &agent,
-                )?;
+                let home = if real_home {
+                    home_root.clone()
+                } else {
+                    single_core::agent_home::ensure_bootstrapped(
+                        &ctx.dirs.homes_dir(),
+                        &home_root,
+                        &agent,
+                    )?
+                };
                 let mut result = single_agent_sdk::provider_sync::sync(
                     &agent,
                     &home,
@@ -1135,10 +1140,11 @@ fn dispatch(
             name,
             agents,
             dry_run,
+            real_home,
         } => {
             let plugin = single_core::plugins::find(&ctx.dirs.plugins_registry_file(), &name)?
                 .ok_or_else(|| anyhow::anyhow!("no such plugin: {name}"))?;
-            let real_home = integrations::home_dir()?;
+            let home_root = integrations::home_dir()?;
             let target_agents: Vec<String> = if agents.is_empty() {
                 ctx.registry.iter().map(|a| a.name.clone()).collect()
             } else {
@@ -1164,11 +1170,15 @@ fn dispatch(
                             ),
                         ),
                         Some(adapter) => {
-                            let home = single_core::agent_home::ensure_bootstrapped(
-                                &ctx.dirs.homes_dir(),
-                                &real_home,
-                                &agent,
-                            )?;
+                            let home = if real_home {
+                                home_root.clone()
+                            } else {
+                                single_core::agent_home::ensure_bootstrapped(
+                                    &ctx.dirs.homes_dir(),
+                                    &home_root,
+                                    &agent,
+                                )?
+                            };
                             match adapter.install_plugin(
                                 &selector,
                                 &home,
@@ -1689,5 +1699,42 @@ fn to_agent_info(def: &AgentDefinition, ctx: &Context) -> AgentInfo {
         config_paths: def.config_paths.clone(),
         notes: def.notes.clone(),
         authenticated,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use single_protocol::{ProviderSpec, Response};
+
+    fn test_ctx(dir: &std::path::Path) -> Context {
+        let dirs = single_core::SingleDirs::from_root(dir.to_path_buf());
+        dirs.ensure_created().unwrap();
+        Context { dirs, resolved: single_core::ResolvedConfig::default(), registry: single_core::builtin_registry() }
+    }
+
+    #[test]
+    fn provider_sync_real_home_writes_the_actual_home() {
+        let _guard = crate::HOME_ENV_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = test_ctx(dir.path());
+        let real_home = tempfile::tempdir().unwrap();
+        std::env::set_var("HOME", real_home.path());
+
+        let store = single_core::secrets::SecretTool;
+        single_core::secrets::SecretStore::set(&store, "test-provider-key", "sk-test").unwrap();
+        single_core::providers::add(&ctx.dirs.providers_registry_file(), ProviderSpec {
+            name: "testprov".into(),
+            env_var_name: "ANTHROPIC_API_KEY".into(),
+            secret_name: "test-provider-key".into(),
+            base_url: None,
+        }).unwrap();
+
+        let response = handle(&ctx, Request::ProviderSync { name: "testprov".into(), agents: vec!["claude".into()], dry_run: false, real_home: true });
+        assert!(matches!(response, Response::Ok { .. }));
+        assert!(real_home.path().join(".claude/settings.json").exists());
+        assert!(!dir.path().join("homes").join("claude").join(".claude/settings.json").exists());
+
+        std::env::remove_var("HOME");
     }
 }

@@ -20,3 +20,13 @@ pub mod task;
 
 pub use context::Context;
 pub use handlers::handle;
+
+/// Guards every test in this crate that mutates the process-global `HOME`
+/// env var (e.g. via `std::env::set_var("HOME", ...)`) — `HOME` resolution
+/// races across any test in the same binary that reads it too, and `cargo
+/// test` runs this crate's `integrations.rs` and `handlers.rs` test modules
+/// in the same binary, on separate threads, by default. A lock local to
+/// just one of those files does not serialize against the other, so this
+/// one shared static is acquired by both.
+#[cfg(test)]
+pub(crate) static HOME_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
