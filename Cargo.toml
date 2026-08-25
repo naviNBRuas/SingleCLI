@@ -8,6 +8,7 @@ members = [
     "crates/single-cli",
     "crates/single-tui",
     "crates/single-mcp",
+    "crates/singlecli-mcp",
     "crates/single-web",
 ]
 

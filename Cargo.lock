@@ -2852,6 +2852,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "singlecli-mcp"
+version = "0.5.0"
+dependencies = [
+ "anyhow",
+ "rmcp",
+ "serde_json",
+ "single-core",
+ "single-protocol",
+ "single-runtime",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "slab"
 version = "0.4.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
