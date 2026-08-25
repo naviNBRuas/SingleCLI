@@ -1,5 +1,6 @@
 mod client;
 mod daemon;
+mod internal_lsp_manifest;
 mod render;
 mod update;
 
@@ -302,6 +303,13 @@ enum InternalCommand {
     /// hookSpecificOutput/permissionDecision JSON Claude Code expects.
     #[command(name = "claude-pretooluse-hook")]
     ClaudePreToolUseHook,
+    /// Regenerates the single-lsp Claude Code plugin's marketplace manifest
+    /// from the current LSP registry — re-run after `single lsp add`/
+    /// `enable`/`disable` so the plugin's extensionToLanguage map stays in
+    /// sync with what single-lsp itself actually routes.
+    GenerateLspPluginManifest {
+        output_dir: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1237,6 +1245,13 @@ fn main() -> anyhow::Result<()> {
     // SingleCLI's state database directly, same as single-mcp's gateway.
     if let Command::Internal(InternalCommand::ClaudePreToolUseHook) = command {
         return run_claude_pretooluse_hook();
+    }
+    if let Command::Internal(InternalCommand::GenerateLspPluginManifest { output_dir }) = command {
+        let dirs = single_core::SingleDirs::discover()?;
+        let specs = single_core::lsp::load(&dirs.lsp_registry_file())?;
+        internal_lsp_manifest::write_to(std::path::Path::new(&output_dir), &specs)?;
+        println!("wrote single-lsp plugin manifest to {output_dir}");
+        return Ok(());
     }
 
     // Interactive login needs the user's real terminal (browser OAuth
