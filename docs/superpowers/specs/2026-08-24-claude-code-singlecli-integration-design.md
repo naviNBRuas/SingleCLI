@@ -240,3 +240,87 @@ MCP/LSP capability mid-migration. Every edit to `~/.claude.json` /
 2. Token-saving delegation heuristics: when Claude Code should actually
    reach for `singlecli-mcp`'s tools instead of doing work itself, as a
    skill/CLAUDE.md guidance layer once the mechanism above is live.
+
+## As built (2026-08-25)
+
+Two deliberate deviations from this spec were made during live deployment,
+plus a note on how the permission gating described in "Error handling"
+above actually landed. Recorded here (not just the gitignored session
+ledger) so merged history reflects what's actually running.
+
+### (a) The four `claude.ai` OAuth connectors were kept, not removed
+
+Section 4 ("Claude Code rewiring") called for removing the Notion, Gmail,
+Google Drive, and Google Calendar `claude.ai`-native OAuth connectors,
+refolded via SingleCLI's `notion`/`gdrive`/`google-calendar` registry
+presets. In practice, at the point of the real swap, none of those
+presets had a working credential configured (no secret set for any of
+them), and — separately — **no SingleCLI preset for Gmail exists at all**
+in the registry (there is no Gmail-equivalent entry to fold into).
+Removing the connectors under those conditions would have been a straight
+capability regression (losing four working integrations for zero working
+replacements), not a like-for-like swap, so they were deliberately left
+in place. Everything else in section 4 (removing `github`/`playwright`
+and the four standalone LSP plugins, adding `single-mcp`/`singlecli-mcp`,
+enabling `single-lsp`) proceeded as specified.
+
+**To reverse this later**, once real credentials exist:
+1. `single secret set <secret-name> <value>` for each of the `notion`,
+   `gdrive`, and `google-calendar` presets' required secrets (see
+   `single mcp list` for what each preset expects).
+2. Enable those presets: `single mcp enable notion gdrive google-calendar`
+   (or the equivalent `single mcp add`/`enable` invocation for presets not
+   yet in the local registry).
+3. Re-run `single install-integrations --real-home --yes` to sync the
+   now-configured servers into Claude Code's real config.
+4. Only then remove the `claude.ai` Notion/Google Drive/Google Calendar
+   connectors from Claude Code directly — Gmail has no SingleCLI
+   equivalent yet, so that connector should stay until a Gmail preset
+   exists in the registry (a gap this spec doesn't otherwise address).
+
+### (b) Claude Code's plugin manifest schema rejects filename-keyed LSP entries
+
+Not mentioned in this spec: Claude Code's real plugin marketplace schema
+(discovered live, not documented anywhere beforehand) rejects
+`extensionToLanguage` keys that aren't a dot-prefixed extension.
+`single-lsp`'s own `Router` genuinely supports exact-filename routing —
+used by presets like `dockerfile`, `meson`, `nginx`, and `dockercompose`,
+which key off a filename rather than an extension — but that routing
+capability can never actually be reached through the Claude Code plugin
+mechanism, since the manifest that would register it is rejected outright
+by Claude Code's schema. This is a Claude Code platform constraint, not a
+SingleCLI bug: `single-lsp`'s proxy and `Router` are unaffected and would
+route those filenames correctly if reached through any other client.
+Fixed in `crates/single-cli/src/internal_lsp_manifest.rs`'s `generate()`
+function (commit `c6bf3d8`, landed before this fix wave): non-dot-extension
+entries are now silently skipped when generating the Claude Code manifest,
+rather than emitting an entry Claude Code would reject wholesale.
+
+### (c) `singlecli-mcp` permission gating
+
+Landed in this fix wave (see the "Error handling" section's requirement
+above). `crates/singlecli-mcp/src/server.rs` adds a `permission_gate`
+function, called as the first statement of each of the four
+run-triggering tools (`task_run`, `orchestrate_run`,
+`orchestrate_parallel_run`, `orchestrate_graph_run`) before any argument
+parsing or daemon contact. It mirrors `single-mcp::gateway`'s existing
+`check_permission`/`invoke_mcp` pattern exactly: builds a
+`"singlecli:{tool_name}"` resource string (parallel to the gateway's
+`"mcp:{server}:{tool}"`), opens its own SQLite connection directly against
+`~/.config/single/single.db` (rather than round-tripping through the
+daemon socket — this check has to run before the in-process daemon
+fallback `client::send` takes when no daemon is listening, not just
+before a real socket call), and calls
+`single_core::preferences::evaluate_and_learn` against
+`permissions.toml`'s `tools` rules. A `Deny` or `PendingApproval` verdict
+returns the same denied/pending JSON shape the gateway's `invoke_mcp`
+returns, without ever calling `self.send` — proven by tests that call the
+gated methods with deliberately invalid arguments and confirm the
+response is the denial/pending JSON rather than an argument-parsing
+error, which would only be possible if the gate ran and returned first.
+The other five tools (`agent_list`, `agent_inspect`, `memory_store`,
+`memory_search`, `provider_configured_list`) are intentionally left
+ungated — none of them can trigger a real agent run or spend real
+credentials/time the way the four gated tools can, matching the
+gateway's own reasoning for not gating its purely read-only discovery
+call (`invoke_mcp` with `tool: null`).
