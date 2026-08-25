@@ -385,6 +385,15 @@ pub fn gateway_server_spec() -> McpServerSpec {
     McpServerSpec { name: "single-mcp".into(), command: "single-mcp".into(), args: vec![], env: BTreeMap::new(), secret_env: BTreeMap::new(), enabled: true }
 }
 
+/// The fixed spec for `singlecli-mcp` — SingleCLI's own self-exposing MCP
+/// server (task/orchestrate/agent/memory/provider tools). Unlike
+/// `gateway_server_spec`, this isn't conditional on gateway mode: it's
+/// always synced, since it isn't one of the registry servers gateway mode
+/// toggles between proxying individually vs. through `single-mcp`.
+pub fn singlecli_server_spec() -> McpServerSpec {
+    McpServerSpec { name: "singlecli-mcp".into(), command: "singlecli-mcp".into(), args: vec![], env: BTreeMap::new(), secret_env: BTreeMap::new(), enabled: true }
+}
+
 /// Reads the `mcp_gateway.toml` flag (see `SingleDirs::mcp_gateway_file`).
 /// Missing file means gateway mode has never been turned on — `false`.
 pub fn gateway_mode(path: &Path) -> Result<bool> {

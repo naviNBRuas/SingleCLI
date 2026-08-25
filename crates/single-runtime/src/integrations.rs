@@ -24,11 +24,15 @@ pub fn install_all(ctx: &Context, dry_run: bool, real_home: bool) -> Result<Inte
     // side — defeating gateway mode's whole point (avoid registering N
     // servers individually). Removing the other mode's names first keeps
     // each sync a clean switch, not an accumulation.
-    let (mcp_servers, stale_names): (Vec<_>, Vec<String>) = if single_core::mcp::gateway_mode(&ctx.dirs.mcp_gateway_file())? {
+    let (mut mcp_servers, stale_names): (Vec<_>, Vec<String>) = if single_core::mcp::gateway_mode(&ctx.dirs.mcp_gateway_file())? {
         (vec![gateway_spec], registry_servers.iter().map(|s| s.name.clone()).collect())
     } else {
         (registry_servers, vec![gateway_spec.name])
     };
+    // singlecli-mcp is SingleCLI's own always-on delegation surface, not
+    // one of the registry servers gateway mode toggles between — it's
+    // appended unconditionally to whichever list the branch above chose.
+    mcp_servers.push(single_core::mcp::singlecli_server_spec());
     let lsp_servers = single_core::lsp::load(&ctx.dirs.lsp_registry_file())?;
 
     let mut writes = Vec::new();
@@ -56,8 +60,12 @@ pub fn uninstall_all(ctx: &Context, dry_run: bool, real_home: bool) -> Result<In
     // (direct per-server entries or the single gateway entry) a prior
     // sync may have left behind, not just whichever one gateway_mode()
     // says is "current" right now.
-    let mcp_names: Vec<String> =
-        mcp_servers.iter().map(|s| s.name.clone()).chain(std::iter::once(single_core::mcp::gateway_server_spec().name)).collect();
+    let mcp_names: Vec<String> = mcp_servers
+        .iter()
+        .map(|s| s.name.clone())
+        .chain(std::iter::once(single_core::mcp::gateway_server_spec().name))
+        .chain(std::iter::once(single_core::mcp::singlecli_server_spec().name))
+        .collect();
     let lsp_servers = single_core::lsp::load(&ctx.dirs.lsp_registry_file())?;
     let lsp_names: Vec<String> = lsp_servers.iter().map(|s| s.name.clone()).collect();
 
@@ -112,7 +120,11 @@ mod tests {
         single_core::mcp::set_gateway_mode(&ctx.dirs.mcp_gateway_file(), true).unwrap();
         install_all(&ctx, false, false).unwrap();
         let gateway_names = claude_mcp_server_names(dir.path());
-        assert_eq!(gateway_names, vec!["single-mcp".to_string()], "enabling gateway mode must remove the old direct entries, not add to them");
+        assert_eq!(
+            gateway_names,
+            vec!["single-mcp".to_string(), "singlecli-mcp".to_string()],
+            "enabling gateway mode must remove the old direct entries, not add to them (singlecli-mcp stays regardless)"
+        );
 
         single_core::mcp::set_gateway_mode(&ctx.dirs.mcp_gateway_file(), false).unwrap();
         install_all(&ctx, false, false).unwrap();
@@ -128,7 +140,7 @@ mod tests {
 
         single_core::mcp::set_gateway_mode(&ctx.dirs.mcp_gateway_file(), true).unwrap();
         install_all(&ctx, false, false).unwrap();
-        assert_eq!(claude_mcp_server_names(dir.path()), vec!["single-mcp".to_string()]);
+        assert_eq!(claude_mcp_server_names(dir.path()), vec!["single-mcp".to_string(), "singlecli-mcp".to_string()]);
 
         single_core::mcp::set_gateway_mode(&ctx.dirs.mcp_gateway_file(), false).unwrap();
         uninstall_all(&ctx, false, false).unwrap();
@@ -160,5 +172,21 @@ mod tests {
         let ctx = test_ctx(dir.path());
         install_all(&ctx, false, false).unwrap();
         assert!(dir.path().join("homes").join("claude").join(".claude.json").exists());
+    }
+
+    #[test]
+    fn singlecli_mcp_is_always_included_regardless_of_gateway_mode() {
+        let _guard = crate::HOME_ENV_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = test_ctx(dir.path());
+
+        install_all(&ctx, false, false).unwrap();
+        assert!(claude_mcp_server_names(dir.path()).contains(&"singlecli-mcp".to_string()));
+
+        single_core::mcp::set_gateway_mode(&ctx.dirs.mcp_gateway_file(), true).unwrap();
+        install_all(&ctx, false, false).unwrap();
+        let names = claude_mcp_server_names(dir.path());
+        assert!(names.contains(&"single-mcp".to_string()));
+        assert!(names.contains(&"singlecli-mcp".to_string()), "singlecli-mcp must survive a gateway-mode switch, unlike the registry servers it isn't one of");
     }
 }
