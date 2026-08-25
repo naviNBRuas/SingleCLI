@@ -54,6 +54,79 @@ impl SingleCliServer {
         args.get(key).and_then(Value::as_u64).unwrap_or(default)
     }
 
+    fn parse_parallel_tasks(args: &Map<String, Value>) -> anyhow::Result<Vec<single_protocol::ParallelTaskSpec>> {
+        args.get("tasks")
+            .and_then(Value::as_array)
+            .ok_or_else(|| anyhow::anyhow!("missing required array argument \"tasks\""))?
+            .iter()
+            .map(|t| {
+                let obj = t.as_object().ok_or_else(|| anyhow::anyhow!("each task must be an object"))?;
+                Ok(single_protocol::ParallelTaskSpec {
+                    agent: Self::str_arg(obj, "agent")?.to_string(),
+                    description: Self::str_arg(obj, "description")?.to_string(),
+                })
+            })
+            .collect()
+    }
+
+    fn parse_graph_nodes(args: &Map<String, Value>) -> anyhow::Result<Vec<single_protocol::TaskGraphNode>> {
+        args.get("nodes")
+            .and_then(Value::as_array)
+            .ok_or_else(|| anyhow::anyhow!("missing required array argument \"nodes\""))?
+            .iter()
+            .map(|n| {
+                let obj = n.as_object().ok_or_else(|| anyhow::anyhow!("each node must be an object"))?;
+                let depends_on: Vec<String> = obj
+                    .get("depends_on")
+                    .and_then(Value::as_array)
+                    .map(|arr| arr.iter().filter_map(Value::as_str).map(str::to_string).collect())
+                    .unwrap_or_default();
+                let run_if = match obj.get("run_if").and_then(Value::as_str) {
+                    Some("on_success") => single_protocol::RunCondition::OnSuccess,
+                    Some("on_failure") => single_protocol::RunCondition::OnFailure,
+                    _ => single_protocol::RunCondition::Always,
+                };
+                Ok(single_protocol::TaskGraphNode {
+                    id: Self::str_arg(obj, "id")?.to_string(),
+                    agent: Self::str_arg(obj, "agent")?.to_string(),
+                    description: Self::str_arg(obj, "description")?.to_string(),
+                    depends_on,
+                    run_if,
+                })
+            })
+            .collect()
+    }
+
+    fn orchestrate_parallel_run(&self, args: &Map<String, Value>) -> anyhow::Result<Value> {
+        let tasks = Self::parse_parallel_tasks(args)?;
+        let cwd = args.get("cwd").and_then(Value::as_str).map(str::to_string).unwrap_or_else(|| ".".to_string());
+        self.send(Request::OrchestrateParallel {
+            tasks,
+            cwd,
+            real_home: Self::bool_arg(args, "real_home", false),
+            timeout_secs: Self::u64_arg(args, "timeout_secs", 300),
+            background: false,
+            orchestrator: single_protocol::OrchestratorMode::Fixed,
+            goal: args.get("goal").and_then(Value::as_str).map(str::to_string),
+            candidate_agents: Vec::new(),
+        })
+    }
+
+    fn orchestrate_graph_run(&self, args: &Map<String, Value>) -> anyhow::Result<Value> {
+        let nodes = Self::parse_graph_nodes(args)?;
+        let cwd = args.get("cwd").and_then(Value::as_str).map(str::to_string).unwrap_or_else(|| ".".to_string());
+        self.send(Request::OrchestrateGraph {
+            nodes,
+            cwd,
+            real_home: Self::bool_arg(args, "real_home", false),
+            timeout_secs: Self::u64_arg(args, "timeout_secs", 300),
+            background: false,
+            orchestrator: single_protocol::OrchestratorMode::Fixed,
+            goal: args.get("goal").and_then(Value::as_str).map(str::to_string),
+            candidate_agents: Vec::new(),
+        })
+    }
+
     fn parse_agents(args: &Map<String, Value>) -> anyhow::Result<Vec<String>> {
         let agents = args
             .get("agents")
@@ -156,6 +229,54 @@ impl ServerHandler for SingleCliServer {
                     "additionalProperties": false
                 })),
             ),
+            Tool::new(
+                "orchestrate_parallel_run",
+                "Runs several agents concurrently, each on its own explicit sub-task, each in its own git worktree. No automatic goal splitting — you supply each agent's task.",
+                schema(json!({
+                    "type": "object",
+                    "properties": {
+                        "tasks": {
+                            "type": "array",
+                            "items": { "type": "object", "properties": { "agent": { "type": "string" }, "description": { "type": "string" } }, "required": ["agent", "description"] }
+                        },
+                        "goal": { "type": "string" },
+                        "cwd": { "type": "string" },
+                        "real_home": { "type": "boolean" },
+                        "timeout_secs": { "type": "integer" }
+                    },
+                    "required": ["tasks"],
+                    "additionalProperties": false
+                })),
+            ),
+            Tool::new(
+                "orchestrate_graph_run",
+                "Runs an explicit dependency graph of agent tasks: each node runs once its dependencies have finished, with real cycle validation.",
+                schema(json!({
+                    "type": "object",
+                    "properties": {
+                        "nodes": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "id": { "type": "string" },
+                                    "agent": { "type": "string" },
+                                    "description": { "type": "string" },
+                                    "depends_on": { "type": "array", "items": { "type": "string" } },
+                                    "run_if": { "type": "string", "enum": ["always", "on_success", "on_failure"] }
+                                },
+                                "required": ["id", "agent", "description"]
+                            }
+                        },
+                        "goal": { "type": "string" },
+                        "cwd": { "type": "string" },
+                        "real_home": { "type": "boolean" },
+                        "timeout_secs": { "type": "integer" }
+                    },
+                    "required": ["nodes"],
+                    "additionalProperties": false
+                })),
+            ),
         ]))
     }
 
@@ -165,6 +286,8 @@ impl ServerHandler for SingleCliServer {
         let result = match request.name.as_ref() {
             "task_run" => self.task_run(arguments),
             "orchestrate_run" => self.orchestrate_run(arguments),
+            "orchestrate_parallel_run" => self.orchestrate_parallel_run(arguments),
+            "orchestrate_graph_run" => self.orchestrate_graph_run(arguments),
             other => Err(anyhow::anyhow!("unknown tool: {other}")),
         };
         match result {
@@ -199,5 +322,31 @@ mod tests {
     fn parse_agents_collects_string_items_in_order() {
         let args: Map<String, Value> = json!({ "agents": ["codex", "opencode"] }).as_object().unwrap().clone();
         assert_eq!(SingleCliServer::parse_agents(&args).unwrap(), vec!["codex".to_string(), "opencode".to_string()]);
+    }
+
+    #[test]
+    fn parse_parallel_tasks_rejects_malformed_entries() {
+        let args: Map<String, Value> = json!({ "tasks": [{ "agent": "codex" }] }).as_object().unwrap().clone(); // missing "description"
+        assert!(SingleCliServer::parse_parallel_tasks(&args).is_err());
+    }
+
+    #[test]
+    fn parse_parallel_tasks_accepts_well_formed_entries() {
+        let args: Map<String, Value> = json!({ "tasks": [{ "agent": "codex", "description": "backend" }, { "agent": "claude", "description": "frontend" }] }).as_object().unwrap().clone();
+        let tasks = SingleCliServer::parse_parallel_tasks(&args).unwrap();
+        assert_eq!(tasks.len(), 2);
+        assert_eq!(tasks[0].agent, "codex");
+        assert_eq!(tasks[1].description, "frontend");
+    }
+
+    #[test]
+    fn parse_graph_nodes_accepts_dependencies() {
+        let args: Map<String, Value> = json!({ "nodes": [
+            { "id": "build", "agent": "codex", "description": "build it" },
+            { "id": "test", "agent": "claude", "description": "test it", "depends_on": ["build"] }
+        ] }).as_object().unwrap().clone();
+        let nodes = SingleCliServer::parse_graph_nodes(&args).unwrap();
+        assert_eq!(nodes.len(), 2);
+        assert_eq!(nodes[1].depends_on, vec!["build".to_string()]);
     }
 }
