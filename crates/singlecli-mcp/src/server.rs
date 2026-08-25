@@ -54,6 +54,25 @@ impl SingleCliServer {
         args.get(key).and_then(Value::as_u64).unwrap_or(default)
     }
 
+    /// Resolves `args["cwd"]` (defaulting to `"."`) to an absolute path via
+    /// `std::fs::canonicalize`. `single-runtimed` resolves `cwd` in its own
+    /// process, not the MCP client's — mirroring `single-cli`'s own
+    /// `main.rs` (see its `Task::Run`/`Orchestrate*` handlers), a relative
+    /// `cwd` must be canonicalized here, in `singlecli-mcp`'s own process
+    /// (whose cwd genuinely is the caller's project directory, since Claude
+    /// Code spawns one MCP server per session with its own working
+    /// directory), before being placed into the `Request`. Unlike
+    /// `single-cli`'s silent `unwrap_or(cwd)` fallback, a canonicalization
+    /// failure here is a real error — silently sending an unresolved
+    /// relative path would let it resolve inside the daemon's own process
+    /// instead, which is exactly the bug this guards against.
+    fn resolve_cwd(args: &Map<String, Value>) -> anyhow::Result<String> {
+        let cwd = args.get("cwd").and_then(Value::as_str).unwrap_or(".");
+        std::fs::canonicalize(cwd)
+            .map(|p| p.display().to_string())
+            .map_err(|e| anyhow::anyhow!("cwd \"{cwd}\" could not be resolved to an absolute path: {e}"))
+    }
+
     fn parse_parallel_tasks(args: &Map<String, Value>) -> anyhow::Result<Vec<single_protocol::ParallelTaskSpec>> {
         args.get("tasks")
             .and_then(Value::as_array)
@@ -99,7 +118,7 @@ impl SingleCliServer {
 
     fn orchestrate_parallel_run(&self, args: &Map<String, Value>) -> anyhow::Result<Value> {
         let tasks = Self::parse_parallel_tasks(args)?;
-        let cwd = args.get("cwd").and_then(Value::as_str).map(str::to_string).unwrap_or_else(|| ".".to_string());
+        let cwd = Self::resolve_cwd(args)?;
         self.send(Request::OrchestrateParallel {
             tasks,
             cwd,
@@ -114,7 +133,7 @@ impl SingleCliServer {
 
     fn orchestrate_graph_run(&self, args: &Map<String, Value>) -> anyhow::Result<Value> {
         let nodes = Self::parse_graph_nodes(args)?;
-        let cwd = args.get("cwd").and_then(Value::as_str).map(str::to_string).unwrap_or_else(|| ".".to_string());
+        let cwd = Self::resolve_cwd(args)?;
         self.send(Request::OrchestrateGraph {
             nodes,
             cwd,
@@ -142,7 +161,7 @@ impl SingleCliServer {
     fn task_run(&self, args: &Map<String, Value>) -> anyhow::Result<Value> {
         let description = Self::str_arg(args, "description")?.to_string();
         let agent = Self::str_arg(args, "agent")?.to_string();
-        let cwd = args.get("cwd").and_then(Value::as_str).map(str::to_string).unwrap_or_else(|| ".".to_string());
+        let cwd = Self::resolve_cwd(args)?;
         self.send(Request::TaskRun {
             description,
             agent,
@@ -160,7 +179,7 @@ impl SingleCliServer {
     fn orchestrate_run(&self, args: &Map<String, Value>) -> anyhow::Result<Value> {
         let goal = Self::str_arg(args, "goal")?.to_string();
         let agents = Self::parse_agents(args)?;
-        let cwd = args.get("cwd").and_then(Value::as_str).map(str::to_string).unwrap_or_else(|| ".".to_string());
+        let cwd = Self::resolve_cwd(args)?;
         self.send(Request::Orchestrate {
             goal,
             agents,
@@ -446,5 +465,32 @@ mod tests {
     fn agent_inspect_requires_name() {
         let args: Map<String, Value> = json!({}).as_object().unwrap().clone();
         assert!(SingleCliServer::str_arg(&args, "name").is_err());
+    }
+
+    #[test]
+    fn resolve_cwd_canonicalizes_relative_default() {
+        // No "cwd" key at all -> defaults to "." -> must resolve to an
+        // absolute path, not be sent to the daemon as the literal string ".".
+        let args: Map<String, Value> = json!({}).as_object().unwrap().clone();
+        let resolved = SingleCliServer::resolve_cwd(&args).unwrap();
+        assert_ne!(resolved, ".");
+        assert!(std::path::Path::new(&resolved).is_absolute(), "expected absolute path, got {resolved:?}");
+        assert_eq!(std::path::Path::new(&resolved), std::env::current_dir().unwrap().canonicalize().unwrap());
+    }
+
+    #[test]
+    fn resolve_cwd_canonicalizes_explicit_relative_path() {
+        let args: Map<String, Value> = json!({ "cwd": "." }).as_object().unwrap().clone();
+        let resolved = SingleCliServer::resolve_cwd(&args).unwrap();
+        assert_ne!(resolved, ".");
+        assert!(std::path::Path::new(&resolved).is_absolute(), "expected absolute path, got {resolved:?}");
+    }
+
+    #[test]
+    fn resolve_cwd_errors_instead_of_falling_back_on_missing_path() {
+        let args: Map<String, Value> =
+            json!({ "cwd": "/definitely/does/not/exist/singlecli-mcp-test-fixture" }).as_object().unwrap().clone();
+        let err = SingleCliServer::resolve_cwd(&args).expect_err("nonexistent cwd must error, not silently fall back");
+        assert!(err.to_string().contains("could not be resolved"));
     }
 }
