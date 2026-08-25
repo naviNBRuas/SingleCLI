@@ -88,6 +88,50 @@ impl SingleCliServer {
             .collect()
     }
 
+    /// Gate for the four run-triggering tools (`task_run`, `orchestrate_run`,
+    /// `orchestrate_parallel_run`, `orchestrate_graph_run`) — the ones that
+    /// can actually spawn real agent processes and burn real credentials/
+    /// time. Per the spec's Error Handling section: "singlecli-mcp's new
+    /// tools should go through the same permission/preference system rather
+    /// than bypassing it, since they can trigger real agent runs." Mirrors
+    /// `single-mcp::gateway`'s `check_permission`/`invoke_mcp` pattern
+    /// exactly (that's the only other caller of `permissions::evaluate` in
+    /// this codebase) — same resource-string shape (`"singlecli:{tool}"`
+    /// here, vs. `"mcp:{server}:{tool}"` there), same denied/pending JSON
+    /// shape, same "open a fresh SQLite connection directly rather than
+    /// round-tripping through the daemon socket" reasoning (this check must
+    /// run *before* any daemon call, including the in-process fallback
+    /// `client::send` takes when no daemon is listening).
+    ///
+    /// Called as the very first statement of each gated method, before any
+    /// argument parsing — so a denied/pending call never reaches `self.send`
+    /// (or even validates its arguments) at all.
+    fn permission_gate(tool_name: &str) -> anyhow::Result<Option<Value>> {
+        let resource = format!("singlecli:{tool_name}");
+        let dirs = single_core::SingleDirs::discover()?;
+        let rules = single_core::permissions::load(&dirs.permissions_file())?;
+        let db_path = dirs.db_path();
+        if let Some(parent) = db_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let conn = rusqlite::Connection::open(&db_path)?;
+        single_core::preferences::ensure_schema(&conn)?;
+        let verdict = single_core::preferences::evaluate_and_learn(&rules.tools, &conn, &resource, Some("singlecli-mcp"))?;
+        Ok(match verdict {
+            single_core::preferences::Verdict::Deny => Some(json!({
+                "tool": tool_name, "denied": true,
+                "reason": "blocked by permission policy (permissions.toml or a learned preference)"
+            })),
+            single_core::preferences::Verdict::PendingApproval(id) => Some(json!({
+                "tool": tool_name, "pending_approval": id,
+                "message": format!(
+                    "this action needs your approval first — run `single approval resolve {id} --allow` (or --deny), then retry"
+                )
+            })),
+            single_core::preferences::Verdict::Allow => None,
+        })
+    }
+
     fn parse_graph_nodes(args: &Map<String, Value>) -> anyhow::Result<Vec<single_protocol::TaskGraphNode>> {
         args.get("nodes")
             .and_then(Value::as_array)
@@ -117,6 +161,9 @@ impl SingleCliServer {
     }
 
     fn orchestrate_parallel_run(&self, args: &Map<String, Value>) -> anyhow::Result<Value> {
+        if let Some(response) = Self::permission_gate("orchestrate_parallel_run")? {
+            return Ok(response);
+        }
         let tasks = Self::parse_parallel_tasks(args)?;
         let cwd = Self::resolve_cwd(args)?;
         self.send(Request::OrchestrateParallel {
@@ -132,6 +179,9 @@ impl SingleCliServer {
     }
 
     fn orchestrate_graph_run(&self, args: &Map<String, Value>) -> anyhow::Result<Value> {
+        if let Some(response) = Self::permission_gate("orchestrate_graph_run")? {
+            return Ok(response);
+        }
         let nodes = Self::parse_graph_nodes(args)?;
         let cwd = Self::resolve_cwd(args)?;
         self.send(Request::OrchestrateGraph {
@@ -159,6 +209,9 @@ impl SingleCliServer {
     }
 
     fn task_run(&self, args: &Map<String, Value>) -> anyhow::Result<Value> {
+        if let Some(response) = Self::permission_gate("task_run")? {
+            return Ok(response);
+        }
         let description = Self::str_arg(args, "description")?.to_string();
         let agent = Self::str_arg(args, "agent")?.to_string();
         let cwd = Self::resolve_cwd(args)?;
@@ -177,6 +230,9 @@ impl SingleCliServer {
     }
 
     fn orchestrate_run(&self, args: &Map<String, Value>) -> anyhow::Result<Value> {
+        if let Some(response) = Self::permission_gate("orchestrate_run")? {
+            return Ok(response);
+        }
         let goal = Self::str_arg(args, "goal")?.to_string();
         let agents = Self::parse_agents(args)?;
         let cwd = Self::resolve_cwd(args)?;
@@ -492,5 +548,135 @@ mod tests {
             json!({ "cwd": "/definitely/does/not/exist/singlecli-mcp-test-fixture" }).as_object().unwrap().clone();
         let err = SingleCliServer::resolve_cwd(&args).expect_err("nonexistent cwd must error, not silently fall back");
         assert!(err.to_string().contains("could not be resolved"));
+    }
+
+    // Fix 4: the four run-triggering tools (task_run/orchestrate_run/
+    // orchestrate_parallel_run/orchestrate_graph_run) must go through
+    // `permission_gate` before ever reaching `self.send` — see that
+    // method's doc comment for how this mirrors `single-mcp::gateway`'s
+    // `check_permission`/`invoke_mcp`. `SingleDirs::discover()` (used by
+    // `permission_gate`) reads the process-global `SINGLE_CONFIG_DIR` env
+    // var fresh every call, same real constraint `gateway.rs`'s own test
+    // module documents — this lock serializes just the tests that touch it.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn deny_rule(resource: &str) -> single_core::permissions::PermissionSet {
+        let mut rules = single_core::permissions::PermissionSet::default();
+        rules.tools.push(single_core::permissions::Rule { pattern: resource.to_string(), decision: single_core::permissions::Decision::Deny });
+        rules
+    }
+
+    fn allow_rule(resource: &str) -> single_core::permissions::PermissionSet {
+        let mut rules = single_core::permissions::PermissionSet::default();
+        rules.tools.push(single_core::permissions::Rule { pattern: resource.to_string(), decision: single_core::permissions::Decision::Allow });
+        rules
+    }
+
+    #[test]
+    fn task_run_denied_by_permission_never_reaches_self_send() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("SINGLE_CONFIG_DIR", dir.path());
+        let dirs = single_core::SingleDirs::discover().unwrap();
+        single_core::permissions::save(&dirs.permissions_file(), &deny_rule("singlecli:task_run")).unwrap();
+
+        let server = SingleCliServer::new().unwrap();
+        // Deliberately empty args: task_run would normally fail immediately
+        // on the missing "description"/"agent" via str_arg. Getting the
+        // denial JSON back instead — not an argument error — proves the
+        // permission gate ran first and returned before any argument
+        // parsing, let alone a call to self.send (which would mean
+        // contacting a daemon or falling back to an in-process run).
+        let result = server.task_run(&Map::new()).unwrap();
+        assert_eq!(result["denied"], true);
+        assert_eq!(result["tool"], "task_run");
+
+        std::env::remove_var("SINGLE_CONFIG_DIR");
+    }
+
+    #[test]
+    fn task_run_pending_approval_never_reaches_self_send() {
+        // No matching rule at all defaults to Ask, and with no learned
+        // preference yet that resolves to PendingApproval, not Allow — same
+        // short-circuit proof as the deny case, via the same empty-args
+        // signal.
+        let _guard = ENV_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("SINGLE_CONFIG_DIR", dir.path());
+
+        let server = SingleCliServer::new().unwrap();
+        let result = server.task_run(&Map::new()).unwrap();
+        assert!(result["pending_approval"].as_i64().is_some(), "expected a pending_approval id, got {result:?}");
+        assert_eq!(result["tool"], "task_run");
+
+        std::env::remove_var("SINGLE_CONFIG_DIR");
+    }
+
+    #[test]
+    fn task_run_allowed_by_permission_proceeds_to_self_send() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("SINGLE_CONFIG_DIR", dir.path());
+        let dirs = single_core::SingleDirs::discover().unwrap();
+        single_core::permissions::save(&dirs.permissions_file(), &allow_rule("singlecli:task_run")).unwrap();
+
+        let server = SingleCliServer::new().unwrap();
+        let args: Map<String, Value> =
+            json!({ "description": "say hi", "agent": "definitely-not-a-real-agent" }).as_object().unwrap().clone();
+        // No daemon is listening at this SINGLE_CONFIG_DIR, so self.send
+        // falls back to the in-process path (crate::client::send ->
+        // single_runtime::handle), which rejects the unknown agent cleanly
+        // (see single-runtime::task's run_fails_cleanly_for_unknown_agent) —
+        // an Err here, rather than the denial/pending JSON, proves this
+        // actually reached self.send instead of being blocked by the gate.
+        let result = server.task_run(&args);
+        assert!(result.is_err(), "expected an error from an actually-attempted run against an unknown agent, got {result:?}");
+
+        std::env::remove_var("SINGLE_CONFIG_DIR");
+    }
+
+    #[test]
+    fn orchestrate_run_denied_by_permission_never_reaches_self_send() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("SINGLE_CONFIG_DIR", dir.path());
+        let dirs = single_core::SingleDirs::discover().unwrap();
+        single_core::permissions::save(&dirs.permissions_file(), &deny_rule("singlecli:orchestrate_run")).unwrap();
+
+        let server = SingleCliServer::new().unwrap();
+        let result = server.orchestrate_run(&Map::new()).unwrap();
+        assert_eq!(result["denied"], true);
+
+        std::env::remove_var("SINGLE_CONFIG_DIR");
+    }
+
+    #[test]
+    fn orchestrate_parallel_run_denied_by_permission_never_reaches_self_send() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("SINGLE_CONFIG_DIR", dir.path());
+        let dirs = single_core::SingleDirs::discover().unwrap();
+        single_core::permissions::save(&dirs.permissions_file(), &deny_rule("singlecli:orchestrate_parallel_run")).unwrap();
+
+        let server = SingleCliServer::new().unwrap();
+        let result = server.orchestrate_parallel_run(&Map::new()).unwrap();
+        assert_eq!(result["denied"], true);
+
+        std::env::remove_var("SINGLE_CONFIG_DIR");
+    }
+
+    #[test]
+    fn orchestrate_graph_run_denied_by_permission_never_reaches_self_send() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("SINGLE_CONFIG_DIR", dir.path());
+        let dirs = single_core::SingleDirs::discover().unwrap();
+        single_core::permissions::save(&dirs.permissions_file(), &deny_rule("singlecli:orchestrate_graph_run")).unwrap();
+
+        let server = SingleCliServer::new().unwrap();
+        let result = server.orchestrate_graph_run(&Map::new()).unwrap();
+        assert_eq!(result["denied"], true);
+
+        std::env::remove_var("SINGLE_CONFIG_DIR");
     }
 }

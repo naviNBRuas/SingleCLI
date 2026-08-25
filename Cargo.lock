@@ -2867,6 +2867,7 @@ version = "0.6.0"
 dependencies = [
  "anyhow",
  "rmcp",
+ "rusqlite",
  "serde_json",
  "single-core",
  "single-protocol",
