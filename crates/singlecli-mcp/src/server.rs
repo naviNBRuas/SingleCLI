@@ -170,6 +170,44 @@ impl SingleCliServer {
             timeout_secs: Self::u64_arg(args, "timeout_secs", 300),
         })
     }
+
+    fn agent_list(&self) -> anyhow::Result<Value> {
+        self.send(Request::AgentList)
+    }
+
+    fn agent_inspect(&self, args: &Map<String, Value>) -> anyhow::Result<Value> {
+        let name = Self::str_arg(args, "name")?.to_string();
+        self.send(Request::AgentInspect { name })
+    }
+
+    fn memory_store(&self, args: &Map<String, Value>) -> anyhow::Result<Value> {
+        let title = Self::str_arg(args, "title")?.to_string();
+        let content = Self::str_arg(args, "content")?.to_string();
+        self.send(Request::MemoryStore {
+            scope: None,
+            source: None,
+            project: args.get("project").and_then(Value::as_str).map(str::to_string),
+            agent: args.get("agent").and_then(Value::as_str).map(str::to_string),
+            task: args.get("task").and_then(Value::as_str).map(str::to_string),
+            title,
+            content,
+            confidence: args.get("confidence").and_then(Value::as_f64),
+            expires_in_seconds: args.get("expires_in_seconds").and_then(Value::as_i64),
+        })
+    }
+
+    fn memory_search(&self, args: &Map<String, Value>) -> anyhow::Result<Value> {
+        let query = Self::str_arg(args, "query")?.to_string();
+        self.send(Request::MemorySearch {
+            query,
+            scope: None,
+            project: args.get("project").and_then(Value::as_str).map(str::to_string),
+        })
+    }
+
+    fn provider_configured_list(&self) -> anyhow::Result<Value> {
+        self.send(Request::ConfiguredProviderList)
+    }
 }
 
 fn schema(fields: Value) -> std::sync::Arc<Map<String, Value>> {
@@ -277,6 +315,49 @@ impl ServerHandler for SingleCliServer {
                     "additionalProperties": false
                 })),
             ),
+            Tool::new(
+                "agent_list",
+                "Lists every agent CLI SingleCLI knows about, with detection status — what's actually available to delegate to.",
+                schema(json!({ "type": "object", "properties": {}, "additionalProperties": false })),
+            ),
+            Tool::new(
+                "agent_inspect",
+                "Details on one agent: detection, install method, capabilities.",
+                schema(json!({ "type": "object", "properties": { "name": { "type": "string" } }, "required": ["name"], "additionalProperties": false })),
+            ),
+            Tool::new(
+                "memory_store",
+                "Stores an entry in SingleCLI's shared memory store, visible to every agent's task preamble.",
+                schema(json!({
+                    "type": "object",
+                    "properties": {
+                        "title": { "type": "string" },
+                        "content": { "type": "string" },
+                        "project": { "type": "string" },
+                        "agent": { "type": "string" },
+                        "task": { "type": "string" },
+                        "confidence": { "type": "number" },
+                        "expires_in_seconds": { "type": "integer" }
+                    },
+                    "required": ["title", "content"],
+                    "additionalProperties": false
+                })),
+            ),
+            Tool::new(
+                "memory_search",
+                "Substring-searches SingleCLI's shared memory store.",
+                schema(json!({
+                    "type": "object",
+                    "properties": { "query": { "type": "string" }, "project": { "type": "string" } },
+                    "required": ["query"],
+                    "additionalProperties": false
+                })),
+            ),
+            Tool::new(
+                "provider_configured_list",
+                "Lists which LLM providers actually have a key configured right now, for deciding what's available to delegate against.",
+                schema(json!({ "type": "object", "properties": {}, "additionalProperties": false })),
+            ),
         ]))
     }
 
@@ -288,6 +369,11 @@ impl ServerHandler for SingleCliServer {
             "orchestrate_run" => self.orchestrate_run(arguments),
             "orchestrate_parallel_run" => self.orchestrate_parallel_run(arguments),
             "orchestrate_graph_run" => self.orchestrate_graph_run(arguments),
+            "agent_list" => self.agent_list(),
+            "agent_inspect" => self.agent_inspect(arguments),
+            "memory_store" => self.memory_store(arguments),
+            "memory_search" => self.memory_search(arguments),
+            "provider_configured_list" => self.provider_configured_list(),
             other => Err(anyhow::anyhow!("unknown tool: {other}")),
         };
         match result {
@@ -348,5 +434,17 @@ mod tests {
         let nodes = SingleCliServer::parse_graph_nodes(&args).unwrap();
         assert_eq!(nodes.len(), 2);
         assert_eq!(nodes[1].depends_on, vec!["build".to_string()]);
+    }
+
+    #[test]
+    fn memory_store_rejects_missing_title_or_content() {
+        let args: Map<String, Value> = json!({ "title": "note" }).as_object().unwrap().clone(); // missing content
+        assert!(SingleCliServer::str_arg(&args, "content").is_err());
+    }
+
+    #[test]
+    fn agent_inspect_requires_name() {
+        let args: Map<String, Value> = json!({}).as_object().unwrap().clone();
+        assert!(SingleCliServer::str_arg(&args, "name").is_err());
     }
 }
