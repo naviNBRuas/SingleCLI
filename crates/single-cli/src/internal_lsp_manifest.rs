@@ -5,6 +5,14 @@
 //! as this generator is re-run after registry changes (`single lsp add`,
 //! `single lsp enable`, ...) — see `single lsp --help`'s note on
 //! `install-integrations` needing a re-run after registry edits, same idea.
+//!
+//! Only dot-extension entries make it into the generated map — Claude
+//! Code's real marketplace schema rejects a bare filename key (confirmed
+//! live via `claude plugin validate`), so the registry's filename-keyed
+//! presets (`dockerfile`, `meson`, `nginx`, `dockercompose`) are routable
+//! by `single-lsp`'s own `Router` but not reachable through this plugin
+//! mechanism — a real, confirmed platform limitation, not a bug in the
+//! proxy's routing logic.
 
 use anyhow::{Context, Result};
 use serde_json::{json, Map, Value};
@@ -15,6 +23,18 @@ pub fn generate(specs: &[LspServerSpec]) -> Value {
     let mut extension_to_language: Map<String, Value> = Map::new();
     for spec in specs.iter().filter(|s| s.enabled) {
         for ext in &spec.extensions {
+            // Claude Code's real marketplace schema rejects `extensionToLanguage`
+            // keys that aren't a dot-prefixed extension (confirmed via
+            // `claude plugin validate`: a bare filename key like "Dockerfile"
+            // fails with "lspServers: Invalid input"). single-lsp's own
+            // `Router` supports exact-filename routing internally (for presets
+            // like `dockerfile`/`meson`/`nginx`/`dockercompose`), but that
+            // routing can never be reached through this plugin manifest — skip
+            // those entries here rather than generating a manifest Claude Code
+            // refuses to install.
+            if !ext.starts_with('.') {
+                continue;
+            }
             extension_to_language.entry(ext.clone()).or_insert_with(|| Value::String(spec.name.clone()));
         }
     }
@@ -76,6 +96,15 @@ mod tests {
         let ext_map = &manifest["plugins"][0]["lspServers"]["single-lsp"]["extensionToLanguage"];
         assert_eq!(ext_map[".rs"], "rust-analyzer");
         assert!(ext_map.get(".elm").is_none());
+    }
+
+    #[test]
+    fn skips_filename_keyed_presets_claude_code_would_reject() {
+        let manifest = generate(&[spec("dockerfile", &["Dockerfile"]), spec("rust-analyzer", &[".rs"])]);
+        let ext_map = &manifest["plugins"][0]["lspServers"]["single-lsp"]["extensionToLanguage"];
+        assert!(ext_map.get("Dockerfile").is_none(), "a bare filename key must never reach the generated manifest");
+        assert_eq!(ext_map.as_object().unwrap().len(), 1, "only the dot-extension entry should survive");
+        assert_eq!(ext_map[".rs"], "rust-analyzer");
     }
 
     #[test]
