@@ -1364,11 +1364,11 @@ fn dispatch(
             bootstrap::run_one(ctx, &name, dry_run)?,
         )),
         Request::Setup { dry_run } => Ok(ResponseData::SetupPlan(bootstrap::run(ctx, dry_run))),
-        Request::InstallIntegrations { dry_run } => Ok(ResponseData::IntegrationResult(
-            integrations::install_all(ctx, dry_run)?,
+        Request::InstallIntegrations { dry_run, real_home } => Ok(ResponseData::IntegrationResult(
+            integrations::install_all(ctx, dry_run, real_home)?,
         )),
-        Request::UninstallIntegrations => Ok(ResponseData::IntegrationResult(
-            integrations::uninstall_all(ctx, false)?,
+        Request::UninstallIntegrations { real_home } => Ok(ResponseData::IntegrationResult(
+            integrations::uninstall_all(ctx, false, real_home)?,
         )),
         Request::ProfileList => Ok(ResponseData::Profiles(single_core::profile::list_profiles(
             &ctx.dirs,

@@ -267,11 +267,19 @@ enum Command {
         yes: bool,
         #[arg(long)]
         json: bool,
+        /// Write into the real, ambient $HOME instead of the SingleCLI-managed
+        /// isolated home — the only way this ever reaches an agent you run
+        /// normally, outside SingleCLI. Off by default: same posture as
+        /// `single task run --real-home`.
+        #[arg(long)]
+        real_home: bool,
     },
     /// Remove SingleCLI-managed entries from every agent's native config.
     UninstallIntegrations {
         #[arg(long)]
         yes: bool,
+        #[arg(long)]
+        real_home: bool,
     },
     /// Undocumented: internal helpers other SingleCLI-owned tooling shells out to.
     #[command(hide = true, subcommand)]
@@ -2364,19 +2372,19 @@ fn main() -> anyhow::Result<()> {
                 render::print(response, false);
             }
         },
-        Command::InstallIntegrations { yes, json } => {
+        Command::InstallIntegrations { yes, json, real_home } => {
             if !yes {
                 eprintln!("Dry run (pass --yes to actually write config files; backups are made either way).");
             }
             let response =
-                client::send(&socket_path, Request::InstallIntegrations { dry_run: !yes })?;
+                client::send(&socket_path, Request::InstallIntegrations { dry_run: !yes, real_home })?;
             render::print(response, json);
         }
-        Command::UninstallIntegrations { yes } => {
+        Command::UninstallIntegrations { yes, real_home } => {
             if !yes {
                 anyhow::bail!("this removes SingleCLI-managed MCP entries from every agent's config; pass --yes to confirm");
             }
-            let response = client::send(&socket_path, Request::UninstallIntegrations)?;
+            let response = client::send(&socket_path, Request::UninstallIntegrations { real_home })?;
             render::print(response, false);
         }
         Command::Update { .. } => unreachable!("handled before the socket-based dispatch above"),

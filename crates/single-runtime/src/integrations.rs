@@ -9,8 +9,8 @@ use anyhow::Result;
 use single_agent_sdk::adapters::for_agent_with_custom;
 use single_protocol::IntegrationResult;
 
-pub fn install_all(ctx: &Context, dry_run: bool) -> Result<IntegrationResult> {
-    let real_home = home_dir()?;
+pub fn install_all(ctx: &Context, dry_run: bool, real_home: bool) -> Result<IntegrationResult> {
+    let home_root = home_dir()?;
     let registry_servers = single_core::mcp::load(&ctx.dirs.mcp_registry_file())?;
     let gateway_spec = single_core::mcp::gateway_server_spec();
     // Gateway mode: sync only the single-mcp dynamic gateway (it proxies
@@ -34,7 +34,11 @@ pub fn install_all(ctx: &Context, dry_run: bool) -> Result<IntegrationResult> {
     let mut writes = Vec::new();
     for agent in &ctx.registry {
         let Some(adapter) = for_agent_with_custom(&agent.name, &ctx.dirs.agents_dir(), &ctx.registry) else { continue };
-        let home = single_core::agent_home::ensure_bootstrapped(&ctx.dirs.homes_dir(), &real_home, &agent.name)?;
+        let home = if real_home {
+            home_root.clone()
+        } else {
+            single_core::agent_home::ensure_bootstrapped(&ctx.dirs.homes_dir(), &home_root, &agent.name)?
+        };
         if !stale_names.is_empty() {
             writes.push(adapter.remove_mcp(&home, &stale_names, dry_run)?);
         }
@@ -44,8 +48,8 @@ pub fn install_all(ctx: &Context, dry_run: bool) -> Result<IntegrationResult> {
     Ok(IntegrationResult { dry_run, writes })
 }
 
-pub fn uninstall_all(ctx: &Context, dry_run: bool) -> Result<IntegrationResult> {
-    let real_home = home_dir()?;
+pub fn uninstall_all(ctx: &Context, dry_run: bool, real_home: bool) -> Result<IntegrationResult> {
+    let home_root = home_dir()?;
     let mcp_servers = single_core::mcp::load(&ctx.dirs.mcp_registry_file())?;
     // Also remove the gateway entry name regardless of which mode is
     // currently active — an uninstall should clean up either shape
@@ -60,7 +64,11 @@ pub fn uninstall_all(ctx: &Context, dry_run: bool) -> Result<IntegrationResult> 
     let mut writes = Vec::new();
     for agent in &ctx.registry {
         let Some(adapter) = for_agent_with_custom(&agent.name, &ctx.dirs.agents_dir(), &ctx.registry) else { continue };
-        let home = single_core::agent_home::ensure_bootstrapped(&ctx.dirs.homes_dir(), &real_home, &agent.name)?;
+        let home = if real_home {
+            home_root.clone()
+        } else {
+            single_core::agent_home::ensure_bootstrapped(&ctx.dirs.homes_dir(), &home_root, &agent.name)?
+        };
         writes.push(adapter.remove_mcp(&home, &mcp_names, dry_run)?);
         writes.push(adapter.remove_lsp(&home, &lsp_names, dry_run)?);
     }
@@ -95,18 +103,18 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let ctx = test_ctx(dir.path());
 
-        install_all(&ctx, false).unwrap();
+        install_all(&ctx, false, false).unwrap();
         let direct_names = claude_mcp_server_names(dir.path());
         assert!(direct_names.contains(&"fetch".to_string()));
         assert!(!direct_names.contains(&"single-mcp".to_string()));
 
         single_core::mcp::set_gateway_mode(&ctx.dirs.mcp_gateway_file(), true).unwrap();
-        install_all(&ctx, false).unwrap();
+        install_all(&ctx, false, false).unwrap();
         let gateway_names = claude_mcp_server_names(dir.path());
         assert_eq!(gateway_names, vec!["single-mcp".to_string()], "enabling gateway mode must remove the old direct entries, not add to them");
 
         single_core::mcp::set_gateway_mode(&ctx.dirs.mcp_gateway_file(), false).unwrap();
-        install_all(&ctx, false).unwrap();
+        install_all(&ctx, false, false).unwrap();
         let back_to_direct = claude_mcp_server_names(dir.path());
         assert_eq!(back_to_direct, direct_names, "disabling gateway mode must remove the single-mcp entry, not leave it alongside the direct ones");
     }
@@ -117,11 +125,36 @@ mod tests {
         let ctx = test_ctx(dir.path());
 
         single_core::mcp::set_gateway_mode(&ctx.dirs.mcp_gateway_file(), true).unwrap();
-        install_all(&ctx, false).unwrap();
+        install_all(&ctx, false, false).unwrap();
         assert_eq!(claude_mcp_server_names(dir.path()), vec!["single-mcp".to_string()]);
 
         single_core::mcp::set_gateway_mode(&ctx.dirs.mcp_gateway_file(), false).unwrap();
-        uninstall_all(&ctx, false).unwrap();
+        uninstall_all(&ctx, false, false).unwrap();
         assert!(claude_mcp_server_names(dir.path()).is_empty(), "uninstall must clean up a gateway entry left over from a prior gateway-mode sync too");
+    }
+
+    #[test]
+    fn real_home_writes_the_actual_home_not_the_isolated_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = test_ctx(dir.path());
+        let real_home = tempfile::tempdir().unwrap();
+        std::env::set_var("HOME", real_home.path());
+
+        install_all(&ctx, false, true).unwrap();
+
+        let real_claude_json = real_home.path().join(".claude.json");
+        assert!(real_claude_json.exists(), "--real-home must write into the real $HOME, not the isolated homes/ dir");
+        let isolated_claude_json = dir.path().join("homes").join("claude").join(".claude.json");
+        assert!(!isolated_claude_json.exists(), "--real-home must not also bootstrap/write the isolated home");
+
+        std::env::remove_var("HOME");
+    }
+
+    #[test]
+    fn without_real_home_still_writes_the_isolated_copy_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = test_ctx(dir.path());
+        install_all(&ctx, false, false).unwrap();
+        assert!(dir.path().join("homes").join("claude").join(".claude.json").exists());
     }
 }

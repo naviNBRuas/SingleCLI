@@ -510,8 +510,11 @@ pub enum Request {
     },
     InstallIntegrations {
         dry_run: bool,
+        real_home: bool,
     },
-    UninstallIntegrations,
+    UninstallIntegrations {
+        real_home: bool,
+    },
     ProfileList,
     ProfileUse {
         name: String,
