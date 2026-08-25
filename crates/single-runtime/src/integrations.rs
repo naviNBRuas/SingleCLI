@@ -84,6 +84,14 @@ mod tests {
     use super::*;
     use crate::context::Context;
 
+    /// `install_all`/`uninstall_all` resolve `$HOME` fresh on every call via
+    /// `home_dir()` -> `single_core::paths::real_home_dir()`, and that env
+    /// var is process-global. Rust runs tests in this module concurrently
+    /// by default, so any test that sets `HOME` races every other test here
+    /// that resolves it too — even the ones that never call `set_var`
+    /// themselves. This mutex serializes all of them.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     fn test_ctx(dir: &std::path::Path) -> Context {
         let dirs = single_core::SingleDirs::from_root(dir.to_path_buf());
         dirs.ensure_created().unwrap();
@@ -100,6 +108,7 @@ mod tests {
 
     #[test]
     fn switching_gateway_mode_replaces_rather_than_accumulates_mcp_entries() {
+        let _guard = ENV_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let ctx = test_ctx(dir.path());
 
@@ -121,6 +130,7 @@ mod tests {
 
     #[test]
     fn uninstall_removes_the_gateway_entry_even_when_gateway_mode_is_off() {
+        let _guard = ENV_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let ctx = test_ctx(dir.path());
 
@@ -135,6 +145,7 @@ mod tests {
 
     #[test]
     fn real_home_writes_the_actual_home_not_the_isolated_copy() {
+        let _guard = ENV_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let ctx = test_ctx(dir.path());
         let real_home = tempfile::tempdir().unwrap();
@@ -152,6 +163,7 @@ mod tests {
 
     #[test]
     fn without_real_home_still_writes_the_isolated_copy_only() {
+        let _guard = ENV_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let ctx = test_ctx(dir.path());
         install_all(&ctx, false, false).unwrap();
