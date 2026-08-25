@@ -54,6 +54,18 @@ impl SingleCliServer {
         args.get(key).and_then(Value::as_u64).unwrap_or(default)
     }
 
+    fn parse_agents(args: &Map<String, Value>) -> anyhow::Result<Vec<String>> {
+        let agents = args
+            .get("agents")
+            .and_then(Value::as_array)
+            .ok_or_else(|| anyhow::anyhow!("missing required array argument \"agents\""))?
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_string)
+            .collect();
+        Ok(agents)
+    }
+
     fn task_run(&self, args: &Map<String, Value>) -> anyhow::Result<Value> {
         let description = Self::str_arg(args, "description")?.to_string();
         let agent = Self::str_arg(args, "agent")?.to_string();
@@ -74,14 +86,7 @@ impl SingleCliServer {
 
     fn orchestrate_run(&self, args: &Map<String, Value>) -> anyhow::Result<Value> {
         let goal = Self::str_arg(args, "goal")?.to_string();
-        let agents: Vec<String> = args
-            .get("agents")
-            .and_then(Value::as_array)
-            .ok_or_else(|| anyhow::anyhow!("missing required array argument \"agents\""))?
-            .iter()
-            .filter_map(Value::as_str)
-            .map(str::to_string)
-            .collect();
+        let agents = Self::parse_agents(args)?;
         let cwd = args.get("cwd").and_then(Value::as_str).map(str::to_string).unwrap_or_else(|| ".".to_string());
         self.send(Request::Orchestrate {
             goal,
@@ -187,6 +192,12 @@ mod tests {
     #[test]
     fn orchestrate_run_rejects_missing_agents() {
         let args: Map<String, Value> = json!({ "goal": "ship it" }).as_object().unwrap().clone();
-        assert!(args.get("agents").and_then(Value::as_array).is_none());
+        assert!(SingleCliServer::parse_agents(&args).is_err());
+    }
+
+    #[test]
+    fn parse_agents_collects_string_items_in_order() {
+        let args: Map<String, Value> = json!({ "agents": ["codex", "opencode"] }).as_object().unwrap().clone();
+        assert_eq!(SingleCliServer::parse_agents(&args).unwrap(), vec!["codex".to_string(), "opencode".to_string()]);
     }
 }
