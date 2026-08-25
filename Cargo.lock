@@ -2785,6 +2785,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "single-lsp"
+version = "0.5.0"
+dependencies = [
+ "anyhow",
+ "serde_json",
+ "single-core",
+ "single-protocol",
+]
+
+[[package]]
 name = "single-mcp"
 version = "0.5.0"
 dependencies = [

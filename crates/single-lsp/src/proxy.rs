@@ -1,0 +1,765 @@
+//! Routes an open document's URI to the SingleCLI LSP registry entry that
+//! should handle it, and manages the spawned backend processes.
+//!
+//! Claude Code spawns exactly one `single-lsp` process for the whole plugin
+//! manifest, so a single session mixes documents from many languages. Each
+//! document is routed by file extension to the registry entry that owns it;
+//! the backing language server is spawned on first use and reused for every
+//! later document of the same language.
+//!
+//! # Threading and lock discipline
+//!
+//! One thread reads client messages from stdin and drives
+//! [`Multiplexer::handle_client_message`]. Each spawned backend gets its own
+//! reader thread. Everything bound for the client funnels through a single
+//! `mpsc` channel to one writer thread, so concurrent backends can never
+//! interleave halves of a framed message on stdout.
+//!
+//! That channel's `Sender` is shared behind `&self` by every one of those
+//! threads, which is sound because `std::sync::mpsc::Sender<T>` is `Sync` for
+//! `T: Send` — true since std's mpsc was rebuilt on crossbeam, and load-bearing
+//! enough that `multiplexer_is_shareable_across_threads` asserts it at compile
+//! time rather than leaving it to be rediscovered.
+//!
+//! No lock in this type is ever held while acquiring another *except*
+//! `backends`, which may be held while taking `next_id` or
+//! `client_init_params`. Both are leaf locks — acquired, used and released
+//! within a single expression, never wrapping another acquisition — so no
+//! cycle exists and the design is deadlock-free.
+
+use crate::framing::{read_message, write_message};
+use anyhow::{Context, Result};
+use serde_json::{json, Value};
+use single_protocol::LspServerSpec;
+use std::collections::HashMap;
+use std::io::BufReader;
+use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::sync::mpsc::Sender;
+use std::sync::{Arc, Mutex};
+
+pub struct Router {
+    by_extension: HashMap<String, LspServerSpec>,
+}
+
+impl Router {
+    pub fn from_registry(specs: Vec<LspServerSpec>) -> Self {
+        let mut by_extension = HashMap::new();
+        for spec in specs.into_iter().filter(|s| s.enabled) {
+            for ext in &spec.extensions {
+                // First registered preset for a given extension wins; SingleCLI's
+                // own registry is the source of truth for which preset is
+                // "the" handler for an extension, same as `single lsp list`
+                // shows only one row per extension in practice.
+                by_extension
+                    .entry(ext.to_ascii_lowercase())
+                    .or_insert_with(|| spec.clone());
+            }
+        }
+        Self { by_extension }
+    }
+
+    pub fn route(&self, uri: &str) -> Option<&LspServerSpec> {
+        let ext = extension_of(uri)?;
+        self.by_extension.get(&ext)
+    }
+}
+
+/// The extension of the last path segment of `uri`, lowercased and including
+/// the leading dot. Leading-dot names (`.gitignore`) count as extensionless.
+fn extension_of(uri: &str) -> Option<String> {
+    let path = uri.strip_prefix("file://").unwrap_or(uri);
+    // Only the final segment can carry an extension — a dot in a *directory*
+    // name (`file:///my.project/Makefile`) is not one.
+    let name = match path.rfind('/') {
+        Some(slash) => &path[slash + 1..],
+        None => path,
+    };
+    let dot = name.rfind('.')?;
+    if dot == 0 || dot + 1 == name.len() {
+        return None;
+    }
+    Some(name[dot..].to_ascii_lowercase())
+}
+
+pub fn load_registry() -> Result<Vec<LspServerSpec>> {
+    let dirs = single_core::SingleDirs::discover().context("resolving SingleCLI config directory")?;
+    single_core::lsp::load(&dirs.lsp_registry_file())
+}
+
+struct Backend {
+    _child: Child,
+    stdin: ChildStdin,
+}
+
+pub struct Multiplexer {
+    router: Router,
+    backends: Mutex<HashMap<String, Backend>>,
+    uri_to_backend: Mutex<HashMap<String, String>>,
+    next_id: Mutex<i64>,
+    /// Requests the client made: proxy-assigned id -> (client's own id, owning backend).
+    pending: Mutex<HashMap<i64, (Value, String)>>,
+    /// Requests a *backend* made: proxy-assigned id -> (backend's own id, owning backend).
+    /// Backends number their requests independently, so two of them can easily
+    /// both pick id `1`; re-issuing them in the proxy's id space keeps the
+    /// client's replies routable back to the right backend.
+    pending_server: Mutex<HashMap<i64, (Value, String)>>,
+    /// The client's `initialize` params, replayed to every backend we spawn so
+    /// each one learns the workspace root it is supposed to index.
+    client_init_params: Mutex<Option<Value>>,
+    /// The single funnel to the writer thread — see the module docs.
+    client_out: Sender<Value>,
+}
+
+impl Multiplexer {
+    pub fn new(router: Router, client_out: Sender<Value>) -> Arc<Self> {
+        Arc::new(Self {
+            router,
+            backends: Mutex::new(HashMap::new()),
+            uri_to_backend: Mutex::new(HashMap::new()),
+            next_id: Mutex::new(1),
+            pending: Mutex::new(HashMap::new()),
+            pending_server: Mutex::new(HashMap::new()),
+            client_init_params: Mutex::new(None),
+            client_out,
+        })
+    }
+
+    fn allocate_id(&self) -> i64 {
+        let mut next = self.next_id.lock().unwrap();
+        let id = *next;
+        *next += 1;
+        id
+    }
+
+    fn send_to_client(&self, message: Value) {
+        let _ = self.client_out.send(message);
+    }
+
+    /// Signals the writer thread that no more output is coming, so `main` can
+    /// join it and know everything queued actually reached stdout instead of
+    /// racing the last few replies against process teardown.
+    ///
+    /// A bare JSON `null` is never a valid LSP message — and a backend that
+    /// sends one is dropped as malformed rather than forwarded — so it is
+    /// unambiguous as the end-of-output sentinel. It goes through the same
+    /// `Sender` as every other message, so mpsc's per-sender FIFO ordering
+    /// guarantees it is dequeued last.
+    pub fn close_client_output(&self) {
+        self.send_to_client(Value::Null);
+    }
+
+    fn extract_uri(message: &Value) -> Option<String> {
+        message
+            .pointer("/params/textDocument/uri")
+            .or_else(|| message.pointer("/params/uri"))
+            .and_then(Value::as_str)
+            .map(str::to_string)
+    }
+
+    fn send_to_backend(&self, backend_name: &str, message: &Value) -> Result<()> {
+        let backends = self.backends.lock().unwrap();
+        let backend = backends
+            .get(backend_name)
+            .with_context(|| format!("language server `{backend_name}` is not running"))?;
+        // `impl Write for &ChildStdin` — writing takes a shared borrow, and
+        // only the client thread ever writes to a backend.
+        let mut stdin = &backend.stdin;
+        write_message(&mut stdin, message)
+    }
+
+    /// Spawns (or reuses) the backend for `spec`, starting its reader thread on
+    /// first spawn. The `backends` lock is held across the whole spawn, so two
+    /// concurrent callers for the same spec can never start two processes.
+    fn ensure_backend(self: &Arc<Self>, spec: &LspServerSpec) -> Result<()> {
+        let mut backends = self.backends.lock().unwrap();
+        if backends.contains_key(&spec.name) {
+            return Ok(());
+        }
+        let mut child = Command::new(&spec.command)
+            .args(&spec.args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .with_context(|| format!("spawning language server `{}`", spec.command))?;
+        let mut stdin = child.stdin.take().expect("piped stdin");
+        let stdout = child.stdout.take().expect("piped stdout");
+
+        // A real language server rejects everything until it has been
+        // initialized, so the proxy performs that handshake itself, replaying
+        // the client's own `initialize` params. The request carries a proxy id
+        // that is deliberately *not* registered in `pending`, so the reader
+        // thread drops the reply instead of leaking it to the client. The two
+        // messages are pipelined: a backend reads its stdin in order, so it
+        // always sees `initialize` first. Done before the backend is published
+        // into `backends` so a handshake failure leaves no half-live entry.
+        let init_params = self
+            .client_init_params
+            .lock()
+            .unwrap()
+            .clone()
+            .unwrap_or_else(|| json!({ "processId": Value::Null, "rootUri": Value::Null, "capabilities": {} }));
+        write_message(
+            &mut stdin,
+            &json!({
+                "jsonrpc": "2.0",
+                "id": self.allocate_id(),
+                "method": "initialize",
+                "params": init_params,
+            }),
+        )
+        .with_context(|| format!("initializing language server `{}`", spec.name))?;
+        write_message(&mut stdin, &json!({ "jsonrpc": "2.0", "method": "initialized", "params": {} }))
+            .with_context(|| format!("initializing language server `{}`", spec.name))?;
+
+        backends.insert(spec.name.clone(), Backend { _child: child, stdin });
+        drop(backends);
+
+        let this = self.clone();
+        let backend_name = spec.name.clone();
+        std::thread::spawn(move || this.read_from_backend(backend_name, stdout));
+        Ok(())
+    }
+
+    fn read_from_backend(self: Arc<Self>, backend_name: String, stdout: ChildStdout) {
+        let mut reader = BufReader::new(stdout);
+        loop {
+            let mut message = match read_message(&mut reader) {
+                Ok(Some(message)) => message,
+                Ok(None) | Err(_) => break, // backend exited or its pipe broke
+            };
+            // A `method` is what separates a request/notification *from* the
+            // server from a response *to* one of ours — both carry an `id`.
+            let has_method = message.get("method").is_some();
+            let id = message.get("id").cloned().filter(|value| !value.is_null());
+
+            let forwarded = match (has_method, id) {
+                (true, Some(server_id)) => {
+                    // Server→client request: re-issue it in the proxy's id
+                    // space and remember where the client's answer goes.
+                    let proxy_id = self.allocate_id();
+                    self.pending_server
+                        .lock()
+                        .unwrap()
+                        .insert(proxy_id, (server_id, backend_name.clone()));
+                    message["id"] = Value::from(proxy_id);
+                    self.client_out.send(message)
+                }
+                // Notification (e.g. publishDiagnostics) — forward as-is.
+                (true, None) => self.client_out.send(message),
+                (false, Some(id)) => {
+                    // Response to a request we forwarded. Proxy ids are always
+                    // integers, so anything else is not ours.
+                    let client_id = id.as_i64().and_then(|id| {
+                        let mut pending = self.pending.lock().unwrap();
+                        match pending.get(&id) {
+                            Some((_, owner)) if owner == &backend_name => {
+                                pending.remove(&id).map(|(client_id, _)| client_id)
+                            }
+                            // Unknown id — the reply to our own `initialize`
+                            // handshake, or an id this backend does not own.
+                            // Leave any entry in place rather than evicting
+                            // another backend's pending request.
+                            _ => None,
+                        }
+                    });
+                    match client_id {
+                        Some(client_id) => {
+                            message["id"] = client_id;
+                            self.client_out.send(message)
+                        }
+                        None => Ok(()),
+                    }
+                }
+                (false, None) => Ok(()), // malformed; nothing to do with it
+            };
+            if forwarded.is_err() {
+                break; // writer thread is gone, so the client is too
+            }
+        }
+        self.retire_backend(&backend_name);
+    }
+
+    /// Cleans up after a backend that exited: forget it so the next document
+    /// for that language spawns a fresh one, and fail its outstanding requests
+    /// rather than leaving the client waiting forever.
+    fn retire_backend(&self, backend_name: &str) {
+        self.backends.lock().unwrap().remove(backend_name);
+        self.uri_to_backend.lock().unwrap().retain(|_, name| name != backend_name);
+        self.pending_server
+            .lock()
+            .unwrap()
+            .retain(|_, (_, owner)| owner != backend_name);
+
+        let orphaned: Vec<Value> = {
+            let mut pending = self.pending.lock().unwrap();
+            let ids: Vec<i64> = pending
+                .iter()
+                .filter(|(_, (_, owner))| owner == backend_name)
+                .map(|(id, _)| *id)
+                .collect();
+            ids.into_iter()
+                .filter_map(|id| pending.remove(&id).map(|(client_id, _)| client_id))
+                .collect()
+        };
+        for client_id in orphaned {
+            self.send_to_client(error_response(
+                client_id,
+                INTERNAL_ERROR,
+                &format!("language server `{backend_name}` exited"),
+            ));
+        }
+    }
+
+    /// Handles one message received from the client (Claude Code).
+    ///
+    /// Never fails the process over a single message: anything unroutable is
+    /// answered with a JSON-RPC error (for requests) or dropped (for
+    /// notifications), so one unsupported file type cannot take down a session
+    /// covering 150+ extensions.
+    pub fn handle_client_message(self: &Arc<Self>, message: Value) -> Result<()> {
+        let method = message.get("method").and_then(Value::as_str).map(str::to_string);
+        let client_id = message.get("id").cloned().filter(|value| !value.is_null());
+
+        let Some(method) = method else {
+            // No method: this is the client answering a request a backend made.
+            if let Some(id) = client_id.as_ref().and_then(Value::as_i64) {
+                let route = self.pending_server.lock().unwrap().remove(&id);
+                if let Some((server_id, backend_name)) = route {
+                    let mut outgoing = message;
+                    outgoing["id"] = server_id;
+                    let _ = self.send_to_backend(&backend_name, &outgoing);
+                }
+            }
+            return Ok(());
+        };
+
+        if method == "initialize" {
+            // The proxy owns the handshake with the client: it cannot delegate
+            // it to a backend, because at this point no document has been
+            // opened and there is nothing to route on. Each backend gets these
+            // same params replayed when it is spawned (see `ensure_backend`).
+            *self.client_init_params.lock().unwrap() = message.get("params").cloned();
+            if let Some(id) = client_id {
+                self.send_to_client(json!({ "jsonrpc": "2.0", "id": id, "result": initialize_result() }));
+            }
+            return Ok(());
+        }
+
+        if method == "shutdown" || method == "exit" {
+            let names: Vec<String> = self.backends.lock().unwrap().keys().cloned().collect();
+            for name in names {
+                let mut outgoing = message.clone();
+                if outgoing.get("id").is_some() {
+                    // Unregistered proxy id: each backend's reply is dropped,
+                    // and the client is answered once, below.
+                    outgoing["id"] = Value::from(self.allocate_id());
+                }
+                let _ = self.send_to_backend(&name, &outgoing);
+            }
+            if let Some(id) = client_id {
+                self.send_to_client(json!({ "jsonrpc": "2.0", "id": id, "result": Value::Null }));
+            }
+            return Ok(());
+        }
+
+        let Some(uri) = Self::extract_uri(&message) else {
+            // Nothing to route on. Answering requests with an error beats
+            // leaving the client blocked on a reply that will never come.
+            if let Some(id) = client_id {
+                self.send_to_client(error_response(
+                    id,
+                    METHOD_NOT_FOUND,
+                    &format!("single-lsp cannot route `{method}`: no document URI in its params"),
+                ));
+            }
+            return Ok(());
+        };
+
+        // Keyed by preset name, not by URI — two `.rs` files share one
+        // `rust-analyzer`. Note the map is not held across `ensure_backend`,
+        // so `uri_to_backend` and `backends` are never nested.
+        let known = self.uri_to_backend.lock().unwrap().get(&uri).cloned();
+        let backend_name = match known {
+            Some(name) => name,
+            None => {
+                let Some(spec) = self.router.route(&uri).cloned() else {
+                    if let Some(id) = client_id {
+                        self.send_to_client(error_response(
+                            id,
+                            METHOD_NOT_FOUND,
+                            &format!("no LSP server registered for {uri}"),
+                        ));
+                    }
+                    return Ok(());
+                };
+                if let Err(err) = self.ensure_backend(&spec) {
+                    if let Some(id) = client_id {
+                        self.send_to_client(error_response(id, INTERNAL_ERROR, &format!("{err:#}")));
+                    }
+                    return Ok(());
+                }
+                self.uri_to_backend.lock().unwrap().insert(uri.clone(), spec.name.clone());
+                spec.name
+            }
+        };
+
+        if method == "textDocument/didClose" {
+            self.uri_to_backend.lock().unwrap().remove(&uri);
+        }
+
+        let mut outgoing = message;
+        let mut proxy_id = None;
+        if let Some(id) = client_id {
+            let assigned = self.allocate_id();
+            self.pending.lock().unwrap().insert(assigned, (id, backend_name.clone()));
+            outgoing["id"] = Value::from(assigned);
+            proxy_id = Some(assigned);
+        }
+
+        if let Err(err) = self.send_to_backend(&backend_name, &outgoing) {
+            let stranded = proxy_id.and_then(|id| self.pending.lock().unwrap().remove(&id));
+            if let Some((client_id, _)) = stranded {
+                self.send_to_client(error_response(client_id, INTERNAL_ERROR, &format!("{err:#}")));
+            }
+        }
+        Ok(())
+    }
+}
+
+const METHOD_NOT_FOUND: i64 = -32601;
+const INTERNAL_ERROR: i64 = -32603;
+
+fn error_response(id: Value, code: i64, message: &str) -> Value {
+    json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } })
+}
+
+/// What the proxy tells the client it can do.
+///
+/// The proxy answers `initialize` before any backend exists, so it cannot
+/// report a real backend's capabilities — it advertises the common set and
+/// lets an individual backend reply with a method error if it lacks one. Sync
+/// is declared `Full` (kind 1) deliberately: it is the one document-sync mode
+/// every backend accepts, and a session mixes backends, so the lowest common
+/// denominator is the only safe choice.
+fn initialize_result() -> Value {
+    json!({
+        "capabilities": {
+            "textDocumentSync": { "openClose": true, "change": 1 },
+            "hoverProvider": true,
+            "definitionProvider": true,
+            "typeDefinitionProvider": true,
+            "implementationProvider": true,
+            "referencesProvider": true,
+            "documentHighlightProvider": true,
+            "documentSymbolProvider": true,
+            "workspaceSymbolProvider": true,
+            "codeActionProvider": true,
+            "renameProvider": true,
+            "documentFormattingProvider": true,
+            "completionProvider": { "resolveProvider": false },
+            "signatureHelpProvider": { "triggerCharacters": ["(", ","] }
+        },
+        "serverInfo": { "name": "single-lsp", "version": env!("CARGO_PKG_VERSION") }
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn spec(name: &str, exts: &[&str]) -> LspServerSpec {
+        LspServerSpec {
+            name: name.to_string(),
+            command: name.to_string(),
+            args: Vec::new(),
+            extensions: exts.iter().map(|e| e.to_string()).collect(),
+            enabled: true,
+        }
+    }
+
+    #[test]
+    fn routes_by_extension() {
+        let router = Router::from_registry(vec![
+            spec("rust-analyzer", &[".rs"]),
+            spec("pyright", &[".py", ".pyi"]),
+        ]);
+        assert_eq!(router.route("file:///project/src/main.rs").unwrap().name, "rust-analyzer");
+        assert_eq!(router.route("file:///project/lib.pyi").unwrap().name, "pyright");
+        assert!(router.route("file:///project/README.md").is_none());
+    }
+
+    #[test]
+    fn ignores_disabled_presets() {
+        let mut disabled = spec("gopls", &[".go"]);
+        disabled.enabled = false;
+        let router = Router::from_registry(vec![disabled]);
+        assert!(router.route("file:///main.go").is_none());
+    }
+
+    #[test]
+    fn first_registered_preset_wins_for_a_shared_extension() {
+        let router = Router::from_registry(vec![spec("tsserver", &[".ts"]), spec("deno", &[".ts"])]);
+        assert_eq!(router.route("file:///a.ts").unwrap().name, "tsserver");
+    }
+
+    #[test]
+    fn routing_is_case_insensitive() {
+        let router = Router::from_registry(vec![spec("rust-analyzer", &[".RS"])]);
+        assert_eq!(router.route("file:///a.rs").unwrap().name, "rust-analyzer");
+        assert_eq!(router.route("file:///B.Rs").unwrap().name, "rust-analyzer");
+    }
+
+    #[test]
+    fn extension_of_handles_file_uri_and_multi_dot_names() {
+        assert_eq!(extension_of("file:///a/b.test.tsx").as_deref(), Some(".tsx"));
+        assert_eq!(extension_of("file:///a/noext"), None);
+    }
+
+    #[test]
+    fn extension_of_ignores_dots_outside_the_file_name() {
+        assert_eq!(extension_of("file:///my.project/Makefile"), None);
+        assert_eq!(extension_of("file:///my.project/src/main.rs").as_deref(), Some(".rs"));
+    }
+
+    #[test]
+    fn extension_of_treats_dotfiles_as_extensionless() {
+        assert_eq!(extension_of("file:///repo/.gitignore"), None);
+        assert_eq!(extension_of("file:///repo/.eslintrc.json").as_deref(), Some(".json"));
+    }
+
+    #[test]
+    fn extract_uri_reads_textdocument_uri() {
+        let message = json!({ "method": "textDocument/hover", "params": { "textDocument": { "uri": "file:///a.rs" } } });
+        assert_eq!(Multiplexer::extract_uri(&message).as_deref(), Some("file:///a.rs"));
+    }
+
+    #[test]
+    fn extract_uri_falls_back_to_a_bare_params_uri() {
+        let message = json!({ "method": "textDocument/documentColor", "params": { "uri": "file:///a.rs" } });
+        assert_eq!(Multiplexer::extract_uri(&message).as_deref(), Some("file:///a.rs"));
+    }
+
+    #[test]
+    fn extract_uri_returns_none_when_absent() {
+        let message = json!({ "method": "initialize", "params": {} });
+        assert!(Multiplexer::extract_uri(&message).is_none());
+    }
+
+    #[test]
+    fn answers_initialize_itself_and_remembers_the_params() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let multiplexer = Multiplexer::new(Router::from_registry(Vec::new()), tx);
+        let params = json!({ "rootUri": "file:///project", "capabilities": {} });
+        multiplexer
+            .handle_client_message(json!({ "jsonrpc": "2.0", "id": 7, "method": "initialize", "params": params.clone() }))
+            .unwrap();
+
+        let reply = rx.try_recv().unwrap();
+        assert_eq!(reply["id"], json!(7));
+        assert_eq!(reply["result"]["serverInfo"]["name"], json!("single-lsp"));
+        assert_eq!(*multiplexer.client_init_params.lock().unwrap(), Some(params));
+    }
+
+    #[test]
+    fn answers_unroutable_requests_with_an_error_instead_of_hanging() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let multiplexer = Multiplexer::new(Router::from_registry(vec![spec("rust-analyzer", &[".rs"])]), tx);
+
+        // A request for an extension no preset covers.
+        multiplexer
+            .handle_client_message(json!({
+                "jsonrpc": "2.0", "id": 1, "method": "textDocument/hover",
+                "params": { "textDocument": { "uri": "file:///a.md" } }
+            }))
+            .unwrap();
+        let reply = rx.try_recv().unwrap();
+        assert_eq!(reply["id"], json!(1));
+        assert_eq!(reply["error"]["code"], json!(METHOD_NOT_FOUND));
+
+        // A request with no document to route on at all.
+        multiplexer
+            .handle_client_message(json!({ "jsonrpc": "2.0", "id": 2, "method": "workspace/symbol", "params": {} }))
+            .unwrap();
+        assert_eq!(rx.try_recv().unwrap()["id"], json!(2));
+
+        // The matching notification is dropped silently — nothing to answer.
+        multiplexer
+            .handle_client_message(json!({ "jsonrpc": "2.0", "method": "$/cancelRequest", "params": { "id": 2 } }))
+            .unwrap();
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn answers_shutdown_even_with_no_backends_running() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let multiplexer = Multiplexer::new(Router::from_registry(Vec::new()), tx);
+        multiplexer
+            .handle_client_message(json!({ "jsonrpc": "2.0", "id": 9, "method": "shutdown" }))
+            .unwrap();
+        let reply = rx.try_recv().unwrap();
+        assert_eq!(reply["id"], json!(9));
+        assert_eq!(reply["result"], Value::Null);
+    }
+
+    #[test]
+    fn routes_a_client_response_back_to_the_backend_that_asked() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let multiplexer = Multiplexer::new(Router::from_registry(Vec::new()), tx);
+        multiplexer
+            .pending_server
+            .lock()
+            .unwrap()
+            .insert(42, (json!("ra-1"), "rust-analyzer".to_string()));
+
+        // No backend is actually running, so the send fails silently — what
+        // matters is that the pending entry was consumed by the right route
+        // rather than the response being dropped as unroutable.
+        multiplexer
+            .handle_client_message(json!({ "jsonrpc": "2.0", "id": 42, "result": Value::Null }))
+            .unwrap();
+        assert!(multiplexer.pending_server.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn retiring_a_backend_fails_its_outstanding_requests() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let multiplexer = Multiplexer::new(Router::from_registry(Vec::new()), tx);
+        multiplexer
+            .pending
+            .lock()
+            .unwrap()
+            .insert(1, (json!(100), "rust-analyzer".to_string()));
+        multiplexer
+            .pending
+            .lock()
+            .unwrap()
+            .insert(2, (json!(200), "pyright".to_string()));
+        multiplexer
+            .uri_to_backend
+            .lock()
+            .unwrap()
+            .insert("file:///a.rs".to_string(), "rust-analyzer".to_string());
+
+        multiplexer.retire_backend("rust-analyzer");
+
+        let reply = rx.try_recv().unwrap();
+        assert_eq!(reply["id"], json!(100));
+        assert_eq!(reply["error"]["code"], json!(INTERNAL_ERROR));
+        assert!(rx.try_recv().is_err(), "pyright's request must not be failed");
+        assert!(multiplexer.uri_to_backend.lock().unwrap().is_empty());
+        assert!(multiplexer.pending.lock().unwrap().contains_key(&2));
+    }
+
+    /// A stand-in language server: it emits one notification and responses for
+    /// a spread of ids, so whichever id the proxy happened to assign is
+    /// covered. Both sleeps matter — the first lets the caller register its
+    /// pending request before any reply can arrive (a real server cannot
+    /// answer a request it has not received yet, so only a canned fake needs
+    /// this), and the trailing one keeps the child's stdin readable so the
+    /// proxy's writes do not hit a broken pipe.
+    #[cfg(unix)]
+    fn fake_backend(name: &str, extension: &str, marker: &str) -> LspServerSpec {
+        let mut payload = String::new();
+        let mut frame = |message: Value| {
+            let body = serde_json::to_string(&message).unwrap();
+            payload.push_str(&format!("Content-Length: {}\r\n\r\n{body}", body.len()));
+        };
+        frame(json!({ "jsonrpc": "2.0", "method": "window/logMessage", "params": { "type": 3, "message": marker } }));
+        for id in 1..=5 {
+            frame(json!({ "jsonrpc": "2.0", "id": id, "result": marker }));
+        }
+        LspServerSpec {
+            name: name.to_string(),
+            command: "sh".to_string(),
+            args: vec!["-c".to_string(), format!("sleep 1; printf %s '{payload}'; sleep 5")],
+            extensions: vec![extension.to_string()],
+            enabled: true,
+        }
+    }
+
+    /// The headline scenario: a Rust file and a Python file open at once in
+    /// one process, each answered by its own backend.
+    ///
+    /// Both fakes reply to *every* id in the same range, including the one the
+    /// other backend owns, so this also pins down the ownership check in
+    /// `read_from_backend`: without it, whichever backend spoke first would
+    /// consume the other's pending entry and hand the client a response from
+    /// the wrong language server.
+    #[cfg(unix)]
+    #[test]
+    fn keeps_two_languages_alive_at_once_without_crossing_their_replies() {
+        use std::time::{Duration, Instant};
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let router = Router::from_registry(vec![
+            fake_backend("rs-fake", ".rs", "rs"),
+            fake_backend("py-fake", ".py", "py"),
+        ]);
+        let multiplexer = Multiplexer::new(router, tx);
+
+        for (id, uri) in [(10, "file:///project/a.rs"), (20, "file:///project/b.py")] {
+            multiplexer
+                .handle_client_message(json!({
+                    "jsonrpc": "2.0", "id": id, "method": "textDocument/hover",
+                    "params": { "textDocument": { "uri": uri } }
+                }))
+                .unwrap();
+        }
+        assert_eq!(multiplexer.backends.lock().unwrap().len(), 2, "one backend per language");
+
+        let mut responses: HashMap<i64, String> = HashMap::new();
+        let mut notifications = 0;
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while (responses.len() < 2 || notifications < 2) && Instant::now() < deadline {
+            let Ok(message) = rx.recv_timeout(Duration::from_millis(250)) else {
+                continue;
+            };
+            if message.get("method").is_some() {
+                notifications += 1;
+            } else {
+                let id = message["id"].as_i64().expect("response carries the client's own id");
+                let result = message["result"].as_str().expect("fake replies with a marker").to_string();
+                assert!(responses.insert(id, result).is_none(), "one response per request");
+            }
+        }
+
+        assert_eq!(responses.get(&10).map(String::as_str), Some("rs"));
+        assert_eq!(responses.get(&20).map(String::as_str), Some("py"));
+        assert_eq!(notifications, 2, "each backend's notification is forwarded as-is");
+        // Responses to the proxy's own `initialize` handshake, and to ids no
+        // backend owns, must not reach the client.
+        assert_eq!(responses.len(), 2);
+    }
+
+    /// A second document in an already-open language reuses the running
+    /// backend rather than spawning a second copy of it.
+    #[cfg(unix)]
+    #[test]
+    fn reuses_one_backend_for_several_documents_of_the_same_language() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let multiplexer = Multiplexer::new(Router::from_registry(vec![fake_backend("rs-fake", ".rs", "rs")]), tx);
+
+        for uri in ["file:///a.rs", "file:///b.rs"] {
+            multiplexer
+                .handle_client_message(json!({
+                    "jsonrpc": "2.0", "method": "textDocument/didOpen",
+                    "params": { "textDocument": { "uri": uri } }
+                }))
+                .unwrap();
+        }
+
+        assert_eq!(multiplexer.backends.lock().unwrap().len(), 1);
+        assert_eq!(multiplexer.uri_to_backend.lock().unwrap().len(), 2);
+    }
+
+    /// The whole design rests on `Arc<Multiplexer>` being movable into a
+    /// backend reader thread; this fails to compile if a field stops being
+    /// `Sync` (an unwrapped `mpsc::Sender` field, notably, is not).
+    #[test]
+    fn multiplexer_is_shareable_across_threads() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<Multiplexer>();
+        assert_send_sync::<Arc<Multiplexer>>();
+    }
+}
