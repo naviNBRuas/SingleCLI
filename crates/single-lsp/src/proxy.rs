@@ -22,10 +22,12 @@
 //! time rather than leaving it to be rediscovered.
 //!
 //! No lock in this type is ever held while acquiring another *except*
-//! `backends`, which may be held while taking `next_id` or
-//! `client_init_params`. Both are leaf locks — acquired, used and released
+//! `backends`, which may be held while taking `next_id`, `client_init_params`
+//! or `live_readers`. Those are leaf locks — acquired, used and released
 //! within a single expression, never wrapping another acquisition — so no
-//! cycle exists and the design is deadlock-free.
+//! cycle exists and the design is deadlock-free. In particular shutdown
+//! releases `backends` before waiting on `readers_drained`, because the reader
+//! threads it is waiting for take `backends` on their way out.
 
 use crate::framing::{read_message, write_message};
 use anyhow::{Context, Result};
@@ -35,45 +37,66 @@ use std::collections::HashMap;
 use std::io::BufReader;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::mpsc::Sender;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::Duration;
 
 pub struct Router {
+    by_file_name: HashMap<String, LspServerSpec>,
     by_extension: HashMap<String, LspServerSpec>,
 }
 
 impl Router {
     pub fn from_registry(specs: Vec<LspServerSpec>) -> Self {
+        let mut by_file_name = HashMap::new();
         let mut by_extension = HashMap::new();
         for spec in specs.into_iter().filter(|s| s.enabled) {
             for ext in &spec.extensions {
-                // First registered preset for a given extension wins; SingleCLI's
+                // The registry keys some presets by an exact file name rather
+                // than by suffix — `Dockerfile`, `CMakeLists.txt`, `Justfile`,
+                // `meson.build`, `nginx.conf`, `docker-compose.yml`. A leading
+                // dot is what tells the two kinds of key apart.
+                let table = if ext.starts_with('.') {
+                    &mut by_extension
+                } else {
+                    &mut by_file_name
+                };
+                // First registered preset for a given key wins; SingleCLI's
                 // own registry is the source of truth for which preset is
                 // "the" handler for an extension, same as `single lsp list`
                 // shows only one row per extension in practice.
-                by_extension
-                    .entry(ext.to_ascii_lowercase())
-                    .or_insert_with(|| spec.clone());
+                table.entry(ext.to_ascii_lowercase()).or_insert_with(|| spec.clone());
             }
         }
-        Self { by_extension }
+        Self {
+            by_file_name,
+            by_extension,
+        }
     }
 
     pub fn route(&self, uri: &str) -> Option<&LspServerSpec> {
-        let ext = extension_of(uri)?;
-        self.by_extension.get(&ext)
+        // An exact file name is the more specific match, so it is tried first:
+        // `docker-compose.yml` is a compose file before it is a generic `.yml`.
+        if let Some(spec) = self.by_file_name.get(&file_name_of(uri).to_ascii_lowercase()) {
+            return Some(spec);
+        }
+        self.by_extension.get(&extension_of(uri)?)
+    }
+}
+
+/// The last path segment of `uri` — the file's own name. Only this segment can
+/// carry an extension; a dot in a *directory* name is not one.
+fn file_name_of(uri: &str) -> &str {
+    let path = uri.strip_prefix("file://").unwrap_or(uri);
+    match path.rfind('/') {
+        Some(slash) => &path[slash + 1..],
+        None => path,
     }
 }
 
 /// The extension of the last path segment of `uri`, lowercased and including
 /// the leading dot. Leading-dot names (`.gitignore`) count as extensionless.
 fn extension_of(uri: &str) -> Option<String> {
-    let path = uri.strip_prefix("file://").unwrap_or(uri);
-    // Only the final segment can carry an extension — a dot in a *directory*
-    // name (`file:///my.project/Makefile`) is not one.
-    let name = match path.rfind('/') {
-        Some(slash) => &path[slash + 1..],
-        None => path,
-    };
+    let name = file_name_of(uri);
     let dot = name.rfind('.')?;
     if dot == 0 || dot + 1 == name.len() {
         return None;
@@ -106,9 +129,18 @@ pub struct Multiplexer {
     /// The client's `initialize` params, replayed to every backend we spawn so
     /// each one learns the workspace root it is supposed to index.
     client_init_params: Mutex<Option<Value>>,
+    /// How many backend reader threads are still running and could still put a
+    /// message on `client_out`. Paired with `readers_drained` so shutdown can
+    /// wait for them to go quiet — see `close_client_output`.
+    live_readers: Mutex<usize>,
+    readers_drained: Condvar,
     /// The single funnel to the writer thread — see the module docs.
     client_out: Sender<Value>,
 }
+
+/// How long shutdown waits for backend reader threads to finish forwarding
+/// before giving up on them and closing client output anyway.
+const READER_DRAIN_TIMEOUT: Duration = Duration::from_secs(3);
 
 impl Multiplexer {
     pub fn new(router: Router, client_out: Sender<Value>) -> Arc<Self> {
@@ -120,6 +152,8 @@ impl Multiplexer {
             pending: Mutex::new(HashMap::new()),
             pending_server: Mutex::new(HashMap::new()),
             client_init_params: Mutex::new(None),
+            live_readers: Mutex::new(0),
+            readers_drained: Condvar::new(),
             client_out,
         })
     }
@@ -144,7 +178,29 @@ impl Multiplexer {
     /// unambiguous as the end-of-output sentinel. It goes through the same
     /// `Sender` as every other message, so mpsc's per-sender FIFO ordering
     /// guarantees it is dequeued last.
+    ///
+    /// The sentinel alone would only narrow the loss window, not close it: a
+    /// backend reader thread can still enqueue a message *after* it and have
+    /// the writer drop it. So this first drops every backend's stdin — giving
+    /// each language server EOF, the second exit signal after the `exit`
+    /// notification already broadcast — and then waits for every reader thread
+    /// to finish. A reader decrements `live_readers` only after its last send,
+    /// so observing zero means nothing more can be enqueued and the sentinel
+    /// really is last.
+    ///
+    /// The wait is bounded rather than a `JoinHandle::join`: a language server
+    /// that ignores both `exit` and stdin EOF would otherwise hang the proxy
+    /// forever on shutdown, turning a dropped message into a stuck process.
+    /// On timeout we fall back to the sentinel-only behaviour.
     pub fn close_client_output(&self) {
+        // Not held across the wait below — `retire_backend` takes this lock.
+        self.backends.lock().unwrap().clear();
+
+        let live = self.live_readers.lock().unwrap();
+        let _ = self
+            .readers_drained
+            .wait_timeout_while(live, READER_DRAIN_TIMEOUT, |live| *live > 0);
+
         self.send_to_client(Value::Null);
     }
 
@@ -217,6 +273,9 @@ impl Multiplexer {
 
         let this = self.clone();
         let backend_name = spec.name.clone();
+        // Counted before the thread exists, so shutdown can never observe zero
+        // live readers while one is still starting up.
+        *self.live_readers.lock().unwrap() += 1;
         std::thread::spawn(move || this.read_from_backend(backend_name, stdout));
         Ok(())
     }
@@ -278,6 +337,14 @@ impl Multiplexer {
             }
         }
         self.retire_backend(&backend_name);
+
+        // Strictly after every send this thread will ever make, so a shutdown
+        // that observes zero knows nothing more can reach `client_out`.
+        let mut live = self.live_readers.lock().unwrap();
+        *live -= 1;
+        if *live == 0 {
+            self.readers_drained.notify_all();
+        }
     }
 
     /// Cleans up after a backend that exited: forget it so the next document
@@ -510,6 +577,48 @@ mod tests {
         assert_eq!(router.route("file:///B.Rs").unwrap().name, "rust-analyzer");
     }
 
+    /// The registry keys several presets by exact file name rather than by
+    /// suffix, and a suffix-only router leaves those permanently unroutable.
+    #[test]
+    fn routes_files_named_exactly_like_a_preset_key() {
+        let router = Router::from_registry(vec![
+            spec("dockerfile", &["Dockerfile"]),
+            spec("nginx", &["nginx.conf"]),
+            spec("meson", &["meson.build"]),
+            spec("cmake", &["CMakeLists.txt", ".cmake"]),
+        ]);
+        assert_eq!(router.route("file:///app/Dockerfile").unwrap().name, "dockerfile");
+        assert_eq!(router.route("file:///etc/nginx.conf").unwrap().name, "nginx");
+        assert_eq!(router.route("file:///src/meson.build").unwrap().name, "meson");
+        // A preset can key on both a file name and a suffix.
+        assert_eq!(router.route("file:///CMakeLists.txt").unwrap().name, "cmake");
+        assert_eq!(router.route("file:///cmake/utils.cmake").unwrap().name, "cmake");
+    }
+
+    /// `docker-compose.yml` must reach the compose server, not whichever
+    /// generic `.yml` preset happens to be registered first.
+    #[test]
+    fn exact_file_name_beats_a_generic_extension() {
+        let router = Router::from_registry(vec![
+            spec("yaml", &[".yaml", ".yml"]),
+            spec("ansible", &[".yml", ".yaml"]),
+            spec("dockercompose", &["docker-compose.yml", "docker-compose.yaml"]),
+        ]);
+        assert_eq!(router.route("file:///p/docker-compose.yml").unwrap().name, "dockercompose");
+        assert_eq!(router.route("file:///p/docker-compose.yaml").unwrap().name, "dockercompose");
+        // Any other YAML still falls through to the generic preset.
+        assert_eq!(router.route("file:///p/playbook.yml").unwrap().name, "yaml");
+    }
+
+    #[test]
+    fn file_name_routing_is_case_insensitive_and_path_aware() {
+        let router = Router::from_registry(vec![spec("dockerfile", &["Dockerfile"])]);
+        assert_eq!(router.route("file:///app/dockerfile").unwrap().name, "dockerfile");
+        assert_eq!(router.route("file:///my.project/DOCKERFILE").unwrap().name, "dockerfile");
+        // A directory of that name is not a file of that name.
+        assert!(router.route("file:///Dockerfile/notes").is_none());
+    }
+
     #[test]
     fn extension_of_handles_file_uri_and_multi_dot_names() {
         assert_eq!(extension_of("file:///a/b.test.tsx").as_deref(), Some(".tsx"));
@@ -730,6 +839,48 @@ mod tests {
         // Responses to the proxy's own `initialize` handshake, and to ids no
         // backend owns, must not reach the client.
         assert_eq!(responses.len(), 2);
+    }
+
+    /// Shutdown must not outrun a backend that is still forwarding.
+    ///
+    /// The fake stays silent for a second and only then speaks, so the
+    /// end-of-output sentinel would be enqueued well ahead of its notification
+    /// if `close_client_output` did not wait for reader threads to drain — the
+    /// writer would hit the sentinel, break, and drop the message.
+    #[cfg(unix)]
+    #[test]
+    fn shutdown_waits_for_backend_readers_before_closing_client_output() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let body = serde_json::to_string(
+            &json!({ "jsonrpc": "2.0", "method": "window/logMessage", "params": { "type": 3, "message": "late" } }),
+        )
+        .unwrap();
+        let payload = format!("Content-Length: {}\r\n\r\n{body}", body.len());
+        let slow = LspServerSpec {
+            name: "slow-fake".to_string(),
+            command: "sh".to_string(),
+            // No trailing sleep: the backend exits right after speaking, so its
+            // reader thread finishes and the drain barrier can be satisfied.
+            args: vec!["-c".to_string(), format!("sleep 1; printf %s '{payload}'")],
+            extensions: vec![".rs".to_string()],
+            enabled: true,
+        };
+
+        let multiplexer = Multiplexer::new(Router::from_registry(vec![slow]), tx);
+        multiplexer
+            .handle_client_message(json!({
+                "jsonrpc": "2.0", "method": "textDocument/didOpen",
+                "params": { "textDocument": { "uri": "file:///a.rs" } }
+            }))
+            .unwrap();
+
+        multiplexer.close_client_output();
+
+        // Everything is already enqueued by the time the call returns.
+        let messages: Vec<Value> = rx.try_iter().collect();
+        assert_eq!(messages.len(), 2, "expected the notification and the sentinel: {messages:?}");
+        assert_eq!(messages[0]["method"], json!("window/logMessage"));
+        assert!(messages[1].is_null(), "the sentinel must be last");
     }
 
     /// A second document in an already-open language reuses the running
