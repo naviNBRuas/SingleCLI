@@ -65,10 +65,13 @@ These facts drove every decision below; they are not assumptions.
   directly; the token-saving path has to be *delegation* (Claude Code asks
   another agent/model to do a subtask via SingleCLI and gets the result
   back as a tool call), not backend-switching.
-- **`orchestrate-graph` does not exist** — only `orchestrate` (sequential
-  relay, each agent gets the previous agent's real output) and
-  `orchestrate-parallel` (independent parallel sub-tasks, no auto
-  decomposition, no auto-merge) are implemented.
+- **`orchestrate`, `orchestrate-parallel`, and `orchestrate-graph` are all
+  implemented** (`crates/single-runtime/src/orchestrate.rs` and
+  `orchestrate_graph.rs`, both wired through `Request::Orchestrate` /
+  `OrchestrateParallel` / `OrchestrateGraph` in `single-protocol`): sequential
+  relay, independent parallel sub-tasks (no auto-decomposition, no
+  auto-merge), and an explicit dependency graph with real cycle validation,
+  respectively.
 - **`single plugin sync` genuinely installs real Claude Code plugins**,
   running `claude plugin install <target>` inside the target home.
   Installation only — no marketplace discovery.
@@ -83,7 +86,6 @@ These facts drove every decision below; they are not assumptions.
   guidance; tuning is a fast-follow.
 - Making Claude Code itself speak a non-Anthropic model backend — not
   possible today (see ground truth above) and not attempted here.
-- `orchestrate-graph` — does not exist; not built as part of this spec.
 
 ## Design
 
@@ -115,10 +117,12 @@ planning):
 | `task_run` | `single task run` — delegate one prompt to one agent, synchronously |
 | `orchestrate_run` | `single orchestrate` — sequential relay across agents |
 | `orchestrate_parallel_run` | `single orchestrate-parallel` — independent parallel sub-tasks |
+| `orchestrate_graph_run` | `single orchestrate-graph` — explicit dependency graph across agents |
 | `agent_list` / `agent_inspect` | `single agent list`/`inspect` — what's available to delegate to |
-| `memory_query` / `memory_store` | `single memory` — shared memory store |
-| `note_leave` / `note_read` | same inbox as the gateway's `notes_*` tools |
-| `provider_list` | `single provider` — what's configured, for delegation decisions |
+| `memory_store` / `memory_search` | `single memory` — shared memory store |
+| `provider_configured_list` | `single provider` — what's actually configured, for delegation decisions |
+
+Note left out deliberately: notes (`notes_leave`/`notes_read`) are **not** duplicated here — `single-mcp`'s gateway already exposes that exact inbox (see ground truth above), and Claude Code has `single-mcp` configured regardless of `singlecli-mcp`, so a second copy of the same tool would just be redundant surface area.
 
 This is the mechanism for token-saving delegation: Claude Code calls
 `task_run` (or an orchestrate variant) to hand a subtask to a cheaper or
