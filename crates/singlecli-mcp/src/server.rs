@@ -255,6 +255,25 @@ impl SingleCliServer {
         self.send(Request::AgentInspect { name })
     }
 
+    fn worktree_merge_preview(&self, args: &Map<String, Value>) -> anyhow::Result<Value> {
+        let task_id = args
+            .get("task_id")
+            .and_then(Value::as_i64)
+            .ok_or_else(|| anyhow::anyhow!("missing required integer argument \"task_id\""))?;
+        self.send(Request::WorktreeMergePreview { task_id })
+    }
+
+    fn worktree_merge_apply(&self, args: &Map<String, Value>) -> anyhow::Result<Value> {
+        if let Some(response) = Self::permission_gate("worktree_merge_apply")? {
+            return Ok(response);
+        }
+        let task_id = args
+            .get("task_id")
+            .and_then(Value::as_i64)
+            .ok_or_else(|| anyhow::anyhow!("missing required integer argument \"task_id\""))?;
+        self.send(Request::WorktreeMergeApply { task_id })
+    }
+
     fn memory_store(&self, args: &Map<String, Value>) -> anyhow::Result<Value> {
         let title = Self::str_arg(args, "title")?.to_string();
         let content = Self::str_arg(args, "content")?.to_string();
@@ -344,7 +363,7 @@ impl ServerHandler for SingleCliServer {
             ),
             Tool::new(
                 "orchestrate_parallel_run",
-                "Runs several agents concurrently, each on its own explicit sub-task, each in its own git worktree. No automatic goal splitting — you supply each agent's task.",
+                "Runs several agents concurrently, each on its own explicit sub-task, each in its own git worktree. No automatic goal splitting — you supply each agent's task. Each task's worktree isn't merged back automatically — call worktree_merge_preview then worktree_merge_apply once you're satisfied with a task's result.",
                 schema(json!({
                     "type": "object",
                     "properties": {
@@ -363,7 +382,7 @@ impl ServerHandler for SingleCliServer {
             ),
             Tool::new(
                 "orchestrate_graph_run",
-                "Runs an explicit dependency graph of agent tasks: each node runs once its dependencies have finished, with real cycle validation.",
+                "Runs an explicit dependency graph of agent tasks: each node runs once its dependencies have finished, with real cycle validation. Each task's worktree isn't merged back automatically — call worktree_merge_preview then worktree_merge_apply once you're satisfied with a task's result.",
                 schema(json!({
                     "type": "object",
                     "properties": {
@@ -399,6 +418,26 @@ impl ServerHandler for SingleCliServer {
                 "agent_inspect",
                 "Details on one agent: detection, install method, capabilities.",
                 schema(json!({ "type": "object", "properties": { "name": { "type": "string" } }, "required": ["name"], "additionalProperties": false })),
+            ),
+            Tool::new(
+                "worktree_merge_preview",
+                "Shows the diff a worktree-isolated task's branch would bring in if merged into the repo it ran against — never merges. Call this before worktree_merge_apply.",
+                schema(json!({
+                    "type": "object",
+                    "properties": { "task_id": { "type": "integer", "description": "The task id returned by task_run/orchestrate_parallel_run/orchestrate_graph_run for a run started with use_worktree: true." } },
+                    "required": ["task_id"],
+                    "additionalProperties": false
+                })),
+            ),
+            Tool::new(
+                "worktree_merge_apply",
+                "Merges a worktree-isolated task's branch into the repo it ran against. Look at worktree_merge_preview's diff first — branches are never auto-merged.",
+                schema(json!({
+                    "type": "object",
+                    "properties": { "task_id": { "type": "integer" } },
+                    "required": ["task_id"],
+                    "additionalProperties": false
+                })),
             ),
             Tool::new(
                 "memory_store",
@@ -446,6 +485,8 @@ impl ServerHandler for SingleCliServer {
             "orchestrate_graph_run" => self.orchestrate_graph_run(arguments),
             "agent_list" => self.agent_list(),
             "agent_inspect" => self.agent_inspect(arguments),
+            "worktree_merge_preview" => self.worktree_merge_preview(arguments),
+            "worktree_merge_apply" => self.worktree_merge_apply(arguments),
             "memory_store" => self.memory_store(arguments),
             "memory_search" => self.memory_search(arguments),
             "provider_configured_list" => self.provider_configured_list(),
@@ -676,6 +717,27 @@ mod tests {
         let server = SingleCliServer::new().unwrap();
         let result = server.orchestrate_graph_run(&Map::new()).unwrap();
         assert_eq!(result["denied"], true);
+
+        std::env::remove_var("SINGLE_CONFIG_DIR");
+    }
+
+    #[test]
+    fn worktree_merge_apply_denied_by_permission_never_reaches_self_send() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("SINGLE_CONFIG_DIR", dir.path());
+        let dirs = single_core::SingleDirs::discover().unwrap();
+        single_core::permissions::save(&dirs.permissions_file(), &deny_rule("singlecli:worktree_merge_apply")).unwrap();
+
+        let server = SingleCliServer::new().unwrap();
+        // Deliberately empty args: worktree_merge_apply would normally
+        // fail immediately on the missing "task_id" via the
+        // as_i64()/ok_or_else check. Getting the denial JSON back instead
+        // proves the permission gate ran first, before any argument
+        // parsing or a call to self.send.
+        let result = server.worktree_merge_apply(&Map::new()).unwrap();
+        assert_eq!(result["denied"], true);
+        assert_eq!(result["tool"], "worktree_merge_apply");
 
         std::env::remove_var("SINGLE_CONFIG_DIR");
     }
