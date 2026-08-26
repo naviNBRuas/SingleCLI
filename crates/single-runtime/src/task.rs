@@ -924,15 +924,23 @@ fn execute(
     std::fs::create_dir_all(ctx.dirs.artifacts_dir())?;
     let live_output_path = ctx.dirs.task_live_output_path(id);
     let max_concurrency = ctx.registry.iter().find(|a| a.name == opts.agent).and_then(|a| a.max_concurrency);
-    let _slot_guard = acquire_agent_slot(opts.agent, max_concurrency);
-    let outcome = adapter.run_prompt(
-        &run_cwd,
-        &prompt,
-        &backend,
-        Some(&live_output_path),
-        opts.timeout,
-        cancel,
-    );
+    // Scoped tightly around the subprocess run only: `maybe_fail_over`
+    // below can recursively call `execute()` again on this same thread
+    // for the *same* agent (e.g. an opencode/acct-a -> opencode/acct-b
+    // fallback chain) — holding this guard any longer than the run
+    // itself would deadlock that recursive call forever waiting on a
+    // slot only this (blocked) thread could ever release.
+    let outcome = {
+        let _slot_guard = acquire_agent_slot(opts.agent, max_concurrency);
+        adapter.run_prompt(
+            &run_cwd,
+            &prompt,
+            &backend,
+            Some(&live_output_path),
+            opts.timeout,
+            cancel,
+        )
+    };
     // Left in place (not deleted here) so a task's live output stays
     // inspectable right after it finishes, not just while it's running —
     // an explicit `TaskCleanup{id}` removes it once the caller is done
@@ -1534,5 +1542,45 @@ mod tests {
         let _guard = acquire_agent_slot("test-agent-unlimited", None);
         // No assertion needed beyond "doesn't block/panic" — unlimited
         // means immediate return every time, proven by this test completing.
+    }
+
+    /// Regression test for the fallback-recursion self-deadlock: `execute()`
+    /// used to hold `_slot_guard` across the whole function body, including
+    /// `maybe_fail_over`'s recursive same-thread `execute()` call for the
+    /// next agent in a fallback chain. When that chain repeats the same
+    /// agent (e.g. opencode/acct-a -> opencode/acct-b, the natural way to
+    /// use account-fallback for the one agent with `max_concurrency` set),
+    /// the recursive call's `acquire_agent_slot` would block forever in
+    /// `cvar.wait()` waiting on a release only the same, now-permanently-
+    /// blocked thread could ever perform.
+    ///
+    /// This mirrors the fixed shape directly: acquire+drop the slot inside
+    /// a block (standing in for the scoped `{ let _slot_guard = ...; ... }`
+    /// around `adapter.run_prompt` in `execute()`), then acquire the SAME
+    /// agent's slot again on the SAME thread (standing in for
+    /// `maybe_fail_over`'s recursive `execute()` call reusing the agent).
+    /// Run on a background thread with a bounded `recv_timeout` so that if
+    /// this regresses, the test fails loudly instead of hanging the suite
+    /// forever the way the real bug would hang a task runtime thread.
+    #[test]
+    fn slot_released_before_reentrant_same_thread_call_does_not_deadlock() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            {
+                let _guard = acquire_agent_slot("test-agent-reentrant", Some(1));
+            } // guard dropped here, before any further same-thread work
+            // If the first guard were still held here (the pre-fix bug),
+            // this second acquire on the SAME thread would block forever,
+            // since nothing else could ever release the only outstanding slot.
+            let _guard2 = acquire_agent_slot("test-agent-reentrant", Some(1));
+            tx.send(()).unwrap();
+        });
+
+        rx.recv_timeout(Duration::from_secs(5)).expect(
+            "reentrant same-thread acquire_agent_slot call deadlocked - slot guard held too long",
+        );
     }
 }
