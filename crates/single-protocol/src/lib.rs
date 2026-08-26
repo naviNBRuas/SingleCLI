@@ -1131,6 +1131,12 @@ pub struct TaskRecord {
     /// field existed and never backfilled.
     #[serde(default)]
     pub workspace_id: String,
+    /// True if `single_core::ratelimit::looks_like_rate_limit` matched
+    /// this task's captured output. Checked unconditionally on every
+    /// non-zero-exit completion, regardless of `allow_fallback` — see
+    /// `task::execute`.
+    #[serde(default)]
+    pub rate_limited: bool,
 }
 
 /// One workspace (project) that at least one task has run against — the

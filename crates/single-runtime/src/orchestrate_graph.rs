@@ -425,6 +425,7 @@ mod tests {
             updated_at: String::new(),
             cwd: String::new(),
             workspace_id: String::new(),
+            rate_limited: false,
         }
     }
 }

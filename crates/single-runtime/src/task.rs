@@ -46,6 +46,7 @@ pub fn ensure_schema(conn: &Connection) -> Result<()> {
     // "(unknown workspace)" bucket rather than silently misattributing it.
     add_column_if_missing(conn, "tasks", "cwd", "TEXT NOT NULL DEFAULT ''")?;
     add_column_if_missing(conn, "tasks", "workspace_id", "TEXT NOT NULL DEFAULT ''")?;
+    add_column_if_missing(conn, "tasks", "rate_limited", "INTEGER NOT NULL DEFAULT 0")?;
     conn.execute(
         "CREATE TABLE IF NOT EXISTS workspaces (
             id TEXT PRIMARY KEY,
@@ -176,6 +177,7 @@ fn row_to_task(row: &rusqlite::Row) -> rusqlite::Result<TaskRecord> {
         updated_at: row.get("updated_at")?,
         cwd: row.get("cwd")?,
         workspace_id: row.get("workspace_id")?,
+        rate_limited: row.get::<_, i64>("rate_limited")? != 0,
     })
 }
 
@@ -292,6 +294,7 @@ pub fn record_conditionally_skipped(
         None,
         false,
         Some(summary),
+        false,
     )?;
     crate::state::record_event(conn, "task.cancelled", &format!("#{id} {summary}"))?;
     get(conn, id)?.context("task disappeared after being recorded as skipped")
@@ -307,11 +310,12 @@ fn finish(
     exit_code: Option<i32>,
     timed_out: bool,
     summary: Option<&str>,
+    rate_limited: bool,
 ) -> Result<()> {
     let now = chrono::Utc::now().to_rfc3339();
     conn.execute(
-        "UPDATE tasks SET status = ?1, worktree_path = ?2, artifact_path = ?3, exit_code = ?4, timed_out = ?5, summary = ?6, updated_at = ?7 WHERE id = ?8",
-        params![status_as_str(status), worktree_path, artifact_path, exit_code, timed_out as i64, summary, now, id],
+        "UPDATE tasks SET status = ?1, worktree_path = ?2, artifact_path = ?3, exit_code = ?4, timed_out = ?5, summary = ?6, updated_at = ?7, rate_limited = ?8 WHERE id = ?9",
+        params![status_as_str(status), worktree_path, artifact_path, exit_code, timed_out as i64, summary, now, rate_limited as i64, id],
     )?;
     Ok(())
 }
@@ -653,6 +657,7 @@ fn execute(
                 None,
                 false,
                 Some("not a git repository; --worktree requires one"),
+                false,
             )?;
             crate::state::record_event(
                 conn,
@@ -686,6 +691,7 @@ fn execute(
                 None,
                 false,
                 Some(&format!("worktree setup failed: {e:#}")),
+                false,
             )?;
             crate::state::record_event(
                 conn,
@@ -771,6 +777,7 @@ fn execute(
                     None,
                     false,
                     Some(&detail),
+                    false,
                 )?;
                 crate::state::record_event(conn, "task.failed", &format!("#{id} {detail}"))?;
                 remember_failure(
@@ -824,6 +831,7 @@ fn execute(
                             None,
                             false,
                             Some(&detail),
+                            false,
                         )?;
                         crate::state::record_event(
                             conn,
@@ -901,6 +909,8 @@ fn execute(
                 TaskStatus::Failed
             };
             let summary = summarize(&outcome.stdout, outcome.timed_out, outcome.exit_code);
+            let combined_output = format!("{}\n{}", outcome.stdout, outcome.stderr);
+            let rate_limited = single_core::ratelimit::looks_like_rate_limit(&combined_output);
             finish(
                 conn,
                 id,
@@ -910,6 +920,7 @@ fn execute(
                 outcome.exit_code,
                 outcome.timed_out,
                 Some(&summary),
+                rate_limited,
             )?;
             let event = if outcome.cancelled {
                 "task.cancelled"
@@ -934,6 +945,8 @@ fn execute(
             }
         }
         Err(e) => {
+            let error_text = format!("{e:#}");
+            let rate_limited = single_core::ratelimit::looks_like_rate_limit(&error_text);
             finish(
                 conn,
                 id,
@@ -942,7 +955,8 @@ fn execute(
                 None,
                 None,
                 false,
-                Some(&format!("{e:#}")),
+                Some(&error_text),
+                rate_limited,
             )?;
             crate::state::record_event(conn, "task.failed", &format!("#{id} {e:#}"))?;
             remember_failure(
@@ -1179,6 +1193,28 @@ mod tests {
         let task = get(&conn, id).unwrap().unwrap();
         assert_eq!(task.status, TaskStatus::Created);
         assert_eq!(task.agent, "claude");
+    }
+
+    #[test]
+    fn rate_limited_flag_is_set_when_output_matches_a_known_signal() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = Connection::open_in_memory().unwrap();
+        ensure_schema(&conn).unwrap();
+        let id = create(&conn, "test task", "fake-agent", dir.path().to_str().unwrap(), "ws1").unwrap();
+        finish(&conn, id, TaskStatus::Failed, None, None, Some(1), false, Some("HTTP 429 Too Many Requests"), true).unwrap();
+        let task = get(&conn, id).unwrap().unwrap();
+        assert!(task.rate_limited);
+    }
+
+    #[test]
+    fn rate_limited_flag_defaults_false_for_an_ordinary_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = Connection::open_in_memory().unwrap();
+        ensure_schema(&conn).unwrap();
+        let id = create(&conn, "test task", "fake-agent", dir.path().to_str().unwrap(), "ws1").unwrap();
+        finish(&conn, id, TaskStatus::Failed, None, None, Some(1), false, Some("panic: index out of bounds"), false).unwrap();
+        let task = get(&conn, id).unwrap().unwrap();
+        assert!(!task.rate_limited);
     }
 
     #[test]
