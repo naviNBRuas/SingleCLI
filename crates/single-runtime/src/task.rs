@@ -314,7 +314,7 @@ fn create(conn: &Connection, description: &str, agent: &str, cwd: &str, workspac
 /// resolves `cwd`'s stable workspace identity (survives the project
 /// directory moving — see `stable_workspace_id`'s doc comment) and
 /// records/refreshes that workspace's last-known display path.
-fn create_for_cwd(conn: &Connection, description: &str, agent: &str, cwd: &Path) -> Result<i64> {
+pub(crate) fn create_for_cwd(conn: &Connection, description: &str, agent: &str, cwd: &Path) -> Result<i64> {
     let workspace_id = single_core::project_context::stable_workspace_id(cwd);
     let display_path = single_core::project_context::resolve(cwd).repo_root.unwrap_or_else(|| cwd.display().to_string());
     let name = single_core::project_context::workspace_display_name(&display_path);

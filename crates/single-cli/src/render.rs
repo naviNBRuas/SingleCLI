@@ -494,6 +494,19 @@ fn print_data(data: ResponseData) {
                 }
             }
         }
+        ResponseData::WorktreeDiff(diff) => {
+            if diff.is_empty() {
+                println!("(no differences — branch has nothing new to merge)");
+            } else {
+                println!("{diff}");
+            }
+        }
+        ResponseData::WorktreeMerged(result) => {
+            println!("Merged {} into the current branch.", result.branch);
+            if !result.output.trim().is_empty() {
+                println!("{}", result.output.trim());
+            }
+        }
         ResponseData::ProviderKeys(keys) => {
             if keys.is_empty() {
                 println!("(no labeled keys for this provider)");

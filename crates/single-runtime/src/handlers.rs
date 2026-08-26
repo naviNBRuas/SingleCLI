@@ -536,6 +536,42 @@ fn dispatch(
             crate::task::cleanup(&conn, ctx, id)?;
             Ok(ResponseData::Empty)
         }
+        Request::WorktreeMergePreview { task_id } => {
+            let conn = task_db(ctx)?;
+            let task = crate::task::get(&conn, task_id)?
+                .ok_or_else(|| anyhow::anyhow!("no such task: #{task_id}"))?;
+            let repo_root = single_core::project_context::resolve(std::path::Path::new(&task.cwd))
+                .repo_root
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "task #{task_id}'s original cwd '{}' is not inside a git repository",
+                        task.cwd
+                    )
+                })?;
+            let branch = format!("single/task-{task_id}");
+            let diff_output = single_core::worktree::diff(std::path::Path::new(&repo_root), &branch)?;
+            Ok(ResponseData::WorktreeDiff(diff_output))
+        }
+        Request::WorktreeMergeApply { task_id } => {
+            let conn = task_db(ctx)?;
+            let task = crate::task::get(&conn, task_id)?
+                .ok_or_else(|| anyhow::anyhow!("no such task: #{task_id}"))?;
+            let repo_root = single_core::project_context::resolve(std::path::Path::new(&task.cwd))
+                .repo_root
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "task #{task_id}'s original cwd '{}' is not inside a git repository",
+                        task.cwd
+                    )
+                })?;
+            let branch = format!("single/task-{task_id}");
+            let output = single_core::worktree::merge(std::path::Path::new(&repo_root), &branch)?;
+            Ok(ResponseData::WorktreeMerged(single_protocol::WorktreeMergeResult {
+                task_id,
+                branch,
+                output,
+            }))
+        }
         Request::Orchestrate {
             goal,
             agents,
@@ -1826,5 +1862,60 @@ mod tests {
         assert!(!real_home.path().join(".claude").join("settings.json").exists());
 
         std::env::remove_var("HOME");
+    }
+
+    #[test]
+    fn worktree_merge_preview_then_apply_round_trips_a_real_worktree() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = test_ctx(dir.path());
+
+        let repo = tempfile::tempdir().unwrap();
+        let run = |args: &[&str]| {
+            let status = std::process::Command::new("git").current_dir(repo.path()).args(args).status().unwrap();
+            assert!(status.success(), "git {:?} failed", args);
+        };
+        run(&["init", "-q"]);
+        run(&["config", "user.email", "test@example.com"]);
+        run(&["config", "user.name", "Test"]);
+        std::fs::write(repo.path().join("README.md"), "hi").unwrap();
+        run(&["add", "."]);
+        run(&["commit", "-q", "-m", "initial"]);
+
+        let conn = crate::state::open(&ctx.dirs.db_path()).unwrap();
+        crate::task::ensure_schema(&conn).unwrap();
+        let task_id = crate::task::create_for_cwd(&conn, "test task", "claude", repo.path()).unwrap();
+
+        let worktree_path = tempfile::tempdir().unwrap().path().join(format!("task-{task_id}"));
+        let branch = format!("single/task-{task_id}");
+        single_core::worktree::add(repo.path(), &worktree_path, &branch).unwrap();
+        std::fs::write(worktree_path.join("new-file.txt"), "from the worktree").unwrap();
+        let run_in_worktree = |args: &[&str]| {
+            let status = std::process::Command::new("git").current_dir(&worktree_path).args(args).status().unwrap();
+            assert!(status.success(), "git {:?} failed", args);
+        };
+        run_in_worktree(&["add", "."]);
+        run_in_worktree(&["commit", "-q", "-m", "add new-file"]);
+
+        let preview = handle(&ctx, Request::WorktreeMergePreview { task_id });
+        let Response::Ok { data: ResponseData::WorktreeDiff(diff) } = preview else {
+            panic!("expected WorktreeDiff, got {preview:?}");
+        };
+        assert!(diff.contains("new-file.txt"));
+
+        let apply = handle(&ctx, Request::WorktreeMergeApply { task_id });
+        let Response::Ok { data: ResponseData::WorktreeMerged(result) } = apply else {
+            panic!("expected WorktreeMerged, got {apply:?}");
+        };
+        assert_eq!(result.task_id, task_id);
+        assert_eq!(result.branch, branch);
+        assert!(repo.path().join("new-file.txt").is_file());
+    }
+
+    #[test]
+    fn worktree_merge_preview_errors_for_an_unknown_task_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = test_ctx(dir.path());
+        let response = handle(&ctx, Request::WorktreeMergePreview { task_id: 999999 });
+        assert!(matches!(response, Response::Error { .. }));
     }
 }

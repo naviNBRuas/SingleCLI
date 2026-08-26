@@ -264,6 +264,19 @@ pub enum Request {
     TaskCleanup {
         id: i64,
     },
+    /// Shows the diff a worktree-isolated task's branch would bring in if
+    /// merged — never merges. See `single_core::worktree::diff`.
+    WorktreeMergePreview {
+        task_id: i64,
+    },
+    /// Merges a worktree-isolated task's branch into the repo it ran
+    /// against. Deliberately a separate request from
+    /// `WorktreeMergePreview` — a caller must have looked at the diff
+    /// first (`docs/architecture.md`: "branches are never auto-merged;
+    /// that stays a human decision").
+    WorktreeMergeApply {
+        task_id: i64,
+    },
     Orchestrate {
         goal: String,
         agents: Vec<String>,
@@ -665,6 +678,8 @@ pub enum ResponseData {
     /// such hook").
     TaskHookRemoved(usize),
     PluginSyncResults(Vec<PluginInstallResult>),
+    WorktreeDiff(String),
+    WorktreeMerged(WorktreeMergeResult),
     Empty,
 }
 
@@ -1397,6 +1412,13 @@ pub struct ProviderSyncResult {
     pub backup_path: Option<String>,
     pub applied: bool,
     pub detail: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorktreeMergeResult {
+    pub task_id: i64,
+    pub branch: String,
+    pub output: String,
 }
 
 /// One billing-provider registry entry (`single_core::billing`) — mirrors

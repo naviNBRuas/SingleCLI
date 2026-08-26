@@ -227,6 +227,11 @@ enum Command {
         #[command(subcommand)]
         action: ProviderCommand,
     },
+    /// Assisted (never automatic) git worktree merge-back for a worktree-isolated task.
+    Worktree {
+        #[command(subcommand)]
+        action: WorktreeCommand,
+    },
     /// Real $ spend across connected providers (from billing admin keys)
     /// plus local run stats for every other agent.
     Usage {
@@ -925,6 +930,18 @@ enum ProviderCommand {
     SetBillingKey {
         provider: String,
         value: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum WorktreeCommand {
+    /// Show the diff a task's worktree branch would bring in if merged — never merges.
+    Diff {
+        task_id: i64,
+    },
+    /// Merge a task's worktree branch into the repo it ran against.
+    Merge {
+        task_id: i64,
     },
 }
 
@@ -2283,6 +2300,16 @@ fn main() -> anyhow::Result<()> {
                     &socket_path,
                     Request::ProviderSetBillingKey { provider, value },
                 )?;
+                render::print(response, false);
+            }
+        },
+        Command::Worktree { action } => match action {
+            WorktreeCommand::Diff { task_id } => {
+                let response = client::send(&socket_path, Request::WorktreeMergePreview { task_id })?;
+                render::print(response, false);
+            }
+            WorktreeCommand::Merge { task_id } => {
+                let response = client::send(&socket_path, Request::WorktreeMergeApply { task_id })?;
                 render::print(response, false);
             }
         },
