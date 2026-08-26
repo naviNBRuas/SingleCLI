@@ -22,6 +22,55 @@ use single_agent_sdk::adapters::for_agent_with_custom;
 use single_protocol::{MemoryScope, MemorySource, TaskRecord, TaskStatus};
 use std::path::Path;
 use std::time::Duration;
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
+
+/// Per-agent-name counting semaphore, keyed the same way
+/// `handlers.rs::DISCOVERY_LOCKS` already keys its per-agent cache — one
+/// `(Mutex<u32>, Condvar)` pair per agent name, created on first use.
+/// Blocks the calling thread (not async — this whole module is
+/// thread-based, see `run_background`'s `std::thread::spawn`) until a
+/// slot is free, rather than failing the caller outright.
+static AGENT_SLOTS: OnceLock<Mutex<std::collections::HashMap<String, Arc<(Mutex<u32>, Condvar)>>>> = OnceLock::new();
+
+struct AgentSlotGuard {
+    slot: Option<Arc<(Mutex<u32>, Condvar)>>,
+}
+
+impl Drop for AgentSlotGuard {
+    fn drop(&mut self) {
+        if let Some(slot) = &self.slot {
+            let (lock, cvar) = &**slot;
+            let mut count = lock.lock().unwrap();
+            *count -= 1;
+            cvar.notify_one();
+        }
+    }
+}
+
+/// Blocks until a concurrency slot for `agent` is available, per its
+/// registry `max_concurrency` (`None` = unlimited, returns immediately
+/// with a no-op guard). See `AgentDefinition.max_concurrency`'s doc
+/// comment for why this exists (opencode's own SQLite session lock).
+fn acquire_agent_slot(agent: &str, max_concurrency: Option<u32>) -> AgentSlotGuard {
+    let Some(limit) = max_concurrency else {
+        return AgentSlotGuard { slot: None };
+    };
+    let registry = AGENT_SLOTS.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
+    let slot = {
+        let mut map = registry.lock().unwrap();
+        map.entry(agent.to_string())
+            .or_insert_with(|| Arc::new((Mutex::new(0u32), Condvar::new())))
+            .clone()
+    };
+    let (lock, cvar) = &*slot;
+    let mut count = lock.lock().unwrap();
+    while *count >= limit {
+        count = cvar.wait(count).unwrap();
+    }
+    *count += 1;
+    drop(count);
+    AgentSlotGuard { slot: Some(slot) }
+}
 
 pub fn ensure_schema(conn: &Connection) -> Result<()> {
     conn.execute(
@@ -874,6 +923,8 @@ fn execute(
 
     std::fs::create_dir_all(ctx.dirs.artifacts_dir())?;
     let live_output_path = ctx.dirs.task_live_output_path(id);
+    let max_concurrency = ctx.registry.iter().find(|a| a.name == opts.agent).and_then(|a| a.max_concurrency);
+    let _slot_guard = acquire_agent_slot(opts.agent, max_concurrency);
     let outcome = adapter.run_prompt(
         &run_cwd,
         &prompt,
@@ -1449,5 +1500,39 @@ mod tests {
         maybe_fail_over(&conn, &ctx, id, &opts, "error: file not found", false, None);
 
         assert_eq!(list(&conn).unwrap().len(), 1, "an ordinary failure must not trigger a follow-up task");
+    }
+
+    #[test]
+    fn acquire_agent_slot_serializes_when_limit_is_one() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        use std::sync::Arc as StdArc;
+
+        let concurrent_count = StdArc::new(AtomicU32::new(0));
+        let max_seen = StdArc::new(AtomicU32::new(0));
+
+        let handles: Vec<_> = (0..4)
+            .map(|_| {
+                let concurrent_count = concurrent_count.clone();
+                let max_seen = max_seen.clone();
+                std::thread::spawn(move || {
+                    let _guard = acquire_agent_slot("test-agent-serialize", Some(1));
+                    let now = concurrent_count.fetch_add(1, Ordering::SeqCst) + 1;
+                    max_seen.fetch_max(now, Ordering::SeqCst);
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                    concurrent_count.fetch_sub(1, Ordering::SeqCst);
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap();
+        }
+        assert_eq!(max_seen.load(Ordering::SeqCst), 1, "at most 1 concurrent run should ever have been observed");
+    }
+
+    #[test]
+    fn acquire_agent_slot_is_a_noop_when_unlimited() {
+        let _guard = acquire_agent_slot("test-agent-unlimited", None);
+        // No assertion needed beyond "doesn't block/panic" — unlimited
+        // means immediate return every time, proven by this test completing.
     }
 }
