@@ -1015,6 +1015,7 @@ git commit -m "feat: add worktree diff/merge — assists, never automates, the m
 
 **Files:**
 - Modify: `crates/single-protocol/src/lib.rs` (new `Request`/`ResponseData` variants, new `WorktreeMergeResult` struct)
+- Modify: `crates/single-runtime/src/task.rs:266` (`create_for_cwd` visibility)
 - Modify: `crates/single-runtime/src/handlers.rs` (dispatch arms)
 - Modify: `crates/single-cli/src/main.rs` (new `worktree` subcommand)
 - Modify: `crates/single-cli/src/render.rs` (render the two new `ResponseData` variants)
@@ -1097,6 +1098,22 @@ In `crates/single-runtime/src/handlers.rs`'s `dispatch` function, add two new ar
 
 Check the exact visibility of `crate::task::get`/`crate::task::ensure_schema` first (`grep -n "^pub fn get\b\|^pub fn ensure_schema" crates/single-runtime/src/task.rs`) — both should already be `pub(crate)` or `pub` since `handlers.rs` calls into `task.rs` elsewhere in this same file (e.g. its existing `Request::TaskGet`-style arms, find one with `grep -n "task::get" crates/single-runtime/src/handlers.rs` to copy its exact calling convention if it differs from what's shown above).
 
+- [ ] **Step 3b: Make `create_for_cwd` visible to `handlers.rs`'s test module**
+
+In `crates/single-runtime/src/task.rs`, change:
+
+```rust
+fn create_for_cwd(conn: &Connection, description: &str, agent: &str, cwd: &Path) -> Result<i64> {
+```
+
+to:
+
+```rust
+pub(crate) fn create_for_cwd(conn: &Connection, description: &str, agent: &str, cwd: &Path) -> Result<i64> {
+```
+
+(needed so Step 7's test, in `handlers.rs`, can seed a real `TaskRecord` row without going through the heavyweight `task::run`/`run_background` path, which spawns a real agent subprocess.)
+
 - [ ] **Step 4: Add the CLI subcommand**
 
 In `crates/single-cli/src/main.rs`, find the `enum` that already defines `worktree`-adjacent commands or add a new top-level command. Search first: `grep -n "enum.*Command\b" crates/single-cli/src/main.rs | head -20` to find the right enum to extend (or confirm no `WorktreeCommand` exists yet, in which case add a new top-level `Worktree(WorktreeCommand)` variant to the main CLI enum the same way `Provider(ProviderCommand)` is wired — find that wiring with `grep -n "Provider(ProviderCommand)\|Commands::Provider" crates/single-cli/src/main.rs` and mirror its exact pattern).
@@ -1150,26 +1167,82 @@ In `crates/single-cli/src/render.rs`'s `print_data` function, add two new match 
         }
 ```
 
-- [ ] **Step 6: Build and manually verify end-to-end**
+- [ ] **Step 6: Build**
 
 Run: `cargo build --workspace 2>&1 | tail -30` — expected clean.
 
-Run a real end-to-end check against a scratch repo:
-```bash
-mkdir -p /tmp/worktree-merge-manual-test && cd /tmp/worktree-merge-manual-test
-git init -q && git config user.email t@t.com && git config user.name T && echo hi > README.md && git add . && git commit -q -m initial
-cargo run -p single-cli -- task run "echo done > proof.txt && git add proof.txt && git commit -m proof" --agent claude --use-worktree --cwd /tmp/worktree-merge-manual-test
-# note the printed task id, then:
-cargo run -p single-cli -- worktree diff <task-id>
-cargo run -p single-cli -- worktree merge <task-id>
-ls /tmp/worktree-merge-manual-test/proof.txt  # should now exist on the main branch
+- [ ] **Step 7: Write a real dispatch-level test**
+
+Add to `crates/single-runtime/src/handlers.rs`'s existing `#[cfg(test)] mod tests` block (the same block `provider_sync_real_home_writes_the_actual_home` lives in, shown above — reuse its exact `test_ctx` helper):
+
+```rust
+    #[test]
+    fn worktree_merge_preview_then_apply_round_trips_a_real_worktree() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = test_ctx(dir.path());
+
+        let repo = tempfile::tempdir().unwrap();
+        let run = |args: &[&str]| {
+            let status = std::process::Command::new("git").current_dir(repo.path()).args(args).status().unwrap();
+            assert!(status.success(), "git {:?} failed", args);
+        };
+        run(&["init", "-q"]);
+        run(&["config", "user.email", "test@example.com"]);
+        run(&["config", "user.name", "Test"]);
+        std::fs::write(repo.path().join("README.md"), "hi").unwrap();
+        run(&["add", "."]);
+        run(&["commit", "-q", "-m", "initial"]);
+
+        let conn = crate::state::open(&ctx.dirs.db_path()).unwrap();
+        crate::task::ensure_schema(&conn).unwrap();
+        let task_id = crate::task::create_for_cwd(&conn, "test task", "claude", repo.path()).unwrap();
+
+        let worktree_path = tempfile::tempdir().unwrap().path().join(format!("task-{task_id}"));
+        let branch = format!("single/task-{task_id}");
+        single_core::worktree::add(repo.path(), &worktree_path, &branch).unwrap();
+        std::fs::write(worktree_path.join("new-file.txt"), "from the worktree").unwrap();
+        let run_in_worktree = |args: &[&str]| {
+            let status = std::process::Command::new("git").current_dir(&worktree_path).args(args).status().unwrap();
+            assert!(status.success(), "git {:?} failed", args);
+        };
+        run_in_worktree(&["add", "."]);
+        run_in_worktree(&["commit", "-q", "-m", "add new-file"]);
+
+        let preview = handle(&ctx, Request::WorktreeMergePreview { task_id });
+        let Response::Ok { data: ResponseData::WorktreeDiff(diff) } = preview else {
+            panic!("expected WorktreeDiff, got {preview:?}");
+        };
+        assert!(diff.contains("new-file.txt"));
+
+        let apply = handle(&ctx, Request::WorktreeMergeApply { task_id });
+        let Response::Ok { data: ResponseData::WorktreeMerged(result) } = apply else {
+            panic!("expected WorktreeMerged, got {apply:?}");
+        };
+        assert_eq!(result.task_id, task_id);
+        assert_eq!(result.branch, branch);
+        assert!(repo.path().join("new-file.txt").is_file());
+    }
+
+    #[test]
+    fn worktree_merge_preview_errors_for_an_unknown_task_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = test_ctx(dir.path());
+        let response = handle(&ctx, Request::WorktreeMergePreview { task_id: 999999 });
+        assert!(matches!(response, Response::Error { .. }));
+    }
 ```
-(Skip this manual check if `claude` isn't authenticated/available in this environment — the automated tests in Task 5 already prove `diff`/`merge` work; this step is extra end-to-end confidence, not required for the task to be considered done, since it depends on an external agent CLI actually running successfully.)
 
-- [ ] **Step 7: Commit**
+(`Response`/`ResponseData` need `#[derive(Debug)]` for the `{data:?}` panic message to compile — check with `grep -n "derive.*Debug" crates/single-protocol/src/lib.rs` near the `Response`/`ResponseData` enum definitions; both should already derive `Debug` alongside their existing `Serialize`/`Deserialize` derives, matching every other enum in that file. If either doesn't, add `Debug` to its derive list.)
+
+- [ ] **Step 8: Run the tests**
+
+Run: `cargo test -p single-runtime worktree_merge -- --nocapture`
+Expected: both PASS.
+
+- [ ] **Step 9: Commit**
 
 ```bash
-git add crates/single-protocol/src/lib.rs crates/single-runtime/src/handlers.rs crates/single-cli/src/main.rs crates/single-cli/src/render.rs
+git add crates/single-protocol/src/lib.rs crates/single-runtime/src/task.rs crates/single-runtime/src/handlers.rs crates/single-cli/src/main.rs crates/single-cli/src/render.rs
 git commit -m "feat: add single worktree diff/merge commands"
 ```
 
