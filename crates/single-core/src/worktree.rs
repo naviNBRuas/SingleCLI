@@ -68,6 +68,48 @@ pub fn list(repo_root: &Path) -> Result<Vec<PathBuf>> {
         .collect())
 }
 
+/// Diffs `branch` against the repo's current `HEAD` (`git diff
+/// HEAD...branch`) — the same three-dot range a GitHub PR view shows,
+/// i.e. what actually landed on `branch` since it forked off, not
+/// polluted by anything that's happened on the base branch since. Never
+/// merges anything — see `merge` below, kept as a deliberately separate
+/// call so a caller looks before deciding.
+pub fn diff(repo_root: &Path, branch: &str) -> Result<String> {
+    let output = Command::new("git")
+        .current_dir(repo_root)
+        .args(["diff", &format!("HEAD...{branch}")])
+        .output()
+        .context("spawning git diff")?;
+    if !output.status.success() {
+        bail!("git diff failed: {}", String::from_utf8_lossy(&output.stderr));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// Merges `branch` into the repo's current `HEAD` (`git merge --no-ff
+/// branch`) — `--no-ff` always creates a merge commit, so the fact that
+/// this went through an isolated worktree stays visible in history
+/// rather than silently fast-forwarding. Per `docs/architecture.md`:
+/// "branches are never auto-merged; that stays a human decision" — this
+/// function performs the merge once a caller has explicitly decided to
+/// (see `diff` above, meant to be called first), it does not decide FOR
+/// the caller.
+pub fn merge(repo_root: &Path, branch: &str) -> Result<String> {
+    let output = Command::new("git")
+        .current_dir(repo_root)
+        .args(["merge", "--no-ff", branch, "-m", &format!("Merge branch '{branch}'")])
+        .output()
+        .context("spawning git merge")?;
+    if !output.status.success() {
+        bail!("git merge failed: {}", String::from_utf8_lossy(&output.stderr));
+    }
+    Ok(format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    ))
+}
+
 fn is_git_repo(path: &Path) -> bool {
     Command::new("git")
         .current_dir(path)
@@ -125,5 +167,49 @@ mod tests {
         let not_a_repo = tempfile::tempdir().unwrap();
         let worktree_path = tempfile::tempdir().unwrap().path().join("task-3");
         assert!(add(not_a_repo.path(), &worktree_path, "single/task-3").is_err());
+    }
+
+    #[test]
+    fn diff_shows_changes_made_on_the_worktree_branch() {
+        let repo = tempfile::tempdir().unwrap();
+        init_repo(repo.path());
+        let worktree_parent = tempfile::tempdir().unwrap();
+        let worktree_path = worktree_parent.path().join("task-diff");
+
+        add(repo.path(), &worktree_path, "single/task-diff").unwrap();
+        std::fs::write(worktree_path.join("new-file.txt"), "hello from the worktree").unwrap();
+        let status = Command::new("git").current_dir(&worktree_path).args(["add", "."]).status().unwrap();
+        assert!(status.success());
+        let status = Command::new("git").current_dir(&worktree_path).args(["commit", "-q", "-m", "add new-file"]).status().unwrap();
+        assert!(status.success());
+
+        let diff_output = diff(repo.path(), "single/task-diff").unwrap();
+        assert!(diff_output.contains("new-file.txt"));
+        assert!(diff_output.contains("hello from the worktree"));
+    }
+
+    #[test]
+    fn merge_brings_worktree_changes_into_the_main_branch() {
+        let repo = tempfile::tempdir().unwrap();
+        init_repo(repo.path());
+        let worktree_parent = tempfile::tempdir().unwrap();
+        let worktree_path = worktree_parent.path().join("task-merge");
+
+        add(repo.path(), &worktree_path, "single/task-merge").unwrap();
+        std::fs::write(worktree_path.join("merged-file.txt"), "merge me").unwrap();
+        let status = Command::new("git").current_dir(&worktree_path).args(["add", "."]).status().unwrap();
+        assert!(status.success());
+        let status = Command::new("git").current_dir(&worktree_path).args(["commit", "-q", "-m", "add merged-file"]).status().unwrap();
+        assert!(status.success());
+
+        merge(repo.path(), "single/task-merge").unwrap();
+        assert!(repo.path().join("merged-file.txt").is_file());
+    }
+
+    #[test]
+    fn diff_fails_for_a_nonexistent_branch() {
+        let repo = tempfile::tempdir().unwrap();
+        init_repo(repo.path());
+        assert!(diff(repo.path(), "no-such-branch").is_err());
     }
 }
