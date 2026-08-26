@@ -709,6 +709,9 @@ pub struct AgentInfo {
     pub install_method: InstallMethod,
     pub bootstrap_install: Option<BootstrapInstall>,
     pub unverified: bool,
+    /// See `HomeRequirement`'s doc comment.
+    pub home_requirement: HomeRequirement,
+    pub max_concurrency: Option<u32>,
     pub capabilities: CapabilityFlags,
     pub config_paths: Vec<String>,
     /// Free-text caveat surfaced in `doctor`/`agent inspect`, e.g. when an
@@ -763,6 +766,27 @@ pub struct BootstrapInstall {
     pub source: String,
 }
 
+/// Whether an agent needs `real_home: true` to authenticate, breaks under
+/// it, works either way, or nobody's confirmed it empirically yet.
+/// `Unverified` is the honest default — see `single_core::ratelimit`'s
+/// module doc for why this project only claims what it's directly
+/// checked. See `docs/superpowers/specs/2026-08-26-orchestration-lessons-design.md`
+/// for how the known values below were established.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HomeRequirement {
+    /// Breaks (fails to authenticate correctly) under `real_home: true`.
+    IsolatedOnly,
+    /// `real_home: true` is the only way this agent ever authenticates —
+    /// either structurally (its isolated home can never hold real
+    /// credentials by design) or empirically confirmed.
+    RealRequired,
+    /// Authenticates correctly either way.
+    Either,
+    /// Nobody has empirically confirmed either way yet.
+    Unverified,
+}
+
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
 pub struct CapabilityFlags {
     pub streaming: bool,
@@ -771,6 +795,14 @@ pub struct CapabilityFlags {
     pub tools: bool,
     pub sessions: bool,
     pub structured_output: bool,
+    /// False only for an adapter whose `run_prompt` falls through to
+    /// `single_agent_sdk::adapter`'s default-trait `bail!` (no
+    /// non-interactive mode exists at all, e.g. codebuff) — lets a caller
+    /// check this before dispatching instead of discovering it via a
+    /// failed `task_run` call. True for every adapter that overrides
+    /// `run_prompt`.
+    #[serde(default = "default_true")]
+    pub non_interactive_run: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

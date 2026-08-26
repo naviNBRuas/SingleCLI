@@ -15,7 +15,7 @@
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use single_protocol::{AgentInfo, BootstrapInstall, CapabilityFlags, InstallMethod};
+use single_protocol::{AgentInfo, BootstrapInstall, CapabilityFlags, HomeRequirement, InstallMethod};
 use std::path::Path;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -93,6 +93,8 @@ pub fn to_agent_definition(def: &CustomAgentFile) -> crate::registry::AgentDefin
         },
         bootstrap_install: def.install.as_ref().map(|i| BootstrapInstall { command: i.command.clone(), source: i.source.clone() }),
         unverified: true, // user-supplied, not independently verified by this project
+        home_requirement: HomeRequirement::Unverified,
+        max_concurrency: None,
         capabilities: CapabilityFlags {
             streaming: false,
             mcp: mcp_supported,
@@ -100,6 +102,7 @@ pub fn to_agent_definition(def: &CustomAgentFile) -> crate::registry::AgentDefin
             tools: run_supported,
             sessions: false,
             structured_output: false,
+            non_interactive_run: true,
         },
         config_paths: def.mcp.as_ref().map(|m| vec![m.config_path.clone()]).unwrap_or_default(),
         notes: Some("user-defined custom agent (~/.config/single/agents/*.toml) — not verified by SingleCLI itself".into()),
@@ -121,6 +124,8 @@ pub fn placeholder_agent_info(def: &CustomAgentFile) -> AgentInfo {
         install_method: agent_def.install_method,
         bootstrap_install: agent_def.bootstrap_install,
         unverified: agent_def.unverified,
+        home_requirement: agent_def.home_requirement,
+        max_concurrency: agent_def.max_concurrency,
         capabilities: agent_def.capabilities,
         config_paths: agent_def.config_paths,
         notes: agent_def.notes,

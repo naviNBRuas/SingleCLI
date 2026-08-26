@@ -1715,6 +1715,8 @@ fn to_agent_info(def: &AgentDefinition, ctx: &Context) -> AgentInfo {
         install_method: def.install_method.clone(),
         bootstrap_install: def.bootstrap_install.clone(),
         unverified: def.unverified,
+        home_requirement: def.home_requirement,
+        max_concurrency: def.max_concurrency,
         capabilities: def.capabilities,
         config_paths: def.config_paths.clone(),
         notes: def.notes.clone(),

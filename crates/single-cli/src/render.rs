@@ -77,13 +77,22 @@ fn print_data(data: ResponseData) {
                 );
             }
             println!(
-                "  capabilities: mcp={} lsp={} tools={} sessions={} streaming={} structured_output={}",
+                "  capabilities: mcp={} lsp={} tools={} sessions={} streaming={} structured_output={} non_interactive_run={}",
                 agent.capabilities.mcp,
                 agent.capabilities.lsp,
                 agent.capabilities.tools,
                 agent.capabilities.sessions,
                 agent.capabilities.streaming,
-                agent.capabilities.structured_output
+                agent.capabilities.structured_output,
+                agent.capabilities.non_interactive_run
+            );
+            println!(
+                "  home_requirement: {:?}{}",
+                agent.home_requirement,
+                agent
+                    .max_concurrency
+                    .map(|n| format!(" (max_concurrency: {n})"))
+                    .unwrap_or_default()
             );
             if !agent.config_paths.is_empty() {
                 println!("  config:       {}", agent.config_paths.join(", "));

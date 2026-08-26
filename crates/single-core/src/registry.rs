@@ -9,7 +9,7 @@
 //! `docs/install-methods.md`.
 
 use serde::{Deserialize, Serialize};
-use single_protocol::{BootstrapInstall, CapabilityFlags, InstallMethod};
+use single_protocol::{BootstrapInstall, CapabilityFlags, HomeRequirement, InstallMethod};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentDefinition {
@@ -19,6 +19,14 @@ pub struct AgentDefinition {
     pub install_method: InstallMethod,
     pub bootstrap_install: Option<BootstrapInstall>,
     pub unverified: bool,
+    /// See `HomeRequirement`'s doc comment.
+    pub home_requirement: HomeRequirement,
+    /// `Some(n)` means at most `n` instances of this agent may run
+    /// concurrently (enforced in `single-runtime::task`'s spawn
+    /// entrypoint) — e.g. opencode's own session SQLite database takes
+    /// an exclusive lock that a second concurrent instance can't acquire.
+    /// `None` means no known limit.
+    pub max_concurrency: Option<u32>,
     pub capabilities: CapabilityFlags,
     /// Config file paths this adapter can read/write, relative to `$HOME`.
     pub config_paths: Vec<String>,
@@ -44,6 +52,8 @@ pub fn builtin_registry() -> Vec<AgentDefinition> {
                 source: "https://code.claude.com/docs/en/setup".into(),
             }),
             unverified: false,
+            home_requirement: HomeRequirement::Either,
+            max_concurrency: None,
             capabilities: CapabilityFlags {
                 streaming: true,
                 mcp: true,
@@ -51,6 +61,7 @@ pub fn builtin_registry() -> Vec<AgentDefinition> {
                 tools: true,
                 sessions: true, // resumable conversation history observed in ~/.claude/history.jsonl
                 structured_output: false,
+                non_interactive_run: true,
             },
             config_paths: vec![".claude.json".into(), ".claude/settings.json".into()],
             notes: None,
@@ -69,6 +80,8 @@ pub fn builtin_registry() -> Vec<AgentDefinition> {
                 source: "https://github.com/openai/codex/blob/main/README.md".into(),
             }),
             unverified: false,
+            home_requirement: HomeRequirement::IsolatedOnly,
+            max_concurrency: None,
             capabilities: CapabilityFlags {
                 streaming: true,
                 mcp: true, // observed [mcp_servers.*] tables in ~/.codex/config.toml
@@ -76,6 +89,7 @@ pub fn builtin_registry() -> Vec<AgentDefinition> {
                 tools: true,
                 sessions: true, // ~/.codex/sessions observed on disk
                 structured_output: true, // `codex exec` non-interactive mode observed via --help
+                non_interactive_run: true,
             },
             config_paths: vec![".codex/config.toml".into()],
             notes: None,
@@ -92,6 +106,8 @@ pub fn builtin_registry() -> Vec<AgentDefinition> {
                 source: "https://opencode.ai/docs/".into(),
             }),
             unverified: false,
+            home_requirement: HomeRequirement::RealRequired,
+            max_concurrency: Some(1),
             capabilities: CapabilityFlags {
                 streaming: true,
                 mcp: true, // observed "mcp" key in opencode.jsonc
@@ -99,6 +115,7 @@ pub fn builtin_registry() -> Vec<AgentDefinition> {
                 tools: true,
                 sessions: false,
                 structured_output: false,
+                non_interactive_run: true,
             },
             config_paths: vec![".config/opencode/opencode.jsonc".into()],
             notes: None,
@@ -117,6 +134,8 @@ pub fn builtin_registry() -> Vec<AgentDefinition> {
                 source: "https://antigravity.google/docs/cli/install".into(),
             }),
             unverified: false,
+            home_requirement: HomeRequirement::Unverified,
+            max_concurrency: None,
             capabilities: CapabilityFlags {
                 streaming: false, // not confirmed; no structured event/streaming flag observed in --help
                 mcp: false,       // no on-disk MCP config location found; unconfirmed
@@ -124,6 +143,7 @@ pub fn builtin_registry() -> Vec<AgentDefinition> {
                 tools: true,
                 sessions: true, // --continue/--conversation flags observed in --help
                 structured_output: false,
+                non_interactive_run: true,
             },
             config_paths: vec![], // no config directory found on this machine; adapter shells out to `agy` subcommands instead
             notes: None,
@@ -148,6 +168,8 @@ pub fn builtin_registry() -> Vec<AgentDefinition> {
                 source: "https://docs.perplexity.ai/docs/cli/overview".into(),
             }),
             unverified: false,
+            home_requirement: HomeRequirement::Unverified,
+            max_concurrency: None,
             capabilities: CapabilityFlags {
                 streaming: false,
                 mcp: false,
@@ -155,6 +177,7 @@ pub fn builtin_registry() -> Vec<AgentDefinition> {
                 tools: true, // usable as a search tool, not as an agent session
                 sessions: false,
                 structured_output: true, // returns structured JSON per official docs
+                non_interactive_run: true,
             },
             config_paths: vec![],
             notes: Some(
@@ -180,6 +203,8 @@ pub fn builtin_registry() -> Vec<AgentDefinition> {
                 source: "https://cursor.com/docs/cli/installation".into(),
             }),
             unverified: false,
+            home_requirement: HomeRequirement::IsolatedOnly,
+            max_concurrency: None,
             capabilities: CapabilityFlags {
                 streaming: true, // --output-format stream-json observed in --help
                 mcp: true,       // observed real ~/.cursor/mcp.json (mcpServers map) on the reference machine
@@ -187,6 +212,7 @@ pub fn builtin_registry() -> Vec<AgentDefinition> {
                 tools: true,
                 sessions: true, // --resume/--continue/ls observed in --help
                 structured_output: true, // --output-format json|stream-json observed in --help
+                non_interactive_run: true,
             },
             config_paths: vec![".cursor/mcp.json".into()],
             notes: None,
@@ -203,6 +229,8 @@ pub fn builtin_registry() -> Vec<AgentDefinition> {
                 source: "https://aider.chat/docs/install.html".into(),
             }),
             unverified: false,
+            home_requirement: HomeRequirement::Unverified,
+            max_concurrency: None,
             capabilities: CapabilityFlags {
                 streaming: false,
                 mcp: false, // no mcp subcommand/flag found in `aider --help`; unconfirmed
@@ -210,6 +238,7 @@ pub fn builtin_registry() -> Vec<AgentDefinition> {
                 tools: true,
                 sessions: false,
                 structured_output: false,
+                non_interactive_run: true,
             },
             config_paths: vec![".aider.conf.yml".into()],
             notes: Some(
@@ -231,6 +260,8 @@ pub fn builtin_registry() -> Vec<AgentDefinition> {
                 source: "https://github.com/block/goose/blob/main/download_cli.sh".into(),
             }),
             unverified: false,
+            home_requirement: HomeRequirement::Unverified,
+            max_concurrency: None,
             capabilities: CapabilityFlags {
                 streaming: true, // --output-format stream-json observed in `goose run --help`
                 mcp: true,       // observed real ~/.config/goose/config.yaml (extensions map) on the reference machine
@@ -238,6 +269,7 @@ pub fn builtin_registry() -> Vec<AgentDefinition> {
                 tools: true,
                 sessions: true, // --resume/--session-id observed in `goose run --help`
                 structured_output: true, // --output-format json|stream-json observed in --help
+                non_interactive_run: true,
             },
             config_paths: vec![".config/goose/config.yaml".into()],
             notes: None,
@@ -259,6 +291,12 @@ pub fn builtin_registry() -> Vec<AgentDefinition> {
                 source: "https://docs.github.com/en/copilot/how-tos/copilot-cli/set-up-copilot-cli/install-copilot-cli".into(),
             }),
             unverified: false,
+            // Structural, not just empirical: agent_home.rs's
+            // strip_embedded_credential_fields always strips copilot's
+            // keyring pointer from its isolated home, so isolated auth is
+            // impossible by design — real_home:true is the only path.
+            home_requirement: HomeRequirement::RealRequired,
+            max_concurrency: None,
             capabilities: CapabilityFlags {
                 streaming: false,
                 mcp: true, // observed real ~/.copilot/mcp-config.json shape by running `copilot mcp add` on the reference machine
@@ -266,6 +304,7 @@ pub fn builtin_registry() -> Vec<AgentDefinition> {
                 tools: true,
                 sessions: true, // --resume observed in --help
                 structured_output: false,
+                non_interactive_run: true,
             },
             config_paths: vec![".copilot/mcp-config.json".into()],
             notes: None,
@@ -282,6 +321,8 @@ pub fn builtin_registry() -> Vec<AgentDefinition> {
                 source: "https://kiro.dev/docs/cli/headless".into(),
             }),
             unverified: false, // installed on the reference machine; `chat`/`mcp`/`login` subcommands and flags confirmed via direct `--help` execution
+            home_requirement: HomeRequirement::Unverified,
+            max_concurrency: None,
             capabilities: CapabilityFlags {
                 streaming: false,
                 mcp: false, // `kiro-cli mcp add` confirmed real via --help, but writes require login, which this project won't do just to inspect a file format
@@ -289,6 +330,7 @@ pub fn builtin_registry() -> Vec<AgentDefinition> {
                 tools: true,
                 sessions: true, // --resume/--resume-id/--list-sessions observed in `kiro-cli chat --help`
                 structured_output: true, // --format json|json-pretty observed in `kiro-cli chat --help`
+                non_interactive_run: true,
             },
             config_paths: vec![],
             notes: Some(
@@ -311,6 +353,8 @@ pub fn builtin_registry() -> Vec<AgentDefinition> {
                 source: "https://sourcegraph.com/docs/cody/clients/install-cli".into(),
             }),
             unverified: true, // not installed on the reference machine; commands sourced from sourcegraph.com docs, not confirmed by direct execution
+            home_requirement: HomeRequirement::Unverified,
+            max_concurrency: None,
             capabilities: CapabilityFlags {
                 streaming: false,
                 mcp: false, // no MCP subcommand or config surface documented
@@ -318,6 +362,7 @@ pub fn builtin_registry() -> Vec<AgentDefinition> {
                 tools: true,
                 sessions: false,
                 structured_output: false,
+                non_interactive_run: true,
             },
             config_paths: vec![],
             notes: Some(
@@ -349,6 +394,8 @@ pub fn builtin_registry() -> Vec<AgentDefinition> {
                 source: "https://github.com/google-gemini/gemini-cli".into(),
             }),
             unverified: false, // installed on the reference machine; run/mcp subcommands confirmed via direct --help execution
+            home_requirement: HomeRequirement::Unverified,
+            max_concurrency: None,
             capabilities: CapabilityFlags {
                 streaming: false,
                 mcp: false, // `gemini mcp add/list/remove` confirmed real via --help, but settings.json's shape wasn't inspected without a logged-in account — see GeminiAdapter::configure_mcp
@@ -356,6 +403,7 @@ pub fn builtin_registry() -> Vec<AgentDefinition> {
                 tools: true,
                 sessions: false, // docs describe checkpointing (--checkpointing) for recovery, not a classic --resume flag
                 structured_output: true, // --output-format json documented
+                non_interactive_run: true,
             },
             config_paths: vec![".gemini/settings.json".into()],
             notes: Some("No verified login/auth command — `gemini --help` lists no auth/login subcommand; interactive launches trigger their own Google OAuth browser flow.".into()),
@@ -370,6 +418,8 @@ pub fn builtin_registry() -> Vec<AgentDefinition> {
                 source: "https://github.com/QwenLM/qwen-code".into(),
             }),
             unverified: false, // installed on the reference machine; run/mcp/auth subcommands confirmed via direct --help execution
+            home_requirement: HomeRequirement::Unverified,
+            max_concurrency: None,
             capabilities: CapabilityFlags {
                 streaming: false,
                 mcp: false, // `qwen mcp` confirmed real via --help (this fork keeps Gemini CLI's MCP support), but its settings file shape wasn't inspected without a logged-in account
@@ -377,6 +427,7 @@ pub fn builtin_registry() -> Vec<AgentDefinition> {
                 tools: true,
                 sessions: false,
                 structured_output: false,
+                non_interactive_run: true,
             },
             config_paths: vec![],
             notes: Some(
@@ -401,6 +452,8 @@ pub fn builtin_registry() -> Vec<AgentDefinition> {
                 source: "https://ampcode.com/manual".into(),
             }),
             unverified: false, // installed on the reference machine; login/run/mcp subcommands confirmed via direct --help execution
+            home_requirement: HomeRequirement::Unverified,
+            max_concurrency: None,
             capabilities: CapabilityFlags {
                 streaming: false,
                 mcp: false, // `amp mcp add/list/remove` is real and --help documents a flat "amp.mcpServers" settings.json key, but that shape was never round-tripped against a real file — see AmpAdapter::configure_mcp
@@ -408,6 +461,7 @@ pub fn builtin_registry() -> Vec<AgentDefinition> {
                 tools: true,
                 sessions: false,
                 structured_output: false,
+                non_interactive_run: true,
             },
             config_paths: vec![],
             notes: Some("Sourcegraph's newer agent product — distinct from the already-registered `cody`. `amp login` confirmed real via --help.".into()),
@@ -422,6 +476,8 @@ pub fn builtin_registry() -> Vec<AgentDefinition> {
                 source: "https://docs.openhands.dev/openhands/usage/run-openhands/local-setup".into(),
             }),
             unverified: true,
+            home_requirement: HomeRequirement::Unverified,
+            max_concurrency: None,
             capabilities: CapabilityFlags {
                 streaming: false,
                 mcp: false,
@@ -429,6 +485,7 @@ pub fn builtin_registry() -> Vec<AgentDefinition> {
                 tools: true,
                 sessions: false,
                 structured_output: false,
+                non_interactive_run: true,
             },
             config_paths: vec![],
             notes: Some(
@@ -448,6 +505,8 @@ pub fn builtin_registry() -> Vec<AgentDefinition> {
                 source: "https://docs.factory.ai/cli/getting-started/quickstart".into(),
             }),
             unverified: false, // installed on the reference machine; run/mcp subcommands confirmed via direct --help execution
+            home_requirement: HomeRequirement::Unverified,
+            max_concurrency: None,
             capabilities: CapabilityFlags {
                 streaming: false,
                 mcp: false, // `droid mcp add/remove/list` confirmed real via --help, but its config file shape wasn't inspected without a logged-in account — see DroidAdapter::configure_mcp
@@ -455,6 +514,7 @@ pub fn builtin_registry() -> Vec<AgentDefinition> {
                 tools: true,
                 sessions: true, // a documented "Droid Sessions API" exists; resume UX specifics not confirmed
                 structured_output: true, // `droid exec` headless mode documents structured input/output formats
+                non_interactive_run: true,
             },
             config_paths: vec![],
             notes: Some("Requires logging into a Factory account before use (free tier exists). No verified login command though: neither `droid --help`, `droid auth --help`, nor `droid login --help` show an auth subcommand on the reference machine.".into()),
@@ -469,6 +529,8 @@ pub fn builtin_registry() -> Vec<AgentDefinition> {
                 source: "https://www.codebuff.com/docs/help".into(),
             }),
             unverified: false, // installed on the reference machine; login subcommand confirmed via direct --help execution
+            home_requirement: HomeRequirement::Unverified,
+            max_concurrency: None,
             capabilities: CapabilityFlags {
                 streaming: false,
                 mcp: false, // no mcp subcommand anywhere in --help on the reference machine
@@ -476,6 +538,9 @@ pub fn builtin_registry() -> Vec<AgentDefinition> {
                 tools: true,
                 sessions: false,
                 structured_output: false,
+                // run_prompt falls through to single-agent-sdk's
+                // default-trait `bail!` — no non-interactive mode exists.
+                non_interactive_run: false,
             },
             config_paths: vec![],
             notes: Some("`codebuff login` confirmed real via --help. No verified non-interactive run mode: --help doesn't confirm whether a positional prompt exits after one response or continues interactively.".into()),
@@ -490,6 +555,8 @@ pub fn builtin_registry() -> Vec<AgentDefinition> {
                 source: "https://github.com/plandex-ai/plandex/blob/main/docs/docs/install.md".into(),
             }),
             unverified: true,
+            home_requirement: HomeRequirement::Unverified,
+            max_concurrency: None,
             capabilities: CapabilityFlags {
                 streaming: false,
                 mcp: false,
@@ -497,6 +564,7 @@ pub fn builtin_registry() -> Vec<AgentDefinition> {
                 tools: true,
                 sessions: false,
                 structured_output: false,
+                non_interactive_run: true,
             },
             config_paths: vec![],
             notes: Some("Windows only supported via WSL, per the vendor's own docs.".into()),
@@ -516,6 +584,8 @@ pub fn builtin_registry() -> Vec<AgentDefinition> {
                 source: "https://docs.continue.dev/cli/quickstart".into(),
             }),
             unverified: false, // installed on the reference machine; run mode confirmed via direct --help execution
+            home_requirement: HomeRequirement::Unverified,
+            max_concurrency: None,
             capabilities: CapabilityFlags {
                 streaming: false,
                 mcp: false, // only a per-session `--mcp <hub-slug>` flag exists, not a persistent local config to write
@@ -523,6 +593,7 @@ pub fn builtin_registry() -> Vec<AgentDefinition> {
                 tools: true,
                 sessions: false,
                 structured_output: true, // headless `cn -p "prompt"` runs to completion and prints to stdout for scripting/CI
+                non_interactive_run: true,
             },
             config_paths: vec![],
             notes: Some(
@@ -543,6 +614,8 @@ pub fn builtin_registry() -> Vec<AgentDefinition> {
                 source: "https://docs.x.ai/build/overview".into(),
             }),
             unverified: false, // installed on the reference machine; login/run/mcp subcommands confirmed via direct --help execution
+            home_requirement: HomeRequirement::IsolatedOnly,
+            max_concurrency: None,
             capabilities: CapabilityFlags {
                 streaming: false,
                 mcp: false, // `grok mcp` confirmed real via --help, but its config file shape wasn't inspected without a logged-in account — see GrokAdapter::configure_mcp
@@ -550,6 +623,7 @@ pub fn builtin_registry() -> Vec<AgentDefinition> {
                 tools: true,
                 sessions: false, // subagents/worktrees documented, but resume UX not confirmed
                 structured_output: false,
+                non_interactive_run: true,
             },
             config_paths: vec![],
             notes: Some(
@@ -571,6 +645,8 @@ pub fn builtin_registry() -> Vec<AgentDefinition> {
                 source: "https://mistral.ai/news/devstral-2-vibe-cli/".into(),
             }),
             unverified: true,
+            home_requirement: HomeRequirement::Unverified,
+            max_concurrency: None,
             capabilities: CapabilityFlags {
                 streaming: false,
                 mcp: false,
@@ -578,6 +654,7 @@ pub fn builtin_registry() -> Vec<AgentDefinition> {
                 tools: true,
                 sessions: false,
                 structured_output: false,
+                non_interactive_run: true,
             },
             config_paths: vec![],
             notes: Some(
@@ -598,6 +675,8 @@ pub fn builtin_registry() -> Vec<AgentDefinition> {
                 source: "https://github.com/charmbracelet/crush".into(),
             }),
             unverified: false, // installed on the reference machine; login/run subcommands confirmed via direct --help execution
+            home_requirement: HomeRequirement::Unverified,
+            max_concurrency: None,
             capabilities: CapabilityFlags {
                 streaming: false,
                 mcp: false, // no mcp subcommand appears in --help on the reference machine; vendor docs describe config-file-based MCP but the file wasn't inspected without a logged-in account
@@ -605,6 +684,7 @@ pub fn builtin_registry() -> Vec<AgentDefinition> {
                 tools: true,
                 sessions: false,
                 structured_output: false,
+                non_interactive_run: true,
             },
             config_paths: vec![],
             notes: Some(
@@ -673,5 +753,70 @@ mod tests {
         assert_eq!(perplexity.command, "pplx");
         assert!(perplexity.notes.is_some());
         assert!(!perplexity.capabilities.sessions);
+    }
+}
+
+#[cfg(test)]
+mod home_requirement_tests {
+    use super::*;
+
+    fn find(name: &str) -> AgentDefinition {
+        builtin_registry()
+            .into_iter()
+            .find(|a| a.name == name)
+            .unwrap_or_else(|| panic!("no such agent in builtin_registry: {name}"))
+    }
+
+    #[test]
+    fn copilot_and_opencode_require_real_home() {
+        assert_eq!(find("copilot").home_requirement, HomeRequirement::RealRequired);
+        assert_eq!(find("opencode").home_requirement, HomeRequirement::RealRequired);
+    }
+
+    #[test]
+    fn cursor_grok_codex_break_under_real_home() {
+        assert_eq!(find("cursor").home_requirement, HomeRequirement::IsolatedOnly);
+        assert_eq!(find("grok").home_requirement, HomeRequirement::IsolatedOnly);
+        assert_eq!(find("codex").home_requirement, HomeRequirement::IsolatedOnly);
+    }
+
+    #[test]
+    fn claude_works_either_way() {
+        assert_eq!(find("claude").home_requirement, HomeRequirement::Either);
+    }
+
+    #[test]
+    fn most_agents_are_unverified_by_default() {
+        assert_eq!(find("gemini").home_requirement, HomeRequirement::Unverified);
+        assert_eq!(find("aider").home_requirement, HomeRequirement::Unverified);
+    }
+
+    #[test]
+    fn opencode_has_a_concurrency_limit_of_one() {
+        assert_eq!(find("opencode").max_concurrency, Some(1));
+    }
+
+    #[test]
+    fn most_agents_have_no_concurrency_limit() {
+        assert_eq!(find("claude").max_concurrency, None);
+        assert_eq!(find("codex").max_concurrency, None);
+    }
+
+    #[test]
+    fn codebuff_has_no_non_interactive_run_mode() {
+        assert!(!find("codebuff").capabilities.non_interactive_run);
+    }
+
+    #[test]
+    fn every_other_agent_has_non_interactive_run() {
+        for agent in builtin_registry() {
+            if agent.name != "codebuff" {
+                assert!(
+                    agent.capabilities.non_interactive_run,
+                    "{} should have non_interactive_run: true",
+                    agent.name
+                );
+            }
+        }
     }
 }
