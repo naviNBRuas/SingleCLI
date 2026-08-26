@@ -892,6 +892,7 @@ fn execute(
     // Set inside the failure arms below (never on success/cancellation),
     // then checked once after the match — see `maybe_fail_over`.
     let mut failure_text: Option<String> = None;
+    let rate_limited_for_fallback;
 
     match outcome {
         Ok(outcome) => {
@@ -911,6 +912,7 @@ fn execute(
             let summary = summarize(&outcome.stdout, outcome.timed_out, outcome.exit_code);
             let combined_output = format!("{}\n{}", outcome.stdout, outcome.stderr);
             let rate_limited = single_core::ratelimit::looks_like_rate_limit(&combined_output);
+            rate_limited_for_fallback = rate_limited;
             finish(
                 conn,
                 id,
@@ -947,6 +949,7 @@ fn execute(
         Err(e) => {
             let error_text = format!("{e:#}");
             let rate_limited = single_core::ratelimit::looks_like_rate_limit(&error_text);
+            rate_limited_for_fallback = rate_limited;
             finish(
                 conn,
                 id,
@@ -973,7 +976,7 @@ fn execute(
 
     if opts.allow_fallback {
         if let Some(text) = failure_text {
-            maybe_fail_over(conn, ctx, id, opts, &text, cancel);
+            maybe_fail_over(conn, ctx, id, opts, &text, rate_limited_for_fallback, cancel);
         }
     }
 
@@ -994,14 +997,14 @@ fn execute(
 /// Errors are logged as an event rather than propagated — a failed
 /// failover attempt must never mask the original task's own recorded
 /// failure.
-fn maybe_fail_over(conn: &Connection, ctx: &Context, id: i64, opts: &RunTaskOptions, failure_text: &str, cancel: Option<&std::sync::atomic::AtomicBool>) {
+fn maybe_fail_over(conn: &Connection, ctx: &Context, id: i64, opts: &RunTaskOptions, _failure_text: &str, rate_limited: bool, cancel: Option<&std::sync::atomic::AtomicBool>) {
     let already_rate_limited = opts.account.is_some_and(|account_name| {
         single_core::account::list(&ctx.dirs.accounts_dir(), Some(opts.agent))
             .unwrap_or_default()
             .into_iter()
             .any(|a| a.name == account_name && a.status == single_protocol::AccountStatus::RateLimited)
     });
-    if !already_rate_limited && !single_core::ratelimit::looks_like_rate_limit(failure_text) {
+    if !already_rate_limited && !rate_limited {
         return;
     }
 
@@ -1394,7 +1397,7 @@ mod tests {
             timeout: Duration::from_secs(1),
             allow_fallback: true,
         };
-        maybe_fail_over(&conn, &ctx, id, &opts, "Error: rate limit exceeded, try again later", None);
+        maybe_fail_over(&conn, &ctx, id, &opts, "Error: rate limit exceeded, try again later", true, None);
 
         let tasks = list(&conn).unwrap();
         if !single_agent_sdk::adapters::for_agent("codex").unwrap().discover().detected {
@@ -1443,7 +1446,7 @@ mod tests {
             timeout: Duration::from_secs(1),
             allow_fallback: true,
         };
-        maybe_fail_over(&conn, &ctx, id, &opts, "error: file not found", None);
+        maybe_fail_over(&conn, &ctx, id, &opts, "error: file not found", false, None);
 
         assert_eq!(list(&conn).unwrap().len(), 1, "an ordinary failure must not trigger a follow-up task");
     }
