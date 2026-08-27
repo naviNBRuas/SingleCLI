@@ -19,22 +19,38 @@
 //!   `perplexity` have no verified provider-key config surface.
 
 use crate::backup::backup_before_write;
+use crate::formats;
 use anyhow::{Context, Result};
 use serde_json::{Map, Value};
-use single_protocol::ProviderSyncResult;
+use single_protocol::{ProviderSpec, ProviderSyncResult};
 use std::path::Path;
 
-pub fn sync(agent: &str, home: &Path, env_var_name: &str, value: &str, dry_run: bool) -> Result<ProviderSyncResult> {
+pub fn sync(agent: &str, home: &Path, provider: &ProviderSpec, value: &str, dry_run: bool) -> Result<ProviderSyncResult> {
     match agent {
-        "claude" => sync_claude(home, env_var_name, value, dry_run),
-        "codex" if env_var_name == "OPENAI_API_KEY" => sync_codex(home, value, dry_run),
+        "claude" => sync_claude(home, &provider.env_var_name, value, dry_run),
+        "codex" if provider.env_var_name == "OPENAI_API_KEY" => sync_codex(home, value, dry_run),
         "codex" => Ok(unsupported(
             "codex",
             home,
-            &format!("codex's auth.json only has a slot for OPENAI_API_KEY, not '{env_var_name}'"),
+            &format!("codex's auth.json only has a slot for OPENAI_API_KEY, not '{}'", provider.env_var_name),
         )),
+        "opencode" => sync_opencode(home, provider, dry_run),
         other => Ok(unsupported(other, home, "no verified provider-key config location for this agent")),
     }
+}
+
+fn sync_opencode(home: &Path, provider: &ProviderSpec, dry_run: bool) -> Result<ProviderSyncResult> {
+    if provider.models.is_empty() {
+        return Ok(unsupported(
+            "opencode",
+            home,
+            "no models declared for this provider (add it with `--model id:name`); nothing to add to opencode's model picker",
+        ));
+    }
+    let path = home.join(".config").join("opencode").join("opencode.jsonc");
+    let updated = formats::opencode::apply_provider(&path, provider)?;
+    let rendered = serde_json::to_string_pretty(&updated)?;
+    write_result(&provider.name, "opencode", &path, &rendered, dry_run)
 }
 
 fn sync_claude(home: &Path, env_var_name: &str, value: &str, dry_run: bool) -> Result<ProviderSyncResult> {
@@ -113,7 +129,8 @@ mod tests {
         std::fs::create_dir_all(dir.path().join(".claude")).unwrap();
         std::fs::write(dir.path().join(".claude/settings.json"), r#"{"theme":"dark","env":{"OTHER_VAR":"x"}}"#).unwrap();
 
-        let result = sync("claude", dir.path(), "ANTHROPIC_API_KEY", "sk-test-123", false).unwrap();
+        let provider = ProviderSpec { name: "anthropic".into(), env_var_name: "ANTHROPIC_API_KEY".into(), secret_name: "provider:anthropic".into(), base_url: None, models: vec![] };
+        let result = sync("claude", dir.path(), &provider, "sk-test-123", false).unwrap();
         assert!(result.applied);
 
         let written: Value = serde_json::from_str(&std::fs::read_to_string(dir.path().join(".claude/settings.json")).unwrap()).unwrap();
@@ -128,28 +145,74 @@ mod tests {
         std::fs::create_dir_all(dir.path().join(".codex")).unwrap();
         std::fs::write(dir.path().join(".codex/auth.json"), r#"{"auth_mode":"apikey","tokens":{}}"#).unwrap();
 
-        let ok = sync("codex", dir.path(), "OPENAI_API_KEY", "sk-openai-1", false).unwrap();
+        let openai_provider = ProviderSpec { name: "openai".into(), env_var_name: "OPENAI_API_KEY".into(), secret_name: "provider:openai".into(), base_url: None, models: vec![] };
+        let ok = sync("codex", dir.path(), &openai_provider, "sk-openai-1", false).unwrap();
         assert!(ok.applied);
         let written: Value = serde_json::from_str(&std::fs::read_to_string(dir.path().join(".codex/auth.json")).unwrap()).unwrap();
         assert_eq!(written["auth_mode"], "apikey");
         assert_eq!(written["OPENAI_API_KEY"], "sk-openai-1");
 
-        let rejected = sync("codex", dir.path(), "SOME_OTHER_KEY", "value", false).unwrap();
+        let other_provider = ProviderSpec { name: "other".into(), env_var_name: "SOME_OTHER_KEY".into(), secret_name: "provider:other".into(), base_url: None, models: vec![] };
+        let rejected = sync("codex", dir.path(), &other_provider, "value", false).unwrap();
         assert!(!rejected.applied);
     }
 
     #[test]
     fn unverified_agents_are_refused_not_faked() {
         let dir = tempfile::tempdir().unwrap();
-        let result = sync("opencode", dir.path(), "OPENAI_API_KEY", "x", false).unwrap();
+        let provider = ProviderSpec { name: "test".into(), env_var_name: "OPENAI_API_KEY".into(), secret_name: "provider:test".into(), base_url: None, models: vec![] };
+        let result = sync("perplexity", dir.path(), &provider, "x", false).unwrap();
         assert!(!result.applied);
     }
 
     #[test]
     fn dry_run_never_writes() {
         let dir = tempfile::tempdir().unwrap();
-        let result = sync("claude", dir.path(), "ANTHROPIC_API_KEY", "sk-test", true).unwrap();
+        let provider = ProviderSpec { name: "anthropic".into(), env_var_name: "ANTHROPIC_API_KEY".into(), secret_name: "provider:anthropic".into(), base_url: None, models: vec![] };
+        let result = sync("claude", dir.path(), &provider, "sk-test", true).unwrap();
         assert!(!result.applied);
         assert!(!dir.path().join(".claude/settings.json").exists());
+    }
+
+    #[test]
+    fn opencode_sync_is_unsupported_without_declared_models() {
+        let dir = tempfile::tempdir().unwrap();
+        let provider = ProviderSpec { name: "omniroute".into(), env_var_name: "OMNIROUTE_API_KEY".into(), secret_name: "provider:omniroute".into(), base_url: Some("http://localhost:20128/v1".into()), models: vec![] };
+        let result = sync("opencode", dir.path(), &provider, "placeholder", false).unwrap();
+        assert!(!result.applied);
+        assert!(result.detail.contains("no models declared"));
+    }
+
+    #[test]
+    fn opencode_sync_writes_provider_config_when_models_are_declared() {
+        let dir = tempfile::tempdir().unwrap();
+        let provider = ProviderSpec {
+            name: "omniroute".into(),
+            env_var_name: "OMNIROUTE_API_KEY".into(),
+            secret_name: "provider:omniroute".into(),
+            base_url: Some("http://localhost:20128/v1".into()),
+            models: vec![single_protocol::ModelSpec { id: "auto".into(), name: "Auto (best available)".into() }],
+        };
+        let result = sync("opencode", dir.path(), &provider, "placeholder", false).unwrap();
+        assert!(result.applied);
+        let path = dir.path().join(".config/opencode/opencode.jsonc");
+        let written: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(written["provider"]["omniroute"]["options"]["apiKey"], "{env:OMNIROUTE_API_KEY}");
+    }
+
+    #[test]
+    fn opencode_sync_backs_up_before_writing() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".config/opencode")).unwrap();
+        std::fs::write(dir.path().join(".config/opencode/opencode.jsonc"), "{\"mcp\": {}}").unwrap();
+        let provider = ProviderSpec {
+            name: "omniroute".into(),
+            env_var_name: "OMNIROUTE_API_KEY".into(),
+            secret_name: "provider:omniroute".into(),
+            base_url: Some("http://localhost:20128/v1".into()),
+            models: vec![single_protocol::ModelSpec { id: "auto".into(), name: "Auto".into() }],
+        };
+        let result = sync("opencode", dir.path(), &provider, "placeholder", false).unwrap();
+        assert!(result.backup_path.is_some());
     }
 }

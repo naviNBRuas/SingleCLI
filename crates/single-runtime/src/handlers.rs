@@ -1058,7 +1058,7 @@ fn dispatch(
                 let mut result = single_agent_sdk::provider_sync::sync(
                     &agent,
                     &home,
-                    &provider.env_var_name,
+                    &provider,
                     &value,
                     dry_run,
                 )?;
@@ -1141,7 +1141,7 @@ fn dispatch(
             let mut result = single_agent_sdk::provider_sync::sync(
                 &agent,
                 &home,
-                &provider_spec.env_var_name,
+                &provider_spec,
                 &value,
                 dry_run,
             )?;
