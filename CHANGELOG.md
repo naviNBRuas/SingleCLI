@@ -9,6 +9,18 @@ patch version (`0.0.x`) carries fixes, per [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## [Unreleased]
 
+## [0.8.0]
+
+- Added: `single provider add` gains a repeatable `--model <id>:<name>`
+  flag, and `single provider sync` can now write a custom/local provider
+  into opencode's own `opencode.jsonc` `provider` key (via
+  `@ai-sdk/openai-compatible`) — previously, syncing a provider only
+  injected its API key as an env var into an agent's process, which got
+  the credential to opencode but never told opencode's model picker the
+  provider existed. `provider_sync::sync`'s API-key value is never
+  written into opencode's config — only an `{env:VAR}` reference, matching
+  how the actual secret already reaches opencode's process.
+
 ## [0.7.0]
 
 - Added: rate-limit detection (`single_core::ratelimit::looks_like_rate_limit`)
