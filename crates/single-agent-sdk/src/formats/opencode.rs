@@ -11,7 +11,7 @@
 //! *emulation*, not a native capability — documented here and in
 //! docs/architecture.md rather than silently discarding user comments.
 
-use single_protocol::{LspServerSpec, McpServerSpec};
+use single_protocol::{LspServerSpec, McpServerSpec, ProviderSpec};
 use anyhow::{Context, Result};
 use serde_json::{Map, Value};
 use std::path::Path;
@@ -174,6 +174,57 @@ pub fn apply_lsp(path: &Path, servers: &[LspServerSpec]) -> Result<Value> {
     Ok(root)
 }
 
+/// Writes a custom/local provider into `opencode.jsonc`'s `provider.<name>`
+/// key, in opencode's own documented custom-OpenAI-compatible-provider
+/// format (confirmed via opencode's docs, not guessed):
+/// `{"npm": "@ai-sdk/openai-compatible", "name": ..., "options": {"baseURL":
+/// ..., "apiKey": "{env:VAR}"}, "models": {...}}`. The `apiKey` value is
+/// always the literal env-var-reference string `"{env:VAR}"`, never a raw
+/// secret — opencode resolves that reference from its own process
+/// environment at runtime, which SingleCLI populates separately via
+/// `single_core::provider_keys::resolve_env_for_agent`. This function
+/// never sees or needs the actual secret value.
+pub fn apply_provider(path: &Path, provider: &ProviderSpec) -> Result<Value> {
+    let mut root: Value = if path.exists() {
+        let text = std::fs::read_to_string(path)
+            .with_context(|| format!("reading {}", path.display()))?;
+        let stripped = strip_jsonc_comments(&text);
+        serde_json::from_str(&stripped)
+            .with_context(|| format!("parsing {} as JSONC", path.display()))?
+    } else {
+        Value::Object(Map::new())
+    };
+
+    let root_obj = root.as_object_mut().context("opencode.jsonc root is not a JSON object")?;
+    let provider_obj = root_obj
+        .entry("provider")
+        .or_insert_with(|| Value::Object(Map::new()))
+        .as_object_mut()
+        .context("provider is not a JSON object")?;
+
+    let mut models = Map::new();
+    for model in &provider.models {
+        let mut model_entry = Map::new();
+        model_entry.insert("name".into(), Value::String(model.name.clone()));
+        models.insert(model.id.clone(), Value::Object(model_entry));
+    }
+
+    let mut options = Map::new();
+    if let Some(base_url) = &provider.base_url {
+        options.insert("baseURL".into(), Value::String(base_url.clone()));
+    }
+    options.insert("apiKey".into(), Value::String(format!("{{env:{}}}", provider.env_var_name)));
+
+    let mut entry = Map::new();
+    entry.insert("npm".into(), Value::String("@ai-sdk/openai-compatible".into()));
+    entry.insert("name".into(), Value::String(provider.name.clone()));
+    entry.insert("options".into(), Value::Object(options));
+    entry.insert("models".into(), Value::Object(models));
+    provider_obj.insert(provider.name.clone(), Value::Object(entry));
+
+    Ok(root)
+}
+
 /// Removes only the named servers from `lsp`, leaving `mcp` and anything
 /// else untouched.
 pub fn remove_lsp(path: &Path, names: &[String]) -> Result<Option<Value>> {
@@ -281,5 +332,74 @@ mod tests {
         let result = remove_lsp(&path, &["gopls".to_string()]).unwrap().unwrap();
         assert!(result["lsp"].get("gopls").is_none());
         assert!(result["lsp"]["rust-analyzer"].is_object());
+    }
+
+    #[test]
+    fn apply_provider_writes_the_confirmed_opencode_shape() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("opencode.jsonc");
+        let provider = ProviderSpec {
+            name: "omniroute".into(),
+            env_var_name: "OMNIROUTE_API_KEY".into(),
+            secret_name: "provider:omniroute".into(),
+            base_url: Some("http://localhost:20128/v1".into()),
+            models: vec![single_protocol::ModelSpec { id: "auto".into(), name: "Auto (best available)".into() }],
+        };
+        let result = apply_provider(&path, &provider).unwrap();
+        assert_eq!(result["provider"]["omniroute"]["npm"], "@ai-sdk/openai-compatible");
+        assert_eq!(result["provider"]["omniroute"]["name"], "omniroute");
+        assert_eq!(result["provider"]["omniroute"]["options"]["baseURL"], "http://localhost:20128/v1");
+        assert_eq!(result["provider"]["omniroute"]["options"]["apiKey"], "{env:OMNIROUTE_API_KEY}");
+        assert_eq!(result["provider"]["omniroute"]["models"]["auto"]["name"], "Auto (best available)");
+    }
+
+    #[test]
+    fn apply_provider_never_writes_a_raw_secret() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("opencode.jsonc");
+        let provider = ProviderSpec {
+            name: "testprov".into(),
+            env_var_name: "TESTPROV_API_KEY".into(),
+            secret_name: "provider:testprov".into(),
+            base_url: None,
+            models: vec![single_protocol::ModelSpec { id: "m1".into(), name: "Model One".into() }],
+        };
+        let result = apply_provider(&path, &provider).unwrap();
+        let rendered = serde_json::to_string(&result).unwrap();
+        assert!(rendered.contains("{env:TESTPROV_API_KEY}"));
+        assert!(!rendered.contains("sk-"), "no raw secret-shaped string should ever appear");
+    }
+
+    #[test]
+    fn apply_provider_preserves_existing_mcp_and_lsp_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("opencode.jsonc");
+        std::fs::write(&path, "{\n  \"mcp\": { \"git\": { \"type\": \"local\" } },\n  \"lsp\": { \"rust\": {} }\n}").unwrap();
+        let provider = ProviderSpec {
+            name: "omniroute".into(),
+            env_var_name: "OMNIROUTE_API_KEY".into(),
+            secret_name: "provider:omniroute".into(),
+            base_url: Some("http://localhost:20128/v1".into()),
+            models: vec![single_protocol::ModelSpec { id: "auto".into(), name: "Auto".into() }],
+        };
+        let result = apply_provider(&path, &provider).unwrap();
+        assert_eq!(result["mcp"]["git"]["type"], "local");
+        assert!(result["lsp"]["rust"].is_object());
+        assert!(result["provider"]["omniroute"].is_object());
+    }
+
+    #[test]
+    fn apply_provider_omits_base_url_when_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("opencode.jsonc");
+        let provider = ProviderSpec {
+            name: "testprov".into(),
+            env_var_name: "TESTPROV_API_KEY".into(),
+            secret_name: "provider:testprov".into(),
+            base_url: None,
+            models: vec![single_protocol::ModelSpec { id: "m1".into(), name: "Model One".into() }],
+        };
+        let result = apply_provider(&path, &provider).unwrap();
+        assert!(result["provider"]["testprov"]["options"].get("baseURL").is_none());
     }
 }
