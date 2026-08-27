@@ -9,6 +9,32 @@ patch version (`0.0.x`) carries fixes, per [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## [Unreleased]
 
+## [0.7.0]
+
+- Added: rate-limit detection (`single_core::ratelimit::looks_like_rate_limit`)
+  now runs unconditionally on every task completion, not just when
+  `--allow-fallback` is set, and is surfaced as `TaskRecord.rate_limited`.
+- Added: `HomeRequirement` (whether an agent needs `real_home: true`,
+  breaks under it, works either way, or is unverified) and
+  `max_concurrency` are now queryable per agent via `agent_list`/`agent
+  inspect`, closing a gap where this was previously tribal knowledge.
+- Added: `CapabilityFlags.non_interactive_run` flags agents (currently
+  only `codebuff`) with no non-interactive run mode at all, checkable
+  before dispatching instead of discovering it via a failed run.
+- Added: a per-agent concurrency guard serializes agents with a
+  `max_concurrency` limit (currently `opencode`, whose own session
+  SQLite lock can't handle two simultaneous instances) instead of
+  letting a second concurrent run crash.
+- Added: `single worktree diff`/`merge` CLI commands and
+  `worktree_merge_preview`/`worktree_merge_apply` MCP tools give an
+  assisted (never automatic) way to merge a worktree-isolated task's
+  branch back — branches still aren't auto-merged, this just removes
+  the manual `git` juggling once you've decided to.
+- Fixed: the concurrency guard above originally held its slot through
+  `maybe_fail_over`'s fallback path, which could self-deadlock if a
+  fallback chain repeated the same concurrency-limited agent — the slot
+  is now released as soon as the agent's subprocess actually finishes.
+
 ## [0.5.0]
 
 - Added: `task run --allow-fallback` fails over to another agent/account
