@@ -453,6 +453,13 @@ fn parse_key_val(s: &str) -> anyhow::Result<(String, String)> {
     Ok((k.to_string(), v.to_string()))
 }
 
+fn parse_model_spec(s: &str) -> anyhow::Result<(String, String)> {
+    let (id, name) = s
+        .split_once(':')
+        .ok_or_else(|| anyhow::anyhow!("expected ID:NAME, got '{s}'"))?;
+    Ok((id.to_string(), name.to_string()))
+}
+
 #[derive(Subcommand)]
 enum McpGatewayCommand {
     Enable,
@@ -860,6 +867,9 @@ enum ProviderCommand {
         env_var: String,
         #[arg(long)]
         base_url: Option<String>,
+        /// A model this provider exposes, as `id:display name` (e.g. `auto:Auto (best available)`). Repeatable.
+        #[arg(long = "model", value_parser = parse_model_spec)]
+        models: Vec<(String, String)>,
     },
     Remove {
         name: String,
@@ -2194,6 +2204,7 @@ fn main() -> anyhow::Result<()> {
                 name,
                 env_var,
                 base_url,
+                models,
             } => {
                 let response = client::send(
                     &socket_path,
@@ -2201,6 +2212,10 @@ fn main() -> anyhow::Result<()> {
                         name,
                         env_var_name: env_var,
                         base_url,
+                        models: models
+                            .into_iter()
+                            .map(|(id, name)| single_protocol::ModelSpec { id, name })
+                            .collect(),
                     },
                 )?;
                 render::print(response, false);

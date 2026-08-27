@@ -396,6 +396,7 @@ pub enum Request {
         name: String,
         env_var_name: String,
         base_url: Option<String>,
+        models: Vec<ModelSpec>,
     },
     ProviderAddPreset {
         name: String,
@@ -1377,6 +1378,12 @@ pub struct PluginInstallResult {
     pub detail: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ModelSpec {
+    pub id: String,
+    pub name: String,
+}
+
 /// A registered LLM provider (spec section 30): OpenAI, Anthropic,
 /// OpenCode Zen, a local model server, etc. The actual API key is never
 /// stored here — only a reference (`secret_name`) into the OS keychain
@@ -1388,6 +1395,13 @@ pub struct ProviderSpec {
     pub env_var_name: String,
     pub secret_name: String,
     pub base_url: Option<String>,
+    /// Models this provider exposes, declared when the provider is added
+    /// via `--model <id>:<name>` (repeatable). Empty for every built-in
+    /// preset and for a provider added without `--model`. Only consumed
+    /// today by `formats::opencode::apply_provider` — a provider with no
+    /// declared models has nothing to add to opencode's picker.
+    #[serde(default)]
+    pub models: Vec<ModelSpec>,
 }
 
 /// One labeled API key for a provider, distinct from `ProviderSpec`'s

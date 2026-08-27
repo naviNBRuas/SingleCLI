@@ -959,6 +959,7 @@ fn dispatch(
             name,
             env_var_name,
             base_url,
+            models,
         } => {
             let secret_name = format!("provider:{name}");
             single_core::providers::add(
@@ -968,6 +969,7 @@ fn dispatch(
                     env_var_name,
                     secret_name,
                     base_url,
+                    models,
                 },
             )?;
             Ok(ResponseData::Empty)
@@ -1812,6 +1814,7 @@ mod tests {
             env_var_name: "ANTHROPIC_API_KEY".into(),
             secret_name: "test-provider-key".into(),
             base_url: None,
+            models: Vec::new(),
         }).unwrap();
 
         let response = handle(&ctx, Request::ProviderSync { name: "testprov".into(), agents: vec!["claude".into()], dry_run: false, real_home: true });

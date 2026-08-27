@@ -227,6 +227,7 @@ mod tests {
                 env_var_name: "SINGLECLI_TEST_LABELED_KEY".into(),
                 secret_name: format!("provider:{provider}"),
                 base_url: None,
+                models: Vec::new(),
             })
             .unwrap();
             let key_secret_name = secret_name(provider, "mylabel");
@@ -256,6 +257,7 @@ mod tests {
                 env_var_name: "SINGLECLI_TEST_SHARED_KEY".into(),
                 secret_name: secret_name.clone(),
                 base_url: None,
+                models: Vec::new(),
             })
             .unwrap();
             let store = SecretTool;
@@ -276,6 +278,7 @@ mod tests {
                 env_var_name: "SINGLECLI_TEST_UNRELATED_KEY".into(),
                 secret_name: format!("provider:{provider}"),
                 base_url: None,
+                models: Vec::new(),
             })
             .unwrap();
             let store = SecretTool;

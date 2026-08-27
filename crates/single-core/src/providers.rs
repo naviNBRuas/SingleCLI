@@ -167,6 +167,7 @@ impl ProviderPreset {
             env_var_name: self.env_var_name.to_string(),
             secret_name: format!("provider:{}", self.name),
             base_url: Some(self.base_url.to_string()),
+            models: Vec::new(),
         }
     }
 }
@@ -182,7 +183,7 @@ mod tests {
     use super::*;
 
     fn sample() -> ProviderSpec {
-        ProviderSpec { name: "anthropic".into(), env_var_name: "ANTHROPIC_API_KEY".into(), secret_name: "provider:anthropic".into(), base_url: None }
+        ProviderSpec { name: "anthropic".into(), env_var_name: "ANTHROPIC_API_KEY".into(), secret_name: "provider:anthropic".into(), base_url: None, models: Vec::new() }
     }
 
     #[test]
@@ -268,6 +269,7 @@ mod tests {
             env_var_name: "CUSTOM_KEY".into(),
             secret_name: "provider:custom".into(),
             base_url: Some("https://custom.example.com".into()),
+            models: Vec::new(),
         })
         .unwrap();
 
@@ -308,6 +310,7 @@ mod tests {
                 env_var_name: "SINGLECLI_TEST_UNCONFIGURED_KEY".into(),
                 secret_name: "provider:singlecli-test-unconfigured".into(),
                 base_url: None,
+                models: Vec::new(),
             })
             .unwrap();
 
@@ -326,6 +329,7 @@ mod tests {
                 env_var_name: "SINGLECLI_TEST_SHARED_CONFIGURED_KEY".into(),
                 secret_name: secret_name.clone(),
                 base_url: None,
+                models: Vec::new(),
             })
             .unwrap();
             let store = SecretTool;
@@ -349,6 +353,7 @@ mod tests {
                 env_var_name: "SINGLECLI_TEST_LABELED_CONFIGURED_KEY".into(),
                 secret_name: format!("provider:{provider}"),
                 base_url: None,
+                models: Vec::new(),
             })
             .unwrap();
             let key_secret_name = crate::provider_keys::secret_name(provider, "mylabel");
@@ -368,5 +373,24 @@ mod tests {
 
             SecretStore::delete(&store, &key_secret_name).unwrap();
         }
+    }
+
+    #[test]
+    fn add_and_load_preserves_declared_models() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("providers.toml");
+        add(&path, ProviderSpec {
+            name: "omniroute".into(),
+            env_var_name: "OMNIROUTE_API_KEY".into(),
+            secret_name: "provider:omniroute".into(),
+            base_url: Some("http://localhost:20128/v1".into()),
+            models: vec![single_protocol::ModelSpec { id: "auto".into(), name: "Auto (best available)".into() }],
+        })
+        .unwrap();
+
+        let loaded = find(&path, "omniroute").unwrap().unwrap();
+        assert_eq!(loaded.models.len(), 1);
+        assert_eq!(loaded.models[0].id, "auto");
+        assert_eq!(loaded.models[0].name, "Auto (best available)");
     }
 }
