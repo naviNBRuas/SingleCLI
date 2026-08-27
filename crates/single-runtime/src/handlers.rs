@@ -540,6 +540,19 @@ fn dispatch(
             let conn = task_db(ctx)?;
             let task = crate::task::get(&conn, task_id)?
                 .ok_or_else(|| anyhow::anyhow!("no such task: #{task_id}"))?;
+            if task.status == single_protocol::TaskStatus::Running
+                || task.status == single_protocol::TaskStatus::Created
+            {
+                anyhow::bail!(
+                    "task #{task_id} is still {}; wait for it to finish first",
+                    crate::task::status_as_str(task.status)
+                );
+            }
+            if task.worktree_path.is_none() {
+                anyhow::bail!(
+                    "task #{task_id} did not run in a worktree (use_worktree was not set); nothing to merge"
+                );
+            }
             let repo_root = single_core::project_context::resolve(std::path::Path::new(&task.cwd))
                 .repo_root
                 .ok_or_else(|| {
@@ -556,6 +569,19 @@ fn dispatch(
             let conn = task_db(ctx)?;
             let task = crate::task::get(&conn, task_id)?
                 .ok_or_else(|| anyhow::anyhow!("no such task: #{task_id}"))?;
+            if task.status == single_protocol::TaskStatus::Running
+                || task.status == single_protocol::TaskStatus::Created
+            {
+                anyhow::bail!(
+                    "task #{task_id} is still {}; wait for it to finish first",
+                    crate::task::status_as_str(task.status)
+                );
+            }
+            if task.worktree_path.is_none() {
+                anyhow::bail!(
+                    "task #{task_id} did not run in a worktree (use_worktree was not set); nothing to merge"
+                );
+            }
             let repo_root = single_core::project_context::resolve(std::path::Path::new(&task.cwd))
                 .repo_root
                 .ok_or_else(|| {
@@ -1896,6 +1922,15 @@ mod tests {
         run_in_worktree(&["add", "."]);
         run_in_worktree(&["commit", "-q", "-m", "add new-file"]);
 
+        // A real run marks the task finished and records its worktree path
+        // (see `execute()` in task.rs) — the merge handlers now require
+        // both before they'll touch a task's branch (Finding 3).
+        conn.execute(
+            "UPDATE tasks SET status = 'completed', worktree_path = ?1 WHERE id = ?2",
+            rusqlite::params![worktree_path.display().to_string(), task_id],
+        )
+        .unwrap();
+
         let preview = handle(&ctx, Request::WorktreeMergePreview { task_id });
         let Response::Ok { data: ResponseData::WorktreeDiff(diff) } = preview else {
             panic!("expected WorktreeDiff, got {preview:?}");
@@ -1917,5 +1952,42 @@ mod tests {
         let ctx = test_ctx(dir.path());
         let response = handle(&ctx, Request::WorktreeMergePreview { task_id: 999999 });
         assert!(matches!(response, Response::Error { .. }));
+    }
+
+    #[test]
+    fn worktree_merge_preview_errors_clearly_for_a_task_that_never_used_a_worktree() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = test_ctx(dir.path());
+
+        let repo = tempfile::tempdir().unwrap();
+        let run = |args: &[&str]| {
+            let status = std::process::Command::new("git").current_dir(repo.path()).args(args).status().unwrap();
+            assert!(status.success(), "git {:?} failed", args);
+        };
+        run(&["init", "-q"]);
+        run(&["config", "user.email", "test@example.com"]);
+        run(&["config", "user.name", "Test"]);
+        std::fs::write(repo.path().join("README.md"), "hi").unwrap();
+        run(&["add", "."]);
+        run(&["commit", "-q", "-m", "initial"]);
+
+        let conn = crate::state::open(&ctx.dirs.db_path()).unwrap();
+        crate::task::ensure_schema(&conn).unwrap();
+        // A task that ran (so it's not caught by the still-running check)
+        // but WITHOUT ever calling `single_core::worktree::add` for it —
+        // `task.worktree_path` stays `None`, exactly the case Finding 3's
+        // fix must catch with a clear error, not a raw git error.
+        let task_id = crate::task::create_for_cwd(&conn, "test task", "claude", repo.path()).unwrap();
+        conn.execute("UPDATE tasks SET status = 'completed' WHERE id = ?1", rusqlite::params![task_id])
+            .unwrap();
+
+        let response = handle(&ctx, Request::WorktreeMergePreview { task_id });
+        let Response::Error { message } = response else {
+            panic!("expected Response::Error, got {response:?}");
+        };
+        assert!(
+            message.contains("did not run in a worktree"),
+            "expected a clear did-not-run-in-a-worktree error, got: {message}"
+        );
     }
 }

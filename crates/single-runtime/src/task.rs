@@ -187,7 +187,7 @@ fn notify_task_hooks(conn: &Connection, ctx: &Context, id: i64) {
     }
 }
 
-fn status_as_str(status: TaskStatus) -> &'static str {
+pub(crate) fn status_as_str(status: TaskStatus) -> &'static str {
     match status {
         TaskStatus::Created => "created",
         TaskStatus::Running => "running",
@@ -969,8 +969,18 @@ fn execute(
                 TaskStatus::Failed
             };
             let summary = summarize(&outcome.stdout, outcome.timed_out, outcome.exit_code);
-            let combined_output = format!("{}\n{}", outcome.stdout, outcome.stderr);
-            let rate_limited = single_core::ratelimit::looks_like_rate_limit(&combined_output);
+            // Only a real failure is checked for rate-limit signals — a
+            // successful task's stdout can innocently contain a
+            // rate-limit-shaped substring (a line number, a diff hunk
+            // header, a byte count) and must not be flagged. Mirrors the
+            // `!outcome.success && !outcome.cancelled` gate used below for
+            // `remember_failure`.
+            let rate_limited = if !outcome.success && !outcome.cancelled {
+                let combined_output = format!("{}\n{}", outcome.stdout, outcome.stderr);
+                single_core::ratelimit::looks_like_rate_limit(&combined_output)
+            } else {
+                false
+            };
             rate_limited_for_fallback = rate_limited;
             finish(
                 conn,
@@ -1277,6 +1287,67 @@ mod tests {
         finish(&conn, id, TaskStatus::Failed, None, None, Some(1), false, Some("panic: index out of bounds"), false).unwrap();
         let task = get(&conn, id).unwrap().unwrap();
         assert!(!task.rate_limited);
+    }
+
+    /// Regression test for the "rate_limited computed on successful runs
+    /// too" bug: a task whose (successful) stdout merely *contains* a
+    /// rate-limit-shaped substring (here, "429") must NOT be flagged.
+    /// Exercises the real `execute()` Ok/success path — not `finish()`
+    /// directly — via a custom agent (`sh -c <prompt>`) so it doesn't
+    /// depend on any real CLI agent being installed. Fails against the
+    /// pre-fix code (which computed `rate_limited` unconditionally) and
+    /// passes against the fix (which gates on `!outcome.success &&
+    /// !outcome.cancelled`).
+    #[test]
+    fn rate_limited_stays_false_for_a_successful_task_whose_output_merely_contains_429() {
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("SINGLE_CONFIG_DIR", dir.path());
+        let conn = test_conn();
+        let dirs = single_core::SingleDirs::from_root(dir.path().to_path_buf());
+        dirs.ensure_created().unwrap();
+
+        // A custom agent whose "run" is just `sh -c <prompt>" — lets the
+        // test control stdout/exit-code precisely without needing claude,
+        // codex, or any other real agent CLI installed.
+        std::fs::write(
+            dirs.agents_dir().join("fake-ok-agent.toml"),
+            r#"
+name = "fake-ok-agent"
+command = "sh"
+
+[run]
+mode = "flag"
+value = "-c"
+"#,
+        )
+        .unwrap();
+
+        let ctx = Context {
+            dirs,
+            resolved: single_core::ResolvedConfig::default(),
+            registry: single_core::builtin_registry(),
+        };
+
+        let this_repo = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let opts = RunTaskOptions {
+            // The whole prompt becomes the `sh -c` argument: prints an
+            // HTTP-429-shaped line and exits 0 (a genuine success).
+            description: "echo 'HTTP 429 Too Many Requests'; exit 0",
+            agent: "fake-ok-agent",
+            cwd: &this_repo,
+            use_worktree: false,
+            account: None,
+            real_home: true, // skip isolated-home materialization, not under test here
+            no_memory_context: true, // prompt must equal `description` verbatim
+            timeout: Duration::from_secs(5),
+            allow_fallback: false,
+        };
+        let task = run(&conn, &ctx, opts).unwrap();
+        assert_eq!(task.status, TaskStatus::Completed, "expected the sh command to succeed");
+        assert!(
+            !task.rate_limited,
+            "a successful task must never be flagged rate_limited, even if its output contains '429'"
+        );
     }
 
     #[test]

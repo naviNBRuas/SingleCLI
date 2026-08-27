@@ -101,7 +101,26 @@ pub fn merge(repo_root: &Path, branch: &str) -> Result<String> {
         .output()
         .context("spawning git merge")?;
     if !output.status.success() {
-        bail!("git merge failed: {}", String::from_utf8_lossy(&output.stderr));
+        let merge_stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+        // A real conflict leaves conflict markers in the working tree and
+        // `.git/MERGE_HEAD` in place — a genuine mid-merge repo state. This
+        // is reachable unattended (an MCP agent calling
+        // `worktree_merge_apply`), so leaving that half-done state around
+        // for a human to notice later is worse than restoring the
+        // pre-merge state ourselves and surfacing a clear error, matching
+        // this project's general preference for known-clean over half-done.
+        let abort_output = Command::new("git")
+            .current_dir(repo_root)
+            .args(["merge", "--abort"])
+            .output()
+            .context("spawning git merge --abort")?;
+        if !abort_output.status.success() {
+            bail!(
+                "git merge failed ({merge_stderr}) AND git merge --abort also failed ({}); repo may be left in a conflicted state, manual cleanup required",
+                String::from_utf8_lossy(&abort_output.stderr)
+            );
+        }
+        bail!("git merge failed and was aborted (repo restored to its pre-merge state): {merge_stderr}");
     }
     Ok(format!(
         "{}{}",
@@ -204,6 +223,61 @@ mod tests {
 
         merge(repo.path(), "single/task-merge").unwrap();
         assert!(repo.path().join("merged-file.txt").is_file());
+    }
+
+    #[test]
+    fn merge_aborts_and_restores_a_clean_state_on_a_real_conflict() {
+        let repo = tempfile::tempdir().unwrap();
+        init_repo(repo.path());
+        let worktree_parent = tempfile::tempdir().unwrap();
+        let worktree_path = worktree_parent.path().join("task-conflict");
+
+        add(repo.path(), &worktree_path, "single/task-conflict").unwrap();
+
+        // Conflicting edit on the worktree branch.
+        std::fs::write(worktree_path.join("README.md"), "changed on the worktree branch").unwrap();
+        let status = Command::new("git").current_dir(&worktree_path).args(["add", "."]).status().unwrap();
+        assert!(status.success());
+        let status = Command::new("git")
+            .current_dir(&worktree_path)
+            .args(["commit", "-q", "-m", "conflicting change on worktree branch"])
+            .status()
+            .unwrap();
+        assert!(status.success());
+
+        // Conflicting edit on the main branch (repo_root), same lines.
+        std::fs::write(repo.path().join("README.md"), "changed on the main branch").unwrap();
+        let status = Command::new("git").current_dir(repo.path()).args(["add", "."]).status().unwrap();
+        assert!(status.success());
+        let status = Command::new("git")
+            .current_dir(repo.path())
+            .args(["commit", "-q", "-m", "conflicting change on main branch"])
+            .status()
+            .unwrap();
+        assert!(status.success());
+
+        let result = merge(repo.path(), "single/task-conflict");
+        assert!(result.is_err(), "expected a real conflict to produce an Err");
+        let message = format!("{:#}", result.unwrap_err());
+        assert!(
+            message.contains("aborted"),
+            "expected the error to mention the merge was aborted, got: {message}"
+        );
+
+        // The repo must be back in a clean, non-mid-merge state.
+        assert!(
+            !repo.path().join(".git").join("MERGE_HEAD").exists(),
+            "MERGE_HEAD should not exist after an aborted merge"
+        );
+        let status_output = Command::new("git")
+            .current_dir(repo.path())
+            .args(["status", "--porcelain"])
+            .output()
+            .unwrap();
+        assert!(
+            String::from_utf8_lossy(&status_output.stdout).trim().is_empty(),
+            "expected a clean working tree after the aborted merge"
+        );
     }
 
     #[test]

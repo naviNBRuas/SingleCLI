@@ -725,7 +725,9 @@ pub struct AgentInfo {
     pub bootstrap_install: Option<BootstrapInstall>,
     pub unverified: bool,
     /// See `HomeRequirement`'s doc comment.
+    #[serde(default)]
     pub home_requirement: HomeRequirement,
+    #[serde(default)]
     pub max_concurrency: Option<u32>,
     pub capabilities: CapabilityFlags,
     pub config_paths: Vec<String>,
@@ -787,7 +789,7 @@ pub struct BootstrapInstall {
 /// module doc for why this project only claims what it's directly
 /// checked. See `docs/superpowers/specs/2026-08-26-orchestration-lessons-design.md`
 /// for how the known values below were established.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HomeRequirement {
     /// Breaks (fails to authenticate correctly) under `real_home: true`.
@@ -799,6 +801,7 @@ pub enum HomeRequirement {
     /// Authenticates correctly either way.
     Either,
     /// Nobody has empirically confirmed either way yet.
+    #[default]
     Unverified,
 }
 
@@ -1480,4 +1483,54 @@ pub struct ProjectContext {
     pub branch: Option<String>,
     pub changed_files: Vec<String>,
     pub project_docs: Vec<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regression test for Finding 4: a still-running older daemon's
+    /// `agent_list`/`agent_inspect` response predates `home_requirement`
+    /// and `max_concurrency` — since there's no daemon/CLI version
+    /// negotiation in this project (the daemon is only replaced on an
+    /// explicit `single restart`), a freshly-built CLI must still be able
+    /// to deserialize that older JSON rather than failing with a confusing
+    /// parse error. Fails without `#[serde(default)]` on both fields.
+    #[test]
+    fn agent_info_deserializes_when_home_requirement_and_max_concurrency_are_absent() {
+        let json = serde_json::json!({
+            "name": "claude",
+            "adapter": "claude",
+            "command": "claude",
+            "detected": true,
+            "version": null,
+            "install_method": { "kind": "native", "detail": "npm install -g @anthropic-ai/claude-code" },
+            "bootstrap_install": null,
+            "unverified": false,
+            // "home_requirement" and "max_concurrency" deliberately omitted
+            // — simulating a pre-this-branch daemon's response.
+            "capabilities": {
+                "streaming": true,
+                "mcp": true,
+                "lsp": false,
+                "tools": true,
+                "sessions": true,
+                "structured_output": false
+            },
+            "config_paths": [],
+            "notes": null,
+            "authenticated": "authenticated"
+        });
+
+        let info: AgentInfo = serde_json::from_value(json).expect(
+            "AgentInfo must deserialize even without home_requirement/max_concurrency (older daemon compatibility)",
+        );
+        assert_eq!(info.home_requirement, HomeRequirement::Unverified);
+        assert_eq!(info.max_concurrency, None);
+    }
+
+    #[test]
+    fn home_requirement_default_is_unverified() {
+        assert_eq!(HomeRequirement::default(), HomeRequirement::Unverified);
+    }
 }
