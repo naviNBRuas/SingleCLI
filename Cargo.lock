@@ -2809,6 +2809,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "single-native-agent"
+version = "0.8.1"
+dependencies = [
+ "anyhow",
+ "clap",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "single-core",
+]
+
+[[package]]
 name = "single-protocol"
 version = "0.8.1"
 dependencies = [

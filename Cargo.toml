@@ -11,6 +11,7 @@ members = [
     "crates/singlecli-mcp",
     "crates/single-lsp",
     "crates/single-web",
+    "crates/single-native-agent",
 ]
 
 [workspace.package]
