@@ -9,6 +9,17 @@ patch version (`0.0.x`) carries fixes, per [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## [Unreleased]
 
+## [0.8.1]
+
+- Fixed: `single task run`'s failure summary ignored stderr entirely, so
+  any agent CLI that wrote its real error to stderr (codex, opencode, and
+  most others) surfaced as the useless `exit code Some(1), no output` —
+  the actual error sat unread in the task artifact file. `summarize()` now
+  falls back to stderr when stdout has nothing useful, and prefers the
+  last `Error`/`ERROR`-marked line over whichever line happens to come
+  first, since CLIs commonly print startup/banner noise before their real
+  failure.
+
 ## [0.8.0]
 
 - Added: `single provider add` gains a repeatable `--model <id>:<name>`

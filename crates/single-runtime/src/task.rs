@@ -968,7 +968,7 @@ fn execute(
             } else {
                 TaskStatus::Failed
             };
-            let summary = summarize(&outcome.stdout, outcome.timed_out, outcome.exit_code);
+            let summary = summarize(&outcome.stdout, &outcome.stderr, outcome.timed_out, outcome.exit_code);
             // Only a real failure is checked for rate-limit signals — a
             // successful task's stdout can innocently contain a
             // rate-limit-shaped substring (a line number, a diff hunk
@@ -1155,18 +1155,51 @@ fn remember_failure(
     );
 }
 
-fn summarize(stdout: &str, timed_out: bool, exit_code: Option<i32>) -> String {
+fn summarize(stdout: &str, stderr: &str, timed_out: bool, exit_code: Option<i32>) -> String {
     if timed_out {
         return "timed out".to_string();
     }
-    let first_line = stdout
-        .lines()
-        .find(|l| !l.trim().is_empty())
-        .unwrap_or("")
-        .trim();
+    // An error-marked line is a better summary than whichever line happens
+    // to come first: CLIs routinely print startup/banner/progress noise on
+    // both streams before (or instead of) their real failure, so the first
+    // non-empty line is often useless ("Reading additional input from
+    // stdin..." rather than "ERROR: ..."). Take the LAST such line in each
+    // stream — the final error is usually the actual outcome, earlier ones
+    // are often incidental (e.g. a background refresh failing).
+    let last_error_line = |s: &str| {
+        s.lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty() && (l.contains("Error") || l.contains("ERROR")))
+            .next_back()
+            .map(str::to_string)
+    };
+    let first_nonempty_line = |s: &str| {
+        s.lines()
+            .find(|l| !l.trim().is_empty())
+            .unwrap_or("")
+            .trim()
+            .to_string()
+    };
+    let (first_line, mut from_stderr) = match (last_error_line(stderr), last_error_line(stdout)) {
+        (Some(l), _) => (l, true),
+        (None, Some(l)) => (l, false),
+        (None, None) => {
+            let s = first_nonempty_line(stdout);
+            if !s.is_empty() {
+                (s, false)
+            } else {
+                (first_nonempty_line(stderr), true)
+            }
+        }
+    };
+    if from_stderr && first_line.is_empty() {
+        from_stderr = false;
+    }
     let truncated: String = first_line.chars().take(200).collect();
     if truncated.is_empty() {
-        format!("exit code {:?}, no output", exit_code)
+        format!("exit code {:?}, no output on stdout or stderr", exit_code)
+    } else if from_stderr {
+        format!("[stderr] {truncated}")
     } else {
         truncated
     }
