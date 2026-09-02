@@ -1173,11 +1173,16 @@ fn summarize(stdout: &str, stderr: &str, timed_out: bool, exit_code: Option<i32>
             .next_back()
             .map(str::to_string)
     };
+    // Skip lines that are pure decoration (box-drawing borders, "---",
+    // "===") — several TUI-styled agents (goose included) print these
+    // around their real output, and a summary of just "────────" is as
+    // useless as "no output".
+    let is_decorative = |l: &str| !l.chars().any(|c| c.is_alphanumeric());
     let first_nonempty_line = |s: &str| {
         s.lines()
-            .find(|l| !l.trim().is_empty())
+            .map(str::trim)
+            .find(|l| !l.is_empty() && !is_decorative(l))
             .unwrap_or("")
-            .trim()
             .to_string()
     };
     let (first_line, mut from_stderr) = match (last_error_line(stderr), last_error_line(stdout)) {
