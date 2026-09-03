@@ -809,17 +809,21 @@ impl AgentAdapter for AmpAdapter {
         Ok(unsupported_write("amp", home, "amp mcp add/list/remove is real and --help documents a flat \"amp.mcpServers\" key in settings.json, but that shape was never round-tripped against a real file on the reference machine"))
     }
 
-    /// `amp -x -- "<prompt>"` — confirmed non-interactive mode via `amp
-    /// --help` ("Use execute mode ... agent will execute provided
-    /// prompt ... Only last assistant message is printed"). `--` before
-    /// `prompt`: `single task run`'s memory/notes preamble starts with a
-    /// literal `"---"`, which `amp -x "---..."` (no `--`) rejected as an
-    /// unknown option — confirmed live. Unlike the other agents fixed the
-    /// same way, `amp -x -- "..."` couldn't be confirmed *succeeding*
-    /// (no AMP_API_KEY / login on the reference machine, so it just hung
-    /// rather than returning a clean auth error) — but it did stop
-    /// producing the parse error, matching the same fix pattern verified
-    /// end-to-end for codex/opencode/droid/crush.
+    /// `amp --execute=<prompt>` — confirmed non-interactive mode via `amp
+    /// --help`. `-x`/`--execute` takes its message as an *optional value
+    /// on the flag itself* (`-x, --execute [message]`), not a following
+    /// positional — so `amp -x -- "<prompt>"` (the previous fix, following
+    /// the pattern that works for other agents whose flag takes a real
+    /// positional argument) actually stripped the message entirely: `--`
+    /// ends option parsing, leaving `-x` with no value and the prompt as
+    /// an orphaned positional amp's execute mode doesn't accept. Confirmed
+    /// live: that produced `"User message must be provided through stdin
+    /// or as argument when using execute mode"` instead of a clean auth
+    /// error. Fixed to `--execute=<prompt>` as one token — the `=` form
+    /// binds the value to the flag directly, so a prompt starting with
+    /// `---` (from `single task run`'s memory/notes preamble) still can't
+    /// be misread as a separate flag, without losing the message the way
+    /// `--` did.
     #[allow(clippy::too_many_arguments)]
     fn run_prompt(
         &self,
@@ -830,7 +834,7 @@ impl AgentAdapter for AmpAdapter {
         timeout: Duration,
         cancel: Option<&std::sync::atomic::AtomicBool>,
     ) -> Result<RunOutcome> {
-        run_command_live("amp", &["-x".to_string(), "--".to_string(), prompt.to_string()], cwd, backend, live_output_path, timeout, cancel)
+        run_command_live("amp", &[format!("--execute={prompt}")], cwd, backend, live_output_path, timeout, cancel)
     }
 
     /// `amp login` — confirmed real via `amp --help` ("Log in to Amp").
