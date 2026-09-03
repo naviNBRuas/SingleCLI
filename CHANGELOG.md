@@ -9,6 +9,57 @@ patch version (`0.0.x`) carries fixes, per [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## [Unreleased]
 
+## [0.9.0]
+
+- Added: `crates/single-native-agent` — a native, in-process coding agent
+  (binary `single-agent`) that talks directly to any provider registered
+  in `providers.toml` via its OpenAI-compatible chat-completions endpoint,
+  no third-party CLI required. Ships a minimal tool loop (`read_file`,
+  `write_file`, `run_shell`) scoped to `--cwd` with path-traversal and
+  absolute-path escapes rejected before any filesystem access, and a
+  `call_mcp` tool that spawns `single-mcp` once per run and proxies
+  through to its `invoke_mcp` tool — the same lazy MCP-gateway access
+  codex/opencode already get. Wired into the agent registry as
+  `single-agent`, dispatchable via `single task run --agent single-agent`.
+  Provider/model selection currently reads `SINGLE_AGENT_PROVIDER`/
+  `SINGLE_AGENT_MODEL` env vars (default `opencode-zen`/
+  `laguna-s-2.1-free`) — the standard adapter `run_prompt` signature has
+  no field for it yet.
+- Added: Kilo Code (`kilocode`) to the agent registry — a real,
+  actively-maintained open-source fork of OpenCode
+  (github.com/Kilo-Org/kilocode) with its own standalone CLI and free
+  models available without an API key.
+- Fixed: `single task run`'s failure summary picked whichever line came
+  first even when it was pure decoration (box-drawing separators some
+  TUI-styled agents print around their real output) — now skips any line
+  with no alphanumeric content.
+- Fixed: `qwen-code`'s `login()` was unimplemented (`qwen auth` is
+  genuinely removed upstream) — now launches `qwen` interactively in its
+  isolated home so a user can reach the in-TUI `/auth` command
+  themselves. Note: Qwen's free OAuth tier was discontinued 2026-04-15
+  upstream — this reaches the right screen, it doesn't restore free auth.
+- Fixed: the TUI's Agents-tab status dot was colored solely from whether
+  the agent's binary was detected on disk, so a detected-but-not-
+  authenticated agent rendered an identical green dot to a fully working
+  one. Now factors in auth state: green only when confirmed authenticated,
+  yellow when detected-but-unauthenticated or auth state is unconfirmed.
+- Fixed: `amp`'s adapter passed `-x -- "<prompt>"`, which strips the
+  message from `-x`/`--execute` entirely — that flag takes its value
+  inline (`-x, --execute [message]`), not as a following positional, so
+  `--` (added to dodge task_run's `---`-prefixed memory preamble) ended
+  option parsing before the message could bind. Every real `amp` call
+  failed with a parse error regardless of auth. Fixed to
+  `--execute=<prompt>` as one token.
+- Fixed: `single-native-agent` sent `content: null` on assistant messages
+  alongside `tool_calls` — valid per the OpenAI spec, but Cloudflare
+  Workers AI's "OpenAI-compatible" endpoint rejected it outright with a
+  schema-validation error. Now sends an empty string instead.
+- Docs: registered ~40 additional free/freemium LLM providers in
+  `providers.toml` (metadata only — Cerebras, Groq-family aggregators,
+  OpenRouter, Nebius, Hyperbolic, ModelScope, and others), cross-checked
+  against independent verified sources rather than any single vendor's
+  own marketing claims.
+
 ## [0.8.1]
 
 - Fixed: `single task run`'s failure summary ignored stderr entirely, so
