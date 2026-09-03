@@ -35,6 +35,7 @@ pub struct CodebuffAdapter;
 pub struct ContinueCliAdapter;
 pub struct GrokAdapter;
 pub struct CrushAdapter;
+pub struct SingleAgentAdapter;
 
 impl AgentAdapter for ClaudeAdapter {
     fn command(&self) -> &str {
@@ -1065,6 +1066,68 @@ impl AgentAdapter for CrushAdapter {
     }
 }
 
+impl AgentAdapter for SingleAgentAdapter {
+    fn command(&self) -> &str {
+        "single-agent"
+    }
+
+    /// single-agent has no on-disk MCP config surface — it talks directly
+    /// to SingleCLI's own provider registry and secret store.
+    fn configure_mcp(&self, home: &Path, _servers: &[McpServerSpec], _dry_run: bool) -> Result<IntegrationWrite> {
+        Ok(unsupported_write("single-agent", home, "single-agent has no MCP config surface — it uses SingleCLI's own provider registry"))
+    }
+
+    fn remove_mcp(&self, home: &Path, _names: &[String], _dry_run: bool) -> Result<IntegrationWrite> {
+        Ok(unsupported_write("single-agent", home, "single-agent has no MCP config surface — it uses SingleCLI's own provider registry"))
+    }
+
+    /// `single-agent run --provider <P> --model <M> --prompt <prompt> --cwd <cwd>`
+    ///
+    /// Provider and model are read from `SINGLE_AGENT_PROVIDER` and
+    /// `SINGLE_AGENT_MODEL` env vars (falling back to `opencode-zen` /
+    /// `laguna-s-2.1-free`). The standard `run_prompt(cwd, prompt, ...)`
+    /// signature has no field for provider/model selection, so env vars are
+    /// the pragmatic escape hatch for v1 — lets callers override without a
+    /// schema change.
+    #[allow(clippy::too_many_arguments)]
+    fn run_prompt(
+        &self,
+        cwd: &Path,
+        prompt: &str,
+        backend: &ExecBackend,
+        live_output_path: Option<&Path>,
+        timeout: Duration,
+        cancel: Option<&std::sync::atomic::AtomicBool>,
+    ) -> Result<RunOutcome> {
+        let provider = std::env::var("SINGLE_AGENT_PROVIDER").unwrap_or_else(|_| "opencode-zen".into());
+        let model = std::env::var("SINGLE_AGENT_MODEL").unwrap_or_else(|_| "laguna-s-2.1-free".into());
+
+        run_command_live(
+            "single-agent",
+            &[
+                "run".to_string(),
+                "--provider".to_string(),
+                provider,
+                "--model".to_string(),
+                model,
+                "--prompt".to_string(),
+                prompt.to_string(),
+                "--cwd".to_string(),
+                cwd.display().to_string(),
+            ],
+            cwd,
+            backend,
+            live_output_path,
+            timeout,
+            cancel,
+        )
+    }
+
+    // No `login`: single-agent reads API keys from SingleCLI's own secret
+    // store, not from its own credentials file — there is nothing to attach
+    // a terminal session to.
+}
+
 fn unsupported_write(agent: &str, home: &Path, detail: &str) -> IntegrationWrite {
     IntegrationWrite {
         agent: agent.to_string(),
@@ -1122,6 +1185,7 @@ pub fn for_agent(name: &str) -> Option<Box<dyn AgentAdapter>> {
         "continue-cli" => Some(Box::new(ContinueCliAdapter)),
         "grok" => Some(Box::new(GrokAdapter)),
         "crush" => Some(Box::new(CrushAdapter)),
+        "single-agent" => Some(Box::new(SingleAgentAdapter)),
         _ => None,
     }
 }

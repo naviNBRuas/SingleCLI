@@ -27,8 +27,12 @@ enum Command {
         #[arg(long)]
         model: String,
 
-        /// The user prompt
-        #[arg(long)]
+        /// The user prompt. `allow_hyphen_values` is load-bearing: callers
+        /// (notably `single task run`'s memory/notes context preamble)
+        /// routinely prepend text starting with `---`, which clap would
+        /// otherwise reject as an unexpected argument rather than accept
+        /// as this flag's value.
+        #[arg(long, allow_hyphen_values = true)]
         prompt: String,
 
         /// Working directory for file/shell operations

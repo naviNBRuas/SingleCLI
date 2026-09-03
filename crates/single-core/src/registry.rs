@@ -695,6 +695,52 @@ pub fn builtin_registry() -> Vec<AgentDefinition> {
                     .into(),
             ),
         },
+        // -- single-agent: SingleCLI's own in-process coding agent (not a
+        // vendor CLI — built from this workspace's single-native-agent
+        // crate).
+        AgentDefinition {
+            name: "single-agent".into(),
+            adapter: "single-agent".into(),
+            command: "single-agent".into(),
+            install_method: InstallMethod::Native {
+                detail: "Built from this workspace's single-native-agent crate \
+                         via `cargo build --release -p single-native-agent`; \
+                         not fetched from an external vendor."
+                    .into(),
+            },
+            bootstrap_install: Some(BootstrapInstall {
+                command: "cargo build --release -p single-native-agent".into(),
+                source: "https://github.com/naviNBRuas/SingleCLI".into(),
+            }),
+            unverified: false,
+            // single-agent has no auth state of its own — it reads API
+            // keys from SingleCLI's own secret store via
+            // single_core::secrets::SecretStore, not from its own
+            // config/credentials files, so it authenticates identically
+            // under an isolated home or the real one.
+            home_requirement: HomeRequirement::Either,
+            max_concurrency: None,
+            capabilities: CapabilityFlags {
+                streaming: false,
+                mcp: false,
+                lsp: false,
+                tools: true,
+                sessions: false,
+                structured_output: false,
+                non_interactive_run: true,
+            },
+            config_paths: vec![],
+            notes: Some(
+                "SingleCLI's own native in-process coding agent. Requires \
+                 --provider and --model flags which aren't part of the \
+                 standard prompt-only adapter interface; the adapter \
+                 currently reads these from SINGLE_AGENT_PROVIDER and \
+                 SINGLE_AGENT_MODEL env vars (falling back to \
+                 opencode-zen/laguna-s-2.1-free), documented in the \
+                 adapter impl."
+                    .into(),
+            ),
+        },
     ]
 }
 
@@ -738,7 +784,10 @@ mod tests {
             // `codebuff`/`crush` document npm as their official path, and
             // `openhands` documents pip as its official path.
             assert!(
-                install.command.contains("curl") || install.command.contains("npm install") || install.command.contains("pip install"),
+                install.command.contains("curl")
+                    || install.command.contains("npm install")
+                    || install.command.contains("pip install")
+                    || install.command.contains("cargo build"),
                 "agent {}",
                 agent.name
             );
