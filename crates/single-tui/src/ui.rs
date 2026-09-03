@@ -163,7 +163,24 @@ fn draw_agents(frame: &mut Frame, area: Rect, app: &App) {
         .enumerate()
         .map(|(rel_i, a)| {
             let i = window.start + rel_i;
-            let (dot, color) = if a.detected { ("●", OK) } else { ("○", MUTED) };
+            // The dot is a single-glance readiness signal, so it must reflect
+            // whether the agent can actually be dispatched to right now, not
+            // just whether its binary exists on disk. A detected-but-not-
+            // authenticated agent used to render an identical green dot to a
+            // fully working one — misleading, since `detected` alone says
+            // nothing about whether `task run` would succeed. `Unsupported`
+            // (SingleCLI can't determine auth state for this agent) is also
+            // WARN rather than OK: an unconfirmed auth state is not the same
+            // claim as a confirmed one.
+            let (dot, color) = if !a.detected {
+                ("○", MUTED)
+            } else {
+                match a.authenticated {
+                    single_protocol::AuthState::Authenticated => ("●", OK),
+                    single_protocol::AuthState::NotAuthenticated => ("●", WARN),
+                    single_protocol::AuthState::Unsupported => ("●", WARN),
+                }
+            };
             let caps = [
                 (a.capabilities.mcp, "mcp"),
                 (a.capabilities.lsp, "lsp"),
