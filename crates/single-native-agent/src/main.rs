@@ -478,10 +478,17 @@ fn run_agent_loop(
             return Ok(());
         }
 
-        // Append the assistant message with tool calls
+        // Append the assistant message with tool calls. content: null here
+        // is valid per the OpenAI spec, but at least one provider's
+        // "OpenAI-compatible" shim (Cloudflare Workers AI, confirmed live)
+        // rejects a null content field outright even when tool_calls is
+        // present — an empty string round-trips through every provider
+        // tested (OpenAI-spec-compliant ones treat "" the same as null
+        // here) without losing anything real, since content is genuinely
+        // absent in this turn either way.
         messages.push(Message {
             role: "assistant".into(),
-            content: assistant_msg.content,
+            content: Some(assistant_msg.content.unwrap_or_default()),
             tool_calls: Some(tool_calls.clone()),
             tool_call_id: None,
         });
