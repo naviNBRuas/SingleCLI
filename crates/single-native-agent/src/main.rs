@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -7,6 +8,17 @@ use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use single_core::paths::SingleDirs;
 use single_core::secrets::{SecretStore, SecretTool};
+
+// MCP gateway integration — rmcp is async, but the rest of this binary is
+// synchronous (reqwest::blocking). Rather than converting everything to
+// async, we create a dedicated tokio Runtime once (lazily, on first call_mcp
+// invocation) and block_on just the MCP codepaths. The Runtime is reused for
+// the lifetime of this single-agent process (a single CLI invocation that
+// exits when the task is done), and the child MCP session spawned inside it
+// dies naturally with the process — no explicit idle-eviction needed.
+static MCP_RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+use rmcp::transport::{ConfigureCommandExt, TokioChildProcess};
+use rmcp::ServiceExt;
 
 #[derive(Parser)]
 #[command(name = "single-agent", about = "Native in-process coding agent")]
@@ -121,6 +133,15 @@ struct RunShellArgs {
     command: String,
 }
 
+#[derive(Deserialize)]
+struct CallMcpArgs {
+    server: String,
+    #[serde(default)]
+    tool: Option<String>,
+    #[serde(default)]
+    arguments: Option<serde_json::Map<String, serde_json::Value>>,
+}
+
 // -- Path safety --
 
 fn canonicalize_within_cwd(cwd: &Path, rel: &str) -> Result<PathBuf> {
@@ -227,6 +248,62 @@ fn exec_run_shell(cwd: &Path, args: &str) -> String {
     }
 }
 
+fn exec_call_mcp(_cwd: &Path, args: &str) -> String {
+    let parsed: CallMcpArgs = match serde_json::from_str(args) {
+        Ok(p) => p,
+        Err(e) => return format!("error: invalid arguments: {e}"),
+    };
+
+    let rt = MCP_RUNTIME.get_or_init(|| {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("failed to create tokio runtime for MCP")
+    });
+
+    let server = parsed.server;
+    let tool = parsed.tool;
+    let arguments = parsed.arguments;
+
+    rt.block_on(async move {
+        let command = tokio::process::Command::new("single-mcp");
+        let transport = match TokioChildProcess::new(command.configure(|_| {})) {
+            Ok(t) => t,
+            Err(e) => return format!("error: failed to spawn single-mcp: {e}"),
+        };
+        let session = match ().serve(transport).await {
+            Ok(s) => s,
+            Err(e) => return format!("error: failed to initialize MCP session: {e}"),
+        };
+
+        // single-mcp exposes exactly one relevant tool of its own,
+        // `invoke_mcp` — it is NOT a transparent passthrough that lets a
+        // caller list/call an arbitrary downstream server's tools directly
+        // on this session (that would just be single-mcp's OWN 4 tools:
+        // list_available_mcp_tools/invoke_mcp/notes_leave/notes_read).
+        // Reaching a downstream server always means calling single-mcp's
+        // `invoke_mcp` tool itself, passing {server, tool, arguments} as
+        // ITS arguments — with `tool: null` meaning "list this server's
+        // tools" and `tool: "<name>"` meaning "call it" (see
+        // single-mcp/src/gateway.rs's own `invoke_mcp` handler, which this
+        // mirrors exactly).
+        let mut invoke_args = serde_json::Map::new();
+        invoke_args.insert("server".into(), serde_json::Value::String(server.clone()));
+        if let Some(ref t) = tool {
+            invoke_args.insert("tool".into(), serde_json::Value::String(t.clone()));
+        }
+        if let Some(args) = arguments {
+            invoke_args.insert("arguments".into(), serde_json::Value::Object(args));
+        }
+
+        let params = rmcp::model::CallToolRequestParams::new("invoke_mcp").with_arguments(invoke_args);
+        match session.call_tool(params).await {
+            Ok(result) => serde_json::to_string_pretty(&result).unwrap_or_else(|e| format!("error: serializing result: {e}")),
+            Err(e) => format!("error: invoke_mcp(server={server}, tool={tool:?}): {e}"),
+        }
+    })
+}
+
 // -- Tool definitions for the API --
 
 fn tool_definitions() -> Vec<ToolDef> {
@@ -283,6 +360,34 @@ fn tool_definitions() -> Vec<ToolDef> {
                         }
                     },
                     "required": ["command"]
+                }),
+            },
+        },
+        ToolDef {
+            tool_type: "function".into(),
+            function: FunctionDef {
+                name: "call_mcp".into(),
+                description: "Call an MCP tool via SingleCLI's MCP gateway (single-mcp). \
+                    Use server + tool: null to list a server's available tools, \
+                    or server + tool + arguments to call a specific tool."
+                    .into(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "server": {
+                            "type": "string",
+                            "description": "Registered MCP server name (from single mcp list)"
+                        },
+                        "tool": {
+                            "type": "string",
+                            "description": "Tool name to call; omit or set null to list this server's tools"
+                        },
+                        "arguments": {
+                            "type": "object",
+                            "description": "Arguments for the tool call, if any"
+                        }
+                    },
+                    "required": ["server"]
                 }),
             },
         },
@@ -387,6 +492,7 @@ fn run_agent_loop(
                 "read_file" => exec_read_file(cwd, &tc.function.arguments),
                 "write_file" => exec_write_file(cwd, &tc.function.arguments),
                 "run_shell" => exec_run_shell(cwd, &tc.function.arguments),
+                "call_mcp" => exec_call_mcp(cwd, &tc.function.arguments),
                 other => format!("error: unknown tool: {other}"),
             };
             messages.push(Message {
@@ -484,5 +590,38 @@ mod tests {
         let result = canonicalize_within_cwd(&cwd, "a/b/c/d.txt");
         assert!(result.is_ok());
         assert!(result.unwrap().starts_with(&cwd));
+    }
+
+    #[test]
+    fn tool_definitions_includes_call_mcp_with_correct_schema() {
+        let defs = tool_definitions();
+        let call_mcp = defs.iter().find(|d| d.function.name == "call_mcp");
+        assert!(call_mcp.is_some(), "call_mcp tool definition must exist");
+
+        let params = &call_mcp.unwrap().function.parameters;
+        let required = params["required"].as_array().unwrap();
+        assert!(required.contains(&serde_json::json!("server")));
+        let properties = params["properties"].as_object().unwrap();
+        assert!(properties.contains_key("server"));
+        assert!(properties.contains_key("tool"));
+        assert!(properties.contains_key("arguments"));
+    }
+
+    #[test]
+    fn call_mcp_args_parses_with_only_server() {
+        let args = r#"{"server": "context7"}"#;
+        let parsed: CallMcpArgs = serde_json::from_str(args).unwrap();
+        assert_eq!(parsed.server, "context7");
+        assert_eq!(parsed.tool, None);
+        assert_eq!(parsed.arguments, None);
+    }
+
+    #[test]
+    fn call_mcp_args_parses_full_invocation() {
+        let args = r#"{"server": "context7", "tool": "search", "arguments": {"query": "foo"}}"#;
+        let parsed: CallMcpArgs = serde_json::from_str(args).unwrap();
+        assert_eq!(parsed.server, "context7");
+        assert_eq!(parsed.tool.as_deref(), Some("search"));
+        assert!(parsed.arguments.is_some());
     }
 }

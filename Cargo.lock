@@ -2815,9 +2815,11 @@ dependencies = [
  "anyhow",
  "clap",
  "reqwest",
+ "rmcp",
  "serde",
  "serde_json",
  "single-core",
+ "tokio",
 ]
 
 [[package]]

@@ -722,7 +722,7 @@ pub fn builtin_registry() -> Vec<AgentDefinition> {
             max_concurrency: None,
             capabilities: CapabilityFlags {
                 streaming: false,
-                mcp: false,
+                mcp: true, // call_mcp tool connects to single-mcp gateway via rmcp
                 lsp: false,
                 tools: true,
                 sessions: false,
@@ -737,7 +737,9 @@ pub fn builtin_registry() -> Vec<AgentDefinition> {
                  currently reads these from SINGLE_AGENT_PROVIDER and \
                  SINGLE_AGENT_MODEL env vars (falling back to \
                  opencode-zen/laguna-s-2.1-free), documented in the \
-                 adapter impl."
+                 adapter impl. Exposes a call_mcp tool that spawns \
+                 single-mcp as a child process (lazily, once per run) \
+                 and proxies MCP tool calls through it."
                     .into(),
             ),
         },
