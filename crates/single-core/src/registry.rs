@@ -695,6 +695,41 @@ pub fn builtin_registry() -> Vec<AgentDefinition> {
                     .into(),
             ),
         },
+        AgentDefinition {
+            name: "kilocode".into(),
+            adapter: "kilocode".into(),
+            command: "kilo".into(),
+            install_method: InstallMethod::StandaloneBinary {
+                detail: "Standalone binary at ~/.kilo/bin/kilo, added to $PATH by its own \
+                         installer (confirmed present on the reference machine)"
+                    .into(),
+            },
+            bootstrap_install: Some(BootstrapInstall {
+                command: "curl -fsSL https://kilo.ai/cli/install | bash".into(),
+                source: "https://github.com/Kilo-Org/kilocode".into(),
+            }),
+            unverified: false, // installed on the reference machine; run/auth/mcp subcommands confirmed via direct --help execution
+            home_requirement: HomeRequirement::Unverified,
+            max_concurrency: None,
+            capabilities: CapabilityFlags {
+                streaming: false,
+                mcp: false, // `kilo mcp add/list` confirmed real via --help, but its config file shape wasn't inspected without a logged-in account — see KiloCodeAdapter::configure_mcp
+                lsp: false,
+                tools: true,
+                sessions: true, // --continue/--session flags confirmed in `kilo run --help`
+                structured_output: false,
+                non_interactive_run: true,
+            },
+            config_paths: vec![], // config file shape not confirmed — Kilo is a fork of OpenCode but its config location wasn't inspected without a logged-in account
+            notes: Some(
+                "Kilo Code — an actively-maintained open-source fork of OpenCode \
+                 (github.com/Kilo-Org/kilocode). Installs via curl to ~/.kilo/bin/kilo. \
+                 `kilo run --auto \"<prompt>\"` confirmed non-interactive mode via --help. \
+                 `kilo auth login` confirmed real via --help. `kilo mcp add` confirmed real \
+                 via --help, but no logged-in account to inspect the config file shape."
+                    .into(),
+            ),
+        },
         // -- single-agent: SingleCLI's own in-process coding agent (not a
         // vendor CLI — built from this workspace's single-native-agent
         // crate).

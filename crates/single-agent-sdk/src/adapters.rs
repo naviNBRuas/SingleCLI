@@ -35,6 +35,7 @@ pub struct CodebuffAdapter;
 pub struct ContinueCliAdapter;
 pub struct GrokAdapter;
 pub struct CrushAdapter;
+pub struct KiloCodeAdapter;
 pub struct SingleAgentAdapter;
 
 impl AgentAdapter for ClaudeAdapter {
@@ -784,10 +785,21 @@ impl AgentAdapter for QwenCodeAdapter {
         run_command_live("qwen", &[format!("--prompt={prompt}")], cwd, backend, live_output_path, timeout, cancel)
     }
 
-    // No `login`: `qwen auth --help` on the reference machine describes
-    // itself as "Configure authentication (removed)" — the subcommand
-    // still parses but the vendor's own help text says the feature is
-    // gone, so it's not wired up as a real login path here.
+    /// `qwen auth` is genuinely removed (confirmed via its own --help),
+    /// but auth still exists as an in-TUI `/auth` slash command — there is
+    /// no headless flag for it. Launching bare `qwen` interactively is the
+    /// real login path: the user reaches `/auth` from there themselves.
+    /// Qwen's own free OAuth tier was discontinued 2026-04-15 (confirmed
+    /// against the vendor's current docs), so `/auth` now always needs a
+    /// real provider API key — this just gets the user to the right
+    /// screen, it doesn't make the auth itself free.
+    fn login(&self, home: &Path) -> Result<()> {
+        run_interactive_with_home("qwen", &[], home)
+    }
+
+    fn login_supported(&self) -> bool {
+        true
+    }
 }
 
 impl AgentAdapter for AmpAdapter {
@@ -1070,6 +1082,62 @@ impl AgentAdapter for CrushAdapter {
     }
 }
 
+impl AgentAdapter for KiloCodeAdapter {
+    fn command(&self) -> &str {
+        "kilo"
+    }
+
+    /// `kilo mcp add` is real — confirmed via `kilo mcp --help` — but no
+    /// account was logged in to inspect the config file it writes. Kilo is
+    /// a fork of OpenCode and may share its `opencode.jsonc` config shape,
+    /// but that wasn't confirmed on this machine — left unsupported rather
+    /// than guessed.
+    fn configure_mcp(&self, home: &Path, _servers: &[McpServerSpec], _dry_run: bool) -> Result<IntegrationWrite> {
+        Ok(unsupported_write("kilo", home, "kilo mcp add/list is real (confirmed via --help) but its config file shape wasn't inspected without a logged-in account"))
+    }
+
+    fn remove_mcp(&self, home: &Path, _names: &[String], _dry_run: bool) -> Result<IntegrationWrite> {
+        Ok(unsupported_write("kilo", home, "kilo mcp add/list is real (confirmed via --help) but its config file shape wasn't inspected without a logged-in account"))
+    }
+
+    /// `kilo run --auto -- "<prompt>" --dir <cwd>` — confirmed
+    /// non-interactive mode via `kilo run --help` on the reference
+    /// machine. `--auto` is load-bearing: without it, kilo asks for
+    /// permission before editing any file — there's no TTY to ask through
+    /// in a headless run, so it just exits having made no changes. Same
+    /// pattern as OpenCode's `--auto` (which Kilo forked from).
+    #[allow(clippy::too_many_arguments)]
+    fn run_prompt(
+        &self,
+        cwd: &Path,
+        prompt: &str,
+        backend: &ExecBackend,
+        live_output_path: Option<&Path>,
+        timeout: Duration,
+        cancel: Option<&std::sync::atomic::AtomicBool>,
+    ) -> Result<RunOutcome> {
+        run_command_live(
+            "kilo",
+            &["run".to_string(), "--auto".to_string(), "--".to_string(), prompt.to_string(), "--dir".to_string(), cwd.display().to_string()],
+            cwd,
+            backend,
+            live_output_path,
+            timeout,
+            cancel,
+        )
+    }
+
+    /// `kilo auth login` — confirmed real via `kilo auth --help` on the
+    /// reference machine.
+    fn login(&self, home: &Path) -> Result<()> {
+        run_interactive_with_home("kilo", &["auth".to_string(), "login".to_string()], home)
+    }
+
+    fn login_supported(&self) -> bool {
+        true
+    }
+}
+
 impl AgentAdapter for SingleAgentAdapter {
     fn command(&self) -> &str {
         "single-agent"
@@ -1189,6 +1257,7 @@ pub fn for_agent(name: &str) -> Option<Box<dyn AgentAdapter>> {
         "continue-cli" => Some(Box::new(ContinueCliAdapter)),
         "grok" => Some(Box::new(GrokAdapter)),
         "crush" => Some(Box::new(CrushAdapter)),
+        "kilocode" => Some(Box::new(KiloCodeAdapter)),
         "single-agent" => Some(Box::new(SingleAgentAdapter)),
         _ => None,
     }
