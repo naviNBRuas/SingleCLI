@@ -118,6 +118,15 @@ fn strip_embedded_credential_fields(dest: &Path, agent: &str) -> Result<()> {
 pub fn ensure_bootstrapped(homes_root: &Path, real_home: &Path, agent: &str) -> Result<PathBuf> {
     let dest = home_dir(homes_root, agent);
     if dest.exists() {
+        // The directory itself is never re-synced from `real_home` here,
+        // but credential stripping always re-runs: isolated homes created
+        // by an older SingleCLI build (before a given agent had a
+        // `credential_paths_for`/`strip_embedded_credential_fields` entry)
+        // can still be carrying real, possibly-stale copied credentials
+        // that were never stripped. Re-stripping on every call is cheap
+        // and idempotent, and closes that leak without disturbing an
+        // isolated home's independence from the real one otherwise.
+        strip_credentials(&dest, agent)?;
         return Ok(dest);
     }
     std::fs::create_dir_all(&dest).with_context(|| format!("creating {}", dest.display()))?;
@@ -136,14 +145,18 @@ pub fn ensure_bootstrapped(homes_root: &Path, real_home: &Path, agent: &str) -> 
             std::fs::copy(&src, &dst)?;
         }
     }
+    strip_credentials(&dest, agent)?;
+    Ok(dest)
+}
+
+fn strip_credentials(dest: &Path, agent: &str) -> Result<()> {
     for rel in credential_paths_for(agent) {
         let path = dest.join(rel);
         if path.exists() {
             std::fs::remove_file(&path).with_context(|| format!("removing seeded credential {}", path.display()))?;
         }
     }
-    strip_embedded_credential_fields(&dest, agent)?;
-    Ok(dest)
+    strip_embedded_credential_fields(dest, agent)
 }
 
 fn copy_dir_recursive(source: &Path, dest: &Path) -> Result<()> {
