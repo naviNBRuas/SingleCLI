@@ -83,6 +83,20 @@ struct ToolCall {
     #[serde(rename = "type")]
     call_type: String,
     function: FunctionCall,
+    /// Provider-specific metadata riding alongside a tool call — e.g.
+    /// Gemini's `extra_content.google.thought_signature`, which its
+    /// OpenAI-compat endpoint REQUIRES to be echoed back verbatim on the
+    /// next turn's assistant message for every function-call part, or it
+    /// 400s with "Function call is missing a thought_signature" (its
+    /// extended-thinking continuity protocol — confirmed live against
+    /// the real API, not documented in the OpenAI-compat spec this
+    /// struct otherwise follows). Captured generically (not typed to
+    /// Gemini specifically) and round-tripped opaquely: this provider
+    /// sends it back exactly as received, no interpretation needed, and
+    /// providers that never send it (the OpenAI-compat default) leave
+    /// this None and are unaffected.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    extra_content: Option<serde_json::Value>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
