@@ -567,8 +567,19 @@ fn main() -> Result<()> {
             std::process::exit(1);
         });
 
-    // Build the chat completions URL
-    let base_url = provider_spec.base_url.as_deref().unwrap_or("https://api.openai.com/v1");
+    // Build the chat completions URL. Some registered providers' base
+    // URLs carry a trailing slash (e.g. Gemini's OpenAI-compat endpoint,
+    // "https://generativelanguage.googleapis.com/v1beta/openai/") --
+    // joining that naively produces a double slash before
+    // "chat/completions", which several providers' API gateways 404 on
+    // (confirmed against Gemini's real endpoint) even though the
+    // double-slash URL looks harmless. Strip it so this can't bite any
+    // current or future provider registration.
+    let base_url = provider_spec
+        .base_url
+        .as_deref()
+        .unwrap_or("https://api.openai.com/v1")
+        .trim_end_matches('/');
     let api_url = format!("{base_url}/chat/completions");
 
     let client = Client::builder()
