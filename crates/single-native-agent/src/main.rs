@@ -52,7 +52,7 @@ enum Command {
         cwd: PathBuf,
 
         /// Maximum agentic loop steps
-        #[arg(long, default_value_t = 8)]
+        #[arg(long, default_value_t = 20)]
         max_steps: usize,
     },
 }
