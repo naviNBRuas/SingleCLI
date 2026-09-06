@@ -6,6 +6,7 @@ use single_agent_sdk::Discovery;
 use single_core::registry::AgentDefinition;
 use single_protocol::{AgentInfo, McpServerInfo, Request, Response, ResponseData, RuntimeStatus};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -35,6 +36,31 @@ pub fn handle_with_registry(
     }
 }
 
+/// Process-wide "a `doctor` run is in flight" flag.
+static DOCTOR_RUNNING: AtomicBool = AtomicBool::new(false);
+
+/// RAII guard for `DOCTOR_RUNNING`: `acquire` fails if a run is already
+/// active, and `Drop` clears the flag on every exit path (normal return
+/// or panic-unwind through `dispatch`), so a panicking `doctor::run`
+/// can't wedge the daemon into permanently refusing `doctor`.
+#[derive(Debug)]
+struct DoctorGuard;
+
+impl DoctorGuard {
+    fn acquire() -> anyhow::Result<Self> {
+        if DOCTOR_RUNNING.swap(true, Ordering::AcqRel) {
+            anyhow::bail!("doctor already running; wait for the in-flight run to finish");
+        }
+        Ok(DoctorGuard)
+    }
+}
+
+impl Drop for DoctorGuard {
+    fn drop(&mut self) {
+        DOCTOR_RUNNING.store(false, Ordering::Release);
+    }
+}
+
 fn dispatch(
     ctx: &Context,
     request: Request,
@@ -42,7 +68,14 @@ fn dispatch(
 ) -> anyhow::Result<ResponseData> {
     match request {
         Request::Status => Ok(ResponseData::Status(status(ctx))),
-        Request::Doctor => Ok(ResponseData::Doctor(doctor::run(ctx))),
+        Request::Doctor => {
+            // `doctor` probes every registered agent; two runs at once
+            // double the subprocess fan-out on the daemon for no benefit
+            // (confirmed cause of a compounded RSS spike). Serve the first,
+            // reject the rest until it finishes.
+            let _guard = DoctorGuard::acquire()?;
+            Ok(ResponseData::Doctor(doctor::run(ctx)))
+        }
         // Actual process exit happens in server.rs after this response is
         // flushed to the client — see its handle_connection.
         Request::Shutdown => Ok(ResponseData::Empty),
@@ -1797,6 +1830,16 @@ fn to_agent_info(def: &AgentDefinition, ctx: &Context) -> AgentInfo {
 mod tests {
     use super::*;
     use single_protocol::{ProviderSpec, Response};
+
+    #[test]
+    fn a_second_concurrent_doctor_is_rejected() {
+        let first = DoctorGuard::acquire().expect("first doctor acquires");
+        let err = DoctorGuard::acquire().expect_err("second is refused while the first is live");
+        assert!(err.to_string().contains("doctor already running"));
+        drop(first);
+        // Once the in-flight run ends the flag is clear again.
+        DoctorGuard::acquire().expect("doctor acquires again after the first finishes");
+    }
 
     fn test_ctx(dir: &std::path::Path) -> Context {
         let dirs = single_core::SingleDirs::from_root(dir.to_path_buf());
