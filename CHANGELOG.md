@@ -9,6 +9,21 @@ patch version (`0.0.x`) carries fixes, per [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## [Unreleased]
 
+## [0.9.4]
+
+- Fixed: `mistral-vibe` had a registry entry but no adapter, so every run
+  fell through to `GenericAdapter` and failed with "no [run] mode
+  defined". Added `MistralVibeAdapter` (`vibe -p <prompt> --auto-approve
+  --output text --trust`).
+- Fixed: `kilocode` passed `kilo run`'s old `--auto` / `--dir` flags,
+  which kilo 7.x rejects (hanging the run). Now `kilo run -- <prompt>`
+  (kilo run auto-approves by default).
+- Fixed: `copy_dir_recursive` unwrapped every `fs::copy`, so one
+  unreadable entry in a real agent config dir (an IDE socket, a
+  FIFO-backed lock, a file deleted mid-copy) aborted the whole
+  isolated-home bootstrap. Now best-effort per file, special types
+  skipped.
+
 ## [0.9.3]
 
 - Removed: the `gemini` agent and the `gemini` provider preset. Google
