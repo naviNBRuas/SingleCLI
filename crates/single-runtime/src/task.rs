@@ -480,6 +480,15 @@ fn build_context_preamble(
     for keyword in significant_keywords(description) {
         if let Ok(hits) = memory::search(conn, &keyword, None, project) {
             for hit in hits {
+                // `Task`-scoped rows are per-task failure diagnostics
+                // written by `remember_failure` — useful to look up
+                // deliberately (`single memory list --scope task`), but
+                // noise if replayed into every later agent's prompt (a
+                // busy project accumulates hundreds). Everything else a
+                // keyword search turns up is fair game.
+                if hit.scope == MemoryScope::Task {
+                    continue;
+                }
                 if !memories
                     .iter()
                     .any(|m: &single_protocol::MemoryEntry| m.id == hit.id)
@@ -1195,12 +1204,15 @@ fn maybe_fail_over(conn: &Connection, ctx: &Context, id: i64, opts: &RunTaskOpti
 }
 
 /// "Learn from errors": every task failure is also written to the memory
-/// store (project-scoped, source=tool_output, since it's this project's
-/// own tooling reporting what went wrong rather than something a user or
-/// agent asserted) so `single memory search`/`single memory list` surface
-/// past failures for whoever — human or agent — looks next. Best-effort:
-/// a memory-write failure must never mask the real task failure it's
-/// trying to record, so errors here are swallowed, not propagated.
+/// store (source=tool_output, since it's this project's own tooling
+/// reporting what went wrong rather than something a user or agent
+/// asserted) so `single memory list --scope task` surfaces past failures
+/// for whoever — human or agent — looks next. Written at `Task` scope, not
+/// `Project`: `build_context_preamble` skips `Task`-scoped rows, so these
+/// diagnostics stay out of every later agent's prompt (a busy project
+/// otherwise piled up hundreds of "task #N failed" lines in-context).
+/// Best-effort: a memory-write failure must never mask the real task
+/// failure it's trying to record, so errors here are swallowed.
 fn remember_failure(
     conn: &Connection,
     id: i64,
@@ -1213,7 +1225,7 @@ fn remember_failure(
     let _ = memory::store(
         conn,
         memory::NewMemory {
-            scope: Some(MemoryScope::Project),
+            scope: Some(MemoryScope::Task),
             source: Some(MemorySource::ToolOutput),
             project,
             agent: Some(agent.to_string()),
@@ -1332,6 +1344,46 @@ mod tests {
             note.read_at.is_some(),
             "a note delivered in the preamble should be marked read"
         );
+    }
+
+    /// `remember_failure` writes at `Task` scope precisely so its rows
+    /// don't get replayed into every later agent's prompt — `single memory
+    /// list --scope task` is the way to look at them. A keyword-matching
+    /// `Project` row in the same search still comes through.
+    #[test]
+    fn context_preamble_excludes_task_scoped_failure_memories() {
+        let conn = test_conn();
+        remember_failure(
+            &conn,
+            42,
+            "codex",
+            Some("proj".into()),
+            "fix the token refresh bug",
+            "exited with code 1",
+        );
+        memory::store(
+            &conn,
+            memory::NewMemory {
+                scope: Some(MemoryScope::Project),
+                project: Some("proj".into()),
+                title: "token refresh lesson".into(),
+                content: "the refresh endpoint needs a retry".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let prompt =
+            build_context_preamble(&conn, "fix the token refresh bug", "codex", Some("proj"));
+        assert!(prompt.contains("the refresh endpoint needs a retry"));
+        assert!(
+            !prompt.contains("task #42 failed"),
+            "task-scoped failure diagnostics must not enter the prompt"
+        );
+
+        // ...but they are still queryable on their own scope.
+        let diagnostics = memory::list(&conn, Some(MemoryScope::Task)).unwrap();
+        assert_eq!(diagnostics.len(), 1);
     }
 
     #[test]
