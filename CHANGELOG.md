@@ -9,6 +9,22 @@ patch version (`0.0.x`) carries fixes, per [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## [Unreleased]
 
+## [0.9.2]
+
+- Fixed: `single-runtimed` now reconciles orphaned tasks on startup. A
+  daemon killed mid-run left its rows stuck `running`/`created` forever
+  with no way to reap them; a freshly started daemon sweeps every
+  non-terminal row to `failed` (summary "interrupted") and records a
+  `task.reconciled` event.
+- Added: `--force` on `single task cancel` and `single task cleanup` to
+  clear a row wedged non-terminal with no live process behind it.
+- Fixed: task-failure memories (`task #N failed`) are written at `task`
+  scope instead of `project` and are skipped by the task-run context
+  preamble, so they no longer accumulate as noise in every agent's
+  prompt. Still queryable via `single memory list --scope task`.
+- Fixed: `single task list` truncates each description to its first line,
+  clipped, so multi-line agent prompts no longer break the table.
+
 ## [0.9.0]
 
 - Added: `crates/single-native-agent` — a native, in-process coding agent
