@@ -9,6 +9,26 @@ patch version (`0.0.x`) carries fixes, per [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## [Unreleased]
 
+## [0.9.5]
+
+- Fixed: `single doctor` (and the `status` / `agent list` fan-out) drove
+  `single-runtimed` to ~2.6 GB. The ~30 agent probes ran with no
+  concurrency cap — each faulting in a full node/bun runtime for
+  `--version` — a `try_wait` error left the child unreaped, and captured
+  output was unbounded. Now a global 4-permit gate around every probe, a
+  reap on the error path, a 64 KiB cap per probe, and a second concurrent
+  `doctor` is refused with a clear error.
+- Fixed: read-only commands (`status`, `task list`, `usage`,
+  `--background` dispatch) hung for minutes while a `task run` executed.
+  The daemon ran each request handler inline on the tokio worker, so a
+  blocking agent run pinned that worker; handlers now run on the blocking
+  pool and a panicking handler returns a structured error.
+- Fixed: the daemon's agent detection depended on its launcher's pinned
+  `PATH` being complete, so a new agent bin dir or a bumped nvm Node
+  version silently read as "not installed". `single-runtimed` now appends
+  the standard install locations that exist on disk at startup, keeping
+  inherited entries first.
+
 ## [0.9.4]
 
 - Fixed: `mistral-vibe` had a registry entry but no adapter, so every run
