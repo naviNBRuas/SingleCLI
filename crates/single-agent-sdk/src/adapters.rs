@@ -27,7 +27,6 @@ pub struct CodyAdapter;
 // them had a logged-in account to actually run it against and inspect the
 // resulting config file's shape, so writing one directly would be a
 // guess — same reasoning `kiro` above already documents.
-pub struct GeminiAdapter;
 pub struct QwenCodeAdapter;
 pub struct AmpAdapter;
 pub struct DroidAdapter;
@@ -702,56 +701,6 @@ impl AgentAdapter for CodyAdapter {
     }
 }
 
-impl AgentAdapter for GeminiAdapter {
-    fn command(&self) -> &str {
-        "gemini"
-    }
-
-    /// Real `gemini mcp add/remove/list` confirmed via `gemini mcp --help`,
-    /// and a documented `mcpServers` key in `~/.gemini/settings.json` —
-    /// but no account was logged in to actually produce that file and
-    /// confirm its exact shape.
-    fn configure_mcp(&self, home: &Path, _servers: &[McpServerSpec], _dry_run: bool) -> Result<IntegrationWrite> {
-        Ok(unsupported_write("gemini", home, "gemini mcp add/list/remove is real (confirmed via --help) but settings.json's exact shape wasn't inspected without a logged-in account"))
-    }
-
-    fn remove_mcp(&self, home: &Path, _names: &[String], _dry_run: bool) -> Result<IntegrationWrite> {
-        Ok(unsupported_write("gemini", home, "gemini mcp add/list/remove is real (confirmed via --help) but settings.json's exact shape wasn't inspected without a logged-in account"))
-    }
-
-    /// `gemini --prompt=<prompt> --skip-trust` — confirmed non-interactive
-    /// mode via `gemini --help` ("Run in non-interactive (headless) mode
-    /// with the given prompt"). `--prompt` takes the value directly
-    /// rather than a separate positional, so `--` doesn't help here
-    /// (confirmed live: `gemini -p -- "---..."` dumped help; `gemini
-    /// --prompt="---..."` ran correctly) — `single task run`'s
-    /// memory/notes preamble starts with a literal `"---"`, which is what
-    /// surfaced this. `--skip-trust` isn't an optional bypass here the
-    /// way `--yolo` would be (that also auto-approves every tool call) —
-    /// without it, `gemini` refuses to run at all in a directory it
-    /// hasn't seen before ("Gemini CLI is not running in a trusted
-    /// directory"), exiting 55 with no way to answer non-interactively —
-    /// confirmed live. Same "needed to function at all, not an extra
-    /// permission grant" reasoning already applied to codex's
-    /// `--skip-git-repo-check` and cursor's `--trust`.
-    #[allow(clippy::too_many_arguments)]
-    fn run_prompt(
-        &self,
-        cwd: &Path,
-        prompt: &str,
-        backend: &ExecBackend,
-        live_output_path: Option<&Path>,
-        timeout: Duration,
-        cancel: Option<&std::sync::atomic::AtomicBool>,
-    ) -> Result<RunOutcome> {
-        run_command_live("gemini", &[format!("--prompt={prompt}"), "--skip-trust".to_string()], cwd, backend, live_output_path, timeout, cancel)
-    }
-
-    // No `login`: `gemini --help` lists no `auth`/`login` subcommand —
-    // interactive launches trigger a Google OAuth browser flow on their
-    // own the first time, not a separately invokable command.
-}
-
 impl AgentAdapter for QwenCodeAdapter {
     fn command(&self) -> &str {
         "qwen"
@@ -768,10 +717,11 @@ impl AgentAdapter for QwenCodeAdapter {
         Ok(unsupported_write("qwen-code", home, "qwen mcp is real (confirmed via --help) but its settings file shape wasn't inspected without a logged-in account"))
     }
 
-    /// `qwen --prompt=<prompt>` — confirmed via `qwen --help` (same flag
-    /// behavior as upstream Gemini CLI, which this is forked from —
-    /// `--prompt` takes the value directly, `--` doesn't help; see
-    /// `GeminiAdapter::run_prompt`'s doc comment for the confirmation).
+    /// `qwen --prompt=<prompt>` — confirmed via `qwen --help`. `--prompt`
+    /// takes the value directly rather than a separate positional, so a
+    /// `--` separator doesn't help (this fork keeps upstream Gemini CLI's
+    /// flag parsing, confirmed live: `qwen -p -- "---..."` dumps help,
+    /// `qwen --prompt="---..."` runs correctly).
     #[allow(clippy::too_many_arguments)]
     fn run_prompt(
         &self,
@@ -1249,7 +1199,6 @@ pub fn for_agent(name: &str) -> Option<Box<dyn AgentAdapter>> {
         "copilot" => Some(Box::new(CopilotAdapter)),
         "kiro" => Some(Box::new(KiroAdapter)),
         "cody" => Some(Box::new(CodyAdapter)),
-        "gemini" => Some(Box::new(GeminiAdapter)),
         "qwen-code" => Some(Box::new(QwenCodeAdapter)),
         "amp" => Some(Box::new(AmpAdapter)),
         "droid" => Some(Box::new(DroidAdapter)),
@@ -1373,7 +1322,7 @@ mod tests {
         // adapter (no ClaudeAdapter-style struct) and no custom_agents.toml
         // override — it should still resolve to a working GenericAdapter
         // built straight from its AgentDefinition, not None. (Its sibling
-        // additions gemini/qwen-code/amp/droid/codebuff/continue-cli/grok/
+        // additions qwen-code/amp/droid/codebuff/continue-cli/grok/
         // crush graduated to real adapters in v0.1.19 — see the top of
         // this file — so this test picks one that's still generic.)
         let dir = tempfile::tempdir().unwrap();

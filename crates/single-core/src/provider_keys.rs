@@ -91,8 +91,8 @@ pub fn list_for_provider(path: &Path, provider: &str) -> Result<Vec<ProviderKeyS
 ///    <label> --agent <agent> <value>`.
 /// 2. A shared single-key provider (`providers.toml`/`set-key`) whose
 ///    *name* exactly matches `agent` — covers the common case of a
-///    standalone agent CLI that's also its own provider name (e.g. the
-///    `gemini` agent authenticating with the `gemini` provider's key)
+///    standalone agent CLI that's also its own provider name (e.g. a
+///    `droid` agent authenticating with the `droid` provider's key)
 ///    without injecting every configured provider's key into every
 ///    agent regardless of relevance. Skipped for a provider already
 ///    covered by a labeled key in (1), so an explicit per-agent

@@ -389,39 +389,13 @@ pub fn builtin_registry() -> Vec<AgentDefinition> {
         },
         // -- v0.1.18 additions, several since verified in v0.1.19: these
         // were originally sourced from vendor docs only (no adapter, no
-        // real execution). gemini/qwen-code/amp/droid/codebuff/
+        // real execution). qwen-code/amp/droid/codebuff/
         // continue-cli/grok/crush have since been installed and driven
         // with real `--help` output on the reference machine (see
         // single-agent-sdk::adapters' v0.1.19 additions) — `unverified` is
         // flipped to `false` for those. openhands/plandex/mistral-vibe
         // failed to install on the reference machine (pip/curl script
         // errors unrelated to SingleCLI) and stay unverified/adapter-less.
-        AgentDefinition {
-            name: "gemini".into(),
-            adapter: "gemini".into(),
-            command: "gemini".into(),
-            install_method: InstallMethod::PackageManager {
-                detail: "Google's official npm package, installs the `gemini` binary".into(),
-            },
-            bootstrap_install: Some(BootstrapInstall {
-                command: "npm install -g @google/gemini-cli".into(),
-                source: "https://github.com/google-gemini/gemini-cli".into(),
-            }),
-            unverified: false, // installed on the reference machine; run/mcp subcommands confirmed via direct --help execution
-            home_requirement: HomeRequirement::Unverified,
-            max_concurrency: None,
-            capabilities: CapabilityFlags {
-                streaming: false,
-                mcp: false, // `gemini mcp add/list/remove` confirmed real via --help, but settings.json's shape wasn't inspected without a logged-in account — see GeminiAdapter::configure_mcp
-                lsp: false,
-                tools: true,
-                sessions: false, // docs describe checkpointing (--checkpointing) for recovery, not a classic --resume flag
-                structured_output: true, // --output-format json documented
-                non_interactive_run: true,
-            },
-            config_paths: vec![".gemini/settings.json".into()],
-            notes: Some("No verified login/auth command — `gemini --help` lists no auth/login subcommand; interactive launches trigger their own Google OAuth browser flow.".into()),
-        },
         AgentDefinition {
             name: "qwen-code".into(),
             adapter: "qwen-code".into(),
@@ -831,7 +805,7 @@ mod tests {
                 .as_ref()
                 .unwrap_or_else(|| panic!("agent {} has no bootstrap install", agent.name));
             // Every install command is a real one sourced from the vendor's own
-            // docs — usually a curl script, but `cody`/`gemini`/`qwen-code`/
+            // docs — usually a curl script, but `cody`/`qwen-code`/
             // `codebuff`/`crush` document npm as their official path, and
             // `openhands` documents pip as its official path.
             assert!(
@@ -894,7 +868,6 @@ mod home_requirement_tests {
 
     #[test]
     fn most_agents_are_unverified_by_default() {
-        assert_eq!(find("gemini").home_requirement, HomeRequirement::Unverified);
         assert_eq!(find("aider").home_requirement, HomeRequirement::Unverified);
     }
 

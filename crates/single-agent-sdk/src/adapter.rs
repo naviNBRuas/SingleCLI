@@ -130,7 +130,7 @@ pub trait AgentAdapter {
 /// starts with a literal `"---"`, and without a `--` separator these
 /// agents' clap-style parsers reject that value as an unrecognized option
 /// rather than binding it as the positional prompt. **Not every agent
-/// works this way** — some (goose, grok, gemini, qwen-code, agy) define
+/// works this way** — some (goose, grok, qwen-code, agy) define
 /// their prompt as a named flag's *value* instead, where `--` breaks
 /// parsing differently and `--flag=value` is the fix instead; those get
 /// their own `run_prompt` rather than using this helper. Confirmed by

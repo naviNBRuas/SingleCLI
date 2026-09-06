@@ -121,7 +121,7 @@ pub struct ProviderPreset {
 /// - DeepSeek: `https://api.deepseek.com` (api-docs.deepseek.com)
 /// - Mistral: `https://api.mistral.ai/v1` (docs.mistral.ai)
 /// - xAI (Grok): `https://api.x.ai/v1` (docs.x.ai)
-/// - Google Gemini: `https://generativelanguage.googleapis.com/v1beta/openai/` (ai.google.dev/gemini-api/docs/openai)
+/// - Google AI Studio: `https://generativelanguage.googleapis.com/v1beta/openai/` (ai.google.dev/gemini-api/docs/openai)
 /// - OpenRouter: `https://openrouter.ai/api/v1` (openrouter.ai/docs)
 /// - Together AI: `https://api.together.xyz/v1` (docs.together.ai)
 /// - Fireworks AI: `https://api.fireworks.ai/inference/v1` (docs.fireworks.ai)
@@ -141,8 +141,8 @@ pub fn presets() -> Vec<ProviderPreset> {
         ProviderPreset { name: "mistral", env_var_name: "MISTRAL_API_KEY", base_url: "https://api.mistral.ai/v1" },
         ProviderPreset { name: "xai", env_var_name: "XAI_API_KEY", base_url: "https://api.x.ai/v1" },
         ProviderPreset {
-            name: "gemini",
-            env_var_name: "GEMINI_API_KEY",
+            name: "google",
+            env_var_name: "GOOGLE_API_KEY",
             base_url: "https://generativelanguage.googleapis.com/v1beta/openai/",
         },
         ProviderPreset { name: "openrouter", env_var_name: "OPENROUTER_API_KEY", base_url: "https://openrouter.ai/api/v1" },

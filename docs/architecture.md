@@ -799,7 +799,7 @@ fixes/expansions:
   locally installed — this registry has no execution engine yet (Phase 4
   scope), so "real tool, correct name" is the bar that matters.
 - **Agent registry.** `registry.rs::builtin_registry()` grew from 11 to
-  22 (gemini, qwen-code, amp, openhands, droid, codebuff, plandex,
+  22 (qwen-code, amp, openhands, droid, codebuff, plandex,
   continue-cli, grok, mistral-vibe, crush). None of these were installed
   on the machine this registry was built on, so every install
   command/capability flag is sourced from the vendor's own current docs
@@ -825,7 +825,7 @@ fixes/expansions:
     catalog entry gets real detection/install-planning for free instead
     of needing a bespoke adapter written for it.
 - **Provider catalog.** `providers.rs::presets()` grew from 4 to 17 (groq,
-  deepseek, mistral, xai, gemini, openrouter, together, fireworks,
+  deepseek, mistral, xai, google, openrouter, together, fireworks,
   cerebras, sambanova, deepinfra, perplexity, cohere) — every base
   URL/env var pair confirmed against the vendor's own current docs, same
   bar as the original four.
