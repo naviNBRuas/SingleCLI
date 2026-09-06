@@ -1556,4 +1556,121 @@ mod tests {
     fn home_requirement_default_is_unverified() {
         assert_eq!(HomeRequirement::default(), HomeRequirement::Unverified);
     }
+
+    /// Locks the exact wire path `single-cli::client` and
+    /// `single-runtime::server` use (serde JSON to_string then from_str
+    /// over the `Request` enum). A pre-0.9.1 daemon whose variant shape
+    /// predated the `orchestrator`/`goal`/`candidate_agents` fields would
+    /// deserialize `tasks` as an empty `Vec`, and the CLI then printed a
+    /// cheerful `Relay (0 step(s)):` with nothing run. This asserts every
+    /// field survives so that regression can't return silently.
+    #[test]
+    fn orchestrate_parallel_request_round_trips_all_fields() {
+        let request = Request::OrchestrateParallel {
+            tasks: vec![
+                ParallelTaskSpec {
+                    agent: "grok".into(),
+                    description: "say A".into(),
+                },
+                ParallelTaskSpec {
+                    agent: "grok".into(),
+                    description: "say B".into(),
+                },
+            ],
+            cwd: "/tmp".into(),
+            real_home: false,
+            timeout_secs: 300,
+            background: false,
+            orchestrator: OrchestratorMode::Fixed,
+            goal: None,
+            candidate_agents: vec![],
+        };
+        let json = serde_json::to_string(&request).expect("serialize OrchestrateParallel");
+        let parsed: Request =
+            serde_json::from_str(&json).expect("deserialize OrchestrateParallel");
+        match parsed {
+            Request::OrchestrateParallel {
+                tasks,
+                orchestrator,
+                background,
+                goal,
+                candidate_agents,
+                ..
+            } => {
+                assert_eq!(
+                    tasks.len(),
+                    2,
+                    "tasks dropped on round-trip; json={json}"
+                );
+                assert_eq!(
+                    orchestrator,
+                    OrchestratorMode::Fixed,
+                    "orchestrator dropped/changed on round-trip; json={json}"
+                );
+                assert!(!background, "background flipped on round-trip; json={json}");
+                assert_eq!(goal, None);
+                assert!(candidate_agents.is_empty());
+            }
+            other => panic!("expected OrchestrateParallel, got {other:?}; json={json}"),
+        }
+    }
+
+    /// Same guard as `orchestrate_parallel_request_round_trips_all_fields`
+    /// for `single orchestrate-graph`, whose equivalent regression printed
+    /// `Graph (0 node(s)):` after a version-skewed daemon dropped `nodes`.
+    #[test]
+    fn orchestrate_graph_request_round_trips_all_fields() {
+        let request = Request::OrchestrateGraph {
+            nodes: vec![
+                TaskGraphNode {
+                    id: "a".into(),
+                    agent: "grok".into(),
+                    description: "say A".into(),
+                    depends_on: vec![],
+                    run_if: RunCondition::Always,
+                },
+                TaskGraphNode {
+                    id: "b".into(),
+                    agent: "grok".into(),
+                    description: "say B".into(),
+                    depends_on: vec!["a".into()],
+                    run_if: RunCondition::OnSuccess,
+                },
+            ],
+            cwd: "/tmp".into(),
+            real_home: false,
+            timeout_secs: 300,
+            background: false,
+            orchestrator: OrchestratorMode::Fixed,
+            goal: None,
+            candidate_agents: vec![],
+        };
+        let json = serde_json::to_string(&request).expect("serialize OrchestrateGraph");
+        let parsed: Request = serde_json::from_str(&json).expect("deserialize OrchestrateGraph");
+        match parsed {
+            Request::OrchestrateGraph {
+                nodes,
+                orchestrator,
+                background,
+                goal,
+                candidate_agents,
+                ..
+            } => {
+                assert_eq!(
+                    nodes.len(),
+                    2,
+                    "nodes dropped on round-trip; json={json}"
+                );
+                assert_eq!(
+                    orchestrator,
+                    OrchestratorMode::Fixed,
+                    "orchestrator dropped/changed on round-trip; json={json}"
+                );
+                assert!(!background, "background flipped on round-trip; json={json}");
+                assert_eq!(goal, None);
+                assert!(candidate_agents.is_empty());
+            }
+            other => panic!("expected OrchestrateGraph, got {other:?}; json={json}"),
+        }
+    }
 }
