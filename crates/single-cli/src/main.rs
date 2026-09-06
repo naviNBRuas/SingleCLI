@@ -287,9 +287,92 @@ enum Command {
         #[arg(long)]
         real_home: bool,
     },
+    /// Coordinator conversation threads (spec E27.02 §6).
+    Session {
+        #[command(subcommand)]
+        action: SessionCommand,
+    },
+    /// Submit and track coordinator goals.
+    Goal {
+        #[command(subcommand)]
+        action: GoalCommand,
+    },
+    /// Coordinator cross-thread status.
+    Coordinator {
+        #[command(subcommand)]
+        action: CoordinatorCommand,
+    },
     /// Undocumented: internal helpers other SingleCLI-owned tooling shells out to.
     #[command(hide = true, subcommand)]
     Internal(InternalCommand),
+}
+
+#[derive(Subcommand)]
+enum SessionCommand {
+    /// Open a new session for a working directory.
+    New {
+        #[arg(long)]
+        cwd: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    Close {
+        session_id: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum GoalCommand {
+    /// Submit a goal; the coordinator plans and drives it.
+    Submit {
+        /// The goal text (all trailing words are joined).
+        text: Vec<String>,
+        /// Existing session id; a new session for --cwd is created if omitted.
+        #[arg(long)]
+        session: Option<String>,
+        #[arg(long)]
+        cwd: Option<String>,
+        /// auto (default) / plan / careful / dry.
+        #[arg(long)]
+        mode: Option<String>,
+        #[arg(long)]
+        max_dispatches: Option<u32>,
+        #[arg(long)]
+        max_minutes: Option<u32>,
+        #[arg(long)]
+        json: bool,
+    },
+    Status {
+        goal_id: String,
+        #[arg(long)]
+        json: bool,
+    },
+    List {
+        #[arg(long)]
+        session: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Add context, or `budget=N` to raise the dispatch cap and re-tick.
+    Amend {
+        goal_id: String,
+        text: Vec<String>,
+    },
+    Cancel {
+        goal_id: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum CoordinatorCommand {
+    Status {
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -2480,11 +2563,90 @@ fn main() -> anyhow::Result<()> {
             let response = client::send(&socket_path, Request::UninstallIntegrations { real_home })?;
             render::print(response, false);
         }
+        Command::Session { action } => match action {
+            SessionCommand::New { cwd, json } => {
+                let cwd = resolve_cwd(cwd);
+                let response = client::send(&socket_path, Request::SessionNew { cwd })?;
+                render::print(response, json);
+            }
+            SessionCommand::List { json } => {
+                let response = client::send(&socket_path, Request::SessionList)?;
+                render::print(response, json);
+            }
+            SessionCommand::Close { session_id } => {
+                let response = client::send(&socket_path, Request::SessionClose { session_id })?;
+                render::print(response, false);
+            }
+        },
+        Command::Goal { action } => match action {
+            GoalCommand::Submit {
+                text,
+                session,
+                cwd,
+                mode,
+                max_dispatches,
+                max_minutes,
+                json,
+            } => {
+                let text = text.join(" ");
+                if text.trim().is_empty() {
+                    anyhow::bail!("goal text is empty");
+                }
+                let session_id = match session {
+                    Some(s) => s,
+                    None => {
+                        let cwd = resolve_cwd(cwd);
+                        match client::send(&socket_path, Request::SessionNew { cwd })? {
+                            Response::Ok { data: ResponseData::Session(s) } => s.id,
+                            Response::Ok { data } => {
+                                anyhow::bail!("unexpected response creating session: {data:?}")
+                            }
+                            Response::Error { message } => anyhow::bail!(message),
+                        }
+                    }
+                };
+                let response = client::send(
+                    &socket_path,
+                    Request::GoalSubmit { session_id, text, mode, max_dispatches, max_minutes },
+                )?;
+                render::print(response, json);
+            }
+            GoalCommand::Status { goal_id, json } => {
+                let response = client::send(&socket_path, Request::GoalStatus { goal_id })?;
+                render::print(response, json);
+            }
+            GoalCommand::List { session, json } => {
+                let response = client::send(&socket_path, Request::GoalList { session_id: session })?;
+                render::print(response, json);
+            }
+            GoalCommand::Amend { goal_id, text } => {
+                let response =
+                    client::send(&socket_path, Request::GoalAmend { goal_id, text: text.join(" ") })?;
+                render::print(response, false);
+            }
+            GoalCommand::Cancel { goal_id } => {
+                let response = client::send(&socket_path, Request::GoalCancel { goal_id })?;
+                render::print(response, false);
+            }
+        },
+        Command::Coordinator { action } => match action {
+            CoordinatorCommand::Status { json } => {
+                let response = client::send(&socket_path, Request::CoordinatorStatus)?;
+                render::print(response, json);
+            }
+        },
         Command::Update { .. } => unreachable!("handled before the socket-based dispatch above"),
         Command::Internal(_) => unreachable!("handled before the socket-based dispatch above"),
     }
 
     Ok(())
+}
+
+/// Canonicalizes an optional `--cwd`, defaulting to the current directory,
+/// falling back to the raw string if it can't be resolved.
+fn resolve_cwd(cwd: Option<String>) -> String {
+    let cwd = cwd.unwrap_or_else(|| ".".to_string());
+    std::fs::canonicalize(&cwd).map(|p| p.display().to_string()).unwrap_or(cwd)
 }
 
 /// See `InternalCommand::PrintBootstrapScript`'s doc comment.

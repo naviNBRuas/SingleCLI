@@ -32,7 +32,15 @@ pub async fn serve(socket_path: &std::path::Path) -> Result<()> {
         let conn = crate::state::open(&ctx.dirs.db_path())?;
         crate::task::ensure_schema(&conn)?;
         crate::state::ensure_events_schema(&conn)?;
-        crate::task::reconcile_orphaned_tasks(&conn)
+        crate::coordinator::ensure_coordinator_schema(&conn)?;
+        let n = crate::task::reconcile_orphaned_tasks(&conn)?;
+        // spec E27.02 §4.1: a daemon just starting owns no in-flight
+        // coordinator nodes either — settle interrupted ones from their
+        // backing task rows so there are no permanent zombie nodes.
+        if let Err(e) = crate::coordinator::scheduler::reconcile(&conn) {
+            tracing::warn!(error = %e, "coordinator node reconciliation failed");
+        }
+        Ok(n)
     }) {
         Ok(0) => {}
         Ok(n) => tracing::warn!(count = n, "reconciled orphaned tasks left by a previous daemon"),
@@ -45,6 +53,19 @@ pub async fn serve(socket_path: &std::path::Path) -> Result<()> {
     // another — see `registry::TaskRegistry`'s doc comment.
     let registry = crate::registry::TaskRegistry::default();
 
+    // spec E27.02 §4 / §8: a scheduler tick timer. runs on its own OS
+    // thread (not a tokio task) because a tick can call the integrator
+    // brain role, which blocks on a real `task::run`. shares the daemon's
+    // `TaskRegistry` so a `GoalCancel`'s cancel flag reaches nodes this
+    // loop dispatched.
+    {
+        let registry = registry.clone();
+        std::thread::Builder::new()
+            .name("coordinator-tick".into())
+            .spawn(move || coordinator_tick_loop(registry))
+            .ok();
+    }
+
     loop {
         let (stream, _) = listener.accept().await?;
         let registry = registry.clone();
@@ -53,6 +74,28 @@ pub async fn serve(socket_path: &std::path::Path) -> Result<()> {
                 tracing::warn!(error = %e, "connection error");
             }
         });
+    }
+}
+
+/// Periodically drives every active coordinator goal (spec E27.02 §4).
+/// Best-effort: a failing tick logs and the loop keeps going. The interval
+/// comes from `coordinator.toml` (default 5s), re-read each iteration so a
+/// config edit is picked up without a restart.
+fn coordinator_tick_loop(registry: crate::registry::TaskRegistry) {
+    loop {
+        let interval = Context::load()
+            .map(|ctx| crate::coordinator::routing::CoordinatorConfig::load(&ctx.dirs).tick_interval_secs)
+            .unwrap_or(5)
+            .max(1);
+        std::thread::sleep(std::time::Duration::from_secs(interval));
+
+        let result = Context::load().and_then(|ctx| {
+            let mut conn = crate::state::open(&ctx.dirs.db_path())?;
+            crate::coordinator::drive(&ctx, &mut conn, &registry)
+        });
+        if let Err(e) = result {
+            tracing::debug!(error = %e, "coordinator tick failed");
+        }
     }
 }
 

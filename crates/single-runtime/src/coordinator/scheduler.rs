@@ -326,6 +326,21 @@ pub fn tick(
     health: &PoolHealth,
     dispatcher: &dyn Dispatcher,
 ) -> Result<()> {
+    // poll-based completion: the timer, not a callback, is what advances
+    // the coordinator, so first settle every node whose backing task row
+    // has gone terminal since the last tick.
+    let finished: Vec<i64> = {
+        let mut stmt = conn.prepare(
+            "SELECT n.task_id FROM graph_nodes n JOIN tasks t ON t.id = n.task_id
+             WHERE n.status = 'running' AND t.status IN ('completed','failed','cancelled')",
+        )?;
+        let ids = stmt.query_map([], |r| r.get::<_, i64>(0))?.collect::<rusqlite::Result<Vec<i64>>>()?;
+        ids
+    };
+    for task_id in finished {
+        settle_finished_node(ctx, conn, table, health, task_id)?;
+    }
+
     for goal in goal::active(conn)? {
         // a goal still `planning` with no graph is the planner's job, not
         // the scheduler's — leave it (the handler kicks planning off).
@@ -412,6 +427,20 @@ pub fn on_task_finished(
     dispatcher: &dyn Dispatcher,
     task_id: i64,
 ) -> Result<()> {
+    settle_finished_node(ctx, conn, table, health, task_id)?;
+    tick(ctx, conn, cfg, table, health, dispatcher)
+}
+
+/// records the outcome of one finished coordinator-backed task against its
+/// node and runs retry / supervisor / block, WITHOUT re-ticking. a no-op
+/// when `task_id` is not a running coordinator node.
+fn settle_finished_node(
+    ctx: &Context,
+    conn: &mut Connection,
+    table: &RoutingTable,
+    health: &PoolHealth,
+    task_id: i64,
+) -> Result<()> {
     let row: Option<(String, String, u32)> = conn
         .query_row(
             "SELECT goal_id, id, attempts FROM graph_nodes WHERE task_id = ?1 AND status = 'running'",
@@ -476,7 +505,7 @@ pub fn on_task_finished(
         }
     }
 
-    tick(ctx, conn, cfg, table, health, dispatcher)
+    Ok(())
 }
 
 fn run_supervisor_or_block(
