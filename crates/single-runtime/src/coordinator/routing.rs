@@ -1,21 +1,35 @@
-//! routing table (`~/.config/single/routing.toml`, spec §5.4) and
-//! `coordinator.toml` config. every `kind` — work kinds and the brain
-//! kinds — has a capability-ranked agent list per `effort`; the selector
-//! walks it and picks the first agent that is detected, authed, and not
-//! rate-limited, then dispatch-time fallback continues down the chain.
+//! routing table (`~/.config/single/routing.toml`, spec E27.02 §5.4) and
+//! `coordinator.toml` config.
 //!
-//! fleshed out in a later task (plan Task 6). this stub carries the config
-//! types so the module tree compiles.
+//! every `kind` — work kinds (`code`/`test`/`research`/`review`/`docs`/
+//! `infra`) and the brain kinds (`plan`/`supervise`/`integrate`) — has a
+//! capability-ranked agent list per `effort`. the list is a *preference
+//! order*, not a hardcode: `select_agent` walks it and returns the first
+//! agent that is detected, authed, and not currently rate-limited, then
+//! dispatch-time fallback (inside `task::run`) continues down the chain.
+//! an empty / exhausted list falls back to a global default order.
+//!
+//! reasoning is routed exactly like work (spec §11.1) — nothing is pinned,
+//! so the coordinator never stalls on one agent's rate limit, including
+//! for its own planning / supervising / integrating.
 
+use crate::coordinator::graph::{Effort, NodeKind};
 use serde::{Deserialize, Serialize};
+use single_core::SingleDirs;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CoordinatorConfig {
+    /// global concurrent-node ceiling across all goals (spec §4.3).
     pub max_parallel: usize,
+    /// scheduler tick-timer interval in the daemon.
     pub tick_interval_secs: u64,
+    /// per-goal cap on `node_started` events before the goal blocks (§4.5).
     pub max_dispatches_per_goal: u32,
+    /// per-goal wall-clock cap in minutes (§4.5).
     pub max_goal_minutes: u32,
+    /// per-goal supervisor-patch cap; the 6th trigger blocks instead (§5.2).
     pub max_supervisor_patches: u32,
 }
 
@@ -28,5 +42,225 @@ impl Default for CoordinatorConfig {
             max_goal_minutes: 60,
             max_supervisor_patches: 5,
         }
+    }
+}
+
+impl CoordinatorConfig {
+    /// reads `coordinator.toml`, writing the defaults to disk if it is
+    /// absent. a malformed file falls back to defaults rather than failing
+    /// every tick (same tolerance as the rest of SingleCLI's config).
+    pub fn load(dirs: &SingleDirs) -> Self {
+        let path = dirs.coordinator_file();
+        match std::fs::read_to_string(&path) {
+            Ok(s) => toml::from_str(&s).unwrap_or_default(),
+            Err(_) => {
+                let cfg = Self::default();
+                if let Ok(s) = toml::to_string_pretty(&cfg) {
+                    let _ = std::fs::create_dir_all(dirs.root());
+                    let _ = std::fs::write(&path, s);
+                }
+                cfg
+            }
+        }
+    }
+}
+
+/// `kind -> effort -> [agent]`, plus the `effort -> max_steps` knobs and
+/// the global fallback order.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RoutingTable {
+    /// outer key: kind (`code`, `plan`, …); inner key: effort
+    /// (`quick`/`standard`/`deep`).
+    pub kinds: BTreeMap<String, BTreeMap<String, Vec<String>>>,
+    /// effort -> agent max-steps.
+    pub effort_max_steps: BTreeMap<String, u32>,
+    /// used when a kind's list is empty or every entry is unavailable.
+    pub fallback_default: Vec<String>,
+}
+
+impl Default for RoutingTable {
+    fn default() -> Self {
+        // spec §5.4 seed. deliberately references agents this user's pool
+        // actually has (grok / opencode / single-openrouter / single-nvidia
+        // / single-gemini / claude).
+        let k = |pairs: &[(&str, &[&str])]| -> BTreeMap<String, Vec<String>> {
+            pairs
+                .iter()
+                .map(|(e, list)| (e.to_string(), list.iter().map(|s| s.to_string()).collect()))
+                .collect()
+        };
+        let mut kinds = BTreeMap::new();
+        kinds.insert(
+            "code".into(),
+            k(&[
+                ("quick", &["single-openrouter", "single-nvidia", "opencode"]),
+                ("standard", &["opencode", "grok", "single-openrouter"]),
+                ("deep", &["grok", "claude", "opencode"]),
+            ]),
+        );
+        kinds.insert("research".into(), k(&[("standard", &["grok", "single-gemini"])]));
+        kinds.insert("test".into(), k(&[("standard", &["opencode", "single-openrouter"])]));
+        kinds.insert("review".into(), k(&[("standard", &["grok", "claude", "opencode"])]));
+        kinds.insert("docs".into(), k(&[("standard", &["opencode", "single-openrouter"])]));
+        kinds.insert("infra".into(), k(&[("standard", &["opencode", "grok"])]));
+        kinds.insert(
+            "plan".into(),
+            k(&[("standard", &["grok", "claude", "opencode", "single-openrouter"])]),
+        );
+        kinds.insert("supervise".into(), k(&[("standard", &["grok", "claude", "opencode"])]));
+        kinds.insert("integrate".into(), k(&[("standard", &["grok", "opencode", "claude"])]));
+
+        let effort_max_steps =
+            [("quick", 8u32), ("standard", 20), ("deep", 40)].into_iter().map(|(e, n)| (e.to_string(), n)).collect();
+
+        Self {
+            kinds,
+            effort_max_steps,
+            fallback_default: ["grok", "opencode", "single-openrouter", "single-gemini", "single-nvidia", "claude"]
+                .into_iter()
+                .map(String::from)
+                .collect(),
+        }
+    }
+}
+
+impl RoutingTable {
+    pub fn load(dirs: &SingleDirs) -> Self {
+        let path = dirs.routing_file();
+        match std::fs::read_to_string(&path) {
+            Ok(s) => toml::from_str(&s).unwrap_or_default(),
+            Err(_) => {
+                let table = Self::default();
+                if let Ok(s) = toml::to_string_pretty(&table) {
+                    let _ = std::fs::create_dir_all(dirs.root());
+                    let _ = std::fs::write(&path, s);
+                }
+                table
+            }
+        }
+    }
+
+    pub fn max_steps(&self, effort: Effort) -> u32 {
+        self.effort_max_steps.get(effort.as_str()).copied().unwrap_or(20)
+    }
+
+    /// the ordered candidate list for `(kind, effort)`: the exact list,
+    /// then the kind's `standard` list, then the global fallback. de-duped,
+    /// order preserved.
+    fn candidates(&self, kind: NodeKind, effort: Effort) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        let mut push = |list: Option<&Vec<String>>| {
+            if let Some(list) = list {
+                for a in list {
+                    if !out.contains(a) {
+                        out.push(a.clone());
+                    }
+                }
+            }
+        };
+        let per_kind = self.kinds.get(kind.as_str());
+        push(per_kind.and_then(|m| m.get(effort.as_str())));
+        push(per_kind.and_then(|m| m.get("standard")));
+        for a in &self.fallback_default {
+            if !out.contains(a) {
+                out.push(a.clone());
+            }
+        }
+        out
+    }
+}
+
+/// live pool state used to filter the routing candidates (spec §5.4).
+#[derive(Debug, Clone, Default)]
+pub struct PoolHealth {
+    /// agents that are installed AND authenticated right now.
+    pub detected_authed: BTreeSet<String>,
+    /// agents observed rate-limited recently (a `tasks.rate_limited=1` row
+    /// in the last N minutes, or an explicit account status marker).
+    pub rate_limited: BTreeSet<String>,
+}
+
+impl PoolHealth {
+    fn usable(&self, agent: &str) -> bool {
+        self.detected_authed.contains(agent) && !self.rate_limited.contains(agent)
+    }
+}
+
+/// walks the `(kind, effort)` candidate list and returns the first agent
+/// that is detected, authed, and not rate-limited. if none qualify but the
+/// pool health map is empty (e.g. probing failed), returns the first raw
+/// candidate so the coordinator degrades to "try anyway" rather than
+/// stalling. `None` only when there are no candidates at all.
+pub fn select_agent(
+    table: &RoutingTable,
+    kind: NodeKind,
+    effort: Effort,
+    health: &PoolHealth,
+) -> Option<String> {
+    let candidates = table.candidates(kind, effort);
+    if let Some(a) = candidates.iter().find(|a| health.usable(a)) {
+        return Some(a.clone());
+    }
+    if health.detected_authed.is_empty() {
+        return candidates.into_iter().next();
+    }
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn health(authed: &[&str], limited: &[&str]) -> PoolHealth {
+        PoolHealth {
+            detected_authed: authed.iter().map(|s| s.to_string()).collect(),
+            rate_limited: limited.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn select_agent_skips_rate_limited_and_unauthed() {
+        let t = RoutingTable::default();
+        // code/standard = [opencode, grok, single-openrouter]
+        let h = health(&["grok", "single-openrouter"], &["grok"]);
+        assert_eq!(
+            select_agent(&t, NodeKind::Code, Effort::Standard, &h),
+            Some("single-openrouter".to_string())
+        );
+    }
+
+    #[test]
+    fn select_agent_falls_back_to_default_when_kind_list_exhausted() {
+        let t = RoutingTable::default();
+        // nothing from code/quick or code/standard is usable; only a
+        // fallback-order agent (single-gemini) is.
+        let h = health(&["single-gemini"], &[]);
+        assert_eq!(
+            select_agent(&t, NodeKind::Code, Effort::Quick, &h),
+            Some("single-gemini".to_string())
+        );
+    }
+
+    #[test]
+    fn select_agent_degrades_to_first_candidate_when_health_unknown() {
+        let t = RoutingTable::default();
+        let h = PoolHealth::default(); // probing produced nothing
+        assert_eq!(
+            select_agent(&t, NodeKind::Plan, Effort::Standard, &h),
+            Some("grok".to_string())
+        );
+    }
+
+    #[test]
+    fn config_and_table_load_write_defaults_when_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let dirs = SingleDirs::from_root(dir.path().to_path_buf());
+        let cfg = CoordinatorConfig::load(&dirs);
+        assert_eq!(cfg.max_parallel, 6);
+        assert!(dirs.coordinator_file().exists());
+
+        let t = RoutingTable::load(&dirs);
+        assert_eq!(t.max_steps(Effort::Deep), 40);
+        assert!(dirs.routing_file().exists());
     }
 }

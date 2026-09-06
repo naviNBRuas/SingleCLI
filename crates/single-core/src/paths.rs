@@ -147,6 +147,20 @@ impl SingleDirs {
         self.root.join("plugins.toml")
     }
 
+    /// Coordinator agent routing table (`routing.toml`, spec E27.02 §5.4):
+    /// per (kind, effort) capability-ranked agent lists. Seeded with
+    /// defaults on first coordinator use.
+    pub fn routing_file(&self) -> PathBuf {
+        self.root.join("routing.toml")
+    }
+
+    /// Coordinator tunables (`coordinator.toml`, spec E27.02 §8):
+    /// max_parallel, tick interval, per-goal dispatch/wall-clock caps,
+    /// supervisor patch cap.
+    pub fn coordinator_file(&self) -> PathBuf {
+        self.root.join("coordinator.toml")
+    }
+
     /// Root of every agent's SingleCLI-managed `$HOME` (see
     /// `single-core::agent_home`). SingleCLI runs agent CLIs, syncs their
     /// config, and captures/switches their credentials against
