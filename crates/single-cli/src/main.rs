@@ -948,10 +948,14 @@ enum WorktreeCommand {
     /// Show the diff a task's worktree branch would bring in if merged — never merges.
     Diff {
         task_id: i64,
+        #[arg(long)]
+        json: bool,
     },
     /// Merge a task's worktree branch into the repo it ran against.
     Merge {
         task_id: i64,
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -2330,13 +2334,22 @@ fn main() -> anyhow::Result<()> {
             }
         },
         Command::Worktree { action } => match action {
-            WorktreeCommand::Diff { task_id } => {
+            WorktreeCommand::Diff { task_id, json } => {
                 let response = client::send(&socket_path, Request::WorktreeMergePreview { task_id })?;
-                render::print(response, false);
+                render::print(response, json);
             }
-            WorktreeCommand::Merge { task_id } => {
+            WorktreeCommand::Merge { task_id, json } => {
                 let response = client::send(&socket_path, Request::WorktreeMergeApply { task_id })?;
-                render::print(response, false);
+                let merged = matches!(
+                    response,
+                    Response::Ok { data: ResponseData::WorktreeMerged(_) }
+                );
+                render::print(response, json);
+                // The worktree dir and its branch both outlive the merge;
+                // nothing else points the user at the cleanup step.
+                if merged && !json {
+                    println!("\nThe worktree and its branch still exist — `single task cleanup {task_id}` removes them.");
+                }
             }
         },
         Command::Usage { action } => match action {
