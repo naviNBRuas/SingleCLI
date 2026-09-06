@@ -23,6 +23,22 @@ pub async fn serve(socket_path: &std::path::Path) -> Result<()> {
         .with_context(|| format!("binding socket {}", socket_path.display()))?;
     tracing::info!(path = %socket_path.display(), "single-runtime listening");
 
+    // A background task runs on a thread inside this process, so a daemon
+    // that was killed mid-run left its rows stuck non-terminal with no way
+    // to reap them. A daemon just now starting owns no in-flight tasks, so
+    // sweep those orphans to `failed` before accepting connections.
+    // Best-effort: a reconciliation failure must not stop the daemon.
+    match Context::load().and_then(|ctx| {
+        let conn = crate::state::open(&ctx.dirs.db_path())?;
+        crate::task::ensure_schema(&conn)?;
+        crate::state::ensure_events_schema(&conn)?;
+        crate::task::reconcile_orphaned_tasks(&conn)
+    }) {
+        Ok(0) => {}
+        Ok(n) => tracing::warn!(count = n, "reconciled orphaned tasks left by a previous daemon"),
+        Err(e) => tracing::warn!(error = %e, "orphaned-task reconciliation failed"),
+    }
+
     // Created once for the daemon's whole lifetime and cloned (cheap — an
     // `Arc` underneath) into every connection, so a `TaskCancel` sent on
     // one connection can reach a task started with `background: true` on

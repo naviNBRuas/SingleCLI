@@ -523,17 +523,22 @@ fn dispatch(
                 .ok_or_else(|| anyhow::anyhow!("no task with id {id}"))?;
             Ok(ResponseData::Task(record))
         }
-        Request::TaskCancel { id } => {
+        Request::TaskCancel { id, force } => {
             if !registry.cancel(id) {
+                if force {
+                    let conn = task_db(ctx)?;
+                    crate::task::force_fail(&conn, id, "force-cancelled (no live process)")?;
+                    return Ok(ResponseData::Empty);
+                }
                 anyhow::bail!(
-                    "task #{id} isn't currently running in the background — nothing to cancel"
+                    "task #{id} isn't currently running in the background — nothing to cancel (pass --force to clear a stuck row)"
                 );
             }
             Ok(ResponseData::Empty)
         }
-        Request::TaskCleanup { id } => {
+        Request::TaskCleanup { id, force } => {
             let conn = task_db(ctx)?;
-            crate::task::cleanup(&conn, ctx, id)?;
+            crate::task::cleanup(&conn, ctx, id, force)?;
             Ok(ResponseData::Empty)
         }
         Request::WorktreeMergePreview { task_id } => {

@@ -378,6 +378,49 @@ fn set_status(conn: &Connection, id: i64, status: TaskStatus) -> Result<()> {
     Ok(())
 }
 
+/// Run once at daemon startup, before the socket accepts connections. A
+/// background task runs on a thread *inside* `single-runtimed` (see
+/// `run_background`) — there is no separate child process — so if the
+/// daemon was killed mid-run the work is gone and the row is orphaned:
+/// stuck `Running`/`Created` forever, with `task cancel` refusing it
+/// ("isn't running in the background") and `task cleanup` refusing it
+/// ("still running"). A freshly started daemon owns no in-flight tasks by
+/// definition, so every non-terminal row it finds at boot is one of these
+/// zombies. Mark them `Failed` with an "interrupted" summary and return
+/// the count. Best-effort at the call site — a failure here must not stop
+/// the daemon coming up.
+pub fn reconcile_orphaned_tasks(conn: &Connection) -> Result<usize> {
+    let now = chrono::Utc::now().to_rfc3339();
+    let summary = "interrupted: single-runtimed restarted while this task was in flight";
+    let affected = conn.execute(
+        "UPDATE tasks SET status = ?1, summary = ?2, updated_at = ?3 \
+         WHERE status IN ('created', 'running')",
+        params![status_as_str(TaskStatus::Failed), summary, now],
+    )?;
+    if affected > 0 {
+        let _ = crate::state::record_event(
+            conn,
+            "task.reconciled",
+            &format!("marked {affected} orphaned task(s) failed on daemon startup"),
+        );
+    }
+    Ok(affected)
+}
+
+/// Forces a stuck row terminal when there is no live process to signal —
+/// backs `single task cancel --force`. Used on a zombie the in-memory
+/// registry has no cancel handle for (a row wedged by a bug, or one a
+/// pre-reconciliation daemon left behind). No-op on an already-terminal
+/// row, so `--force` is safe to pass blindly.
+pub fn force_fail(conn: &Connection, id: i64, reason: &str) -> Result<TaskRecord> {
+    let task = get(conn, id)?.context("no such task")?;
+    if matches!(task.status, TaskStatus::Running | TaskStatus::Created) {
+        finish(conn, id, TaskStatus::Failed, task.worktree_path.as_deref(), task.artifact_path.as_deref(), None, false, Some(reason), false)?;
+        crate::state::record_event(conn, "task.force_cancelled", &format!("#{id} {reason}"))?;
+    }
+    get(conn, id)?.context("task disappeared after force-fail")
+}
+
 pub struct RunTaskOptions<'a> {
     pub description: &'a str,
     pub agent: &'a str,
@@ -656,14 +699,20 @@ pub fn run_background(
 /// Removes a finished task's git worktree and any leftover live-output
 /// file — never done automatically, since a worktree might still be worth
 /// inspecting right after a run. Errors on a task that's still `Running`
-/// rather than silently killing a worktree out from under a live agent.
-pub fn cleanup(conn: &Connection, ctx: &Context, id: i64) -> Result<()> {
+/// rather than silently killing a worktree out from under a live agent —
+/// unless `force` is set (`single task cleanup --force`), the escape hatch
+/// for a row wedged non-terminal with no live process behind it, which
+/// also gets marked `Failed` so it doesn't linger as a phantom "running".
+pub fn cleanup(conn: &Connection, ctx: &Context, id: i64, force: bool) -> Result<()> {
     let task = get(conn, id)?.context("no such task")?;
     if task.status == TaskStatus::Running || task.status == TaskStatus::Created {
-        anyhow::bail!(
-            "task #{id} is still {}; cancel it first",
-            status_as_str(task.status)
-        );
+        if !force {
+            anyhow::bail!(
+                "task #{id} is still {}; cancel it first, or pass --force to clean it up anyway",
+                status_as_str(task.status)
+            );
+        }
+        force_fail(conn, id, "force-cleaned up while non-terminal")?;
     }
     if let Some(worktree_path) = &task.worktree_path {
         let path = Path::new(worktree_path);
@@ -1714,5 +1763,52 @@ value = "-c"
         rx.recv_timeout(Duration::from_secs(5)).expect(
             "reentrant same-thread acquire_agent_slot call deadlocked - slot guard held too long",
         );
+    }
+
+    /// The daemon-restart sweep: `Running`/`Created` rows a dead daemon
+    /// abandoned become `Failed` with an "interrupted" summary; already
+    /// terminal rows are left exactly as they were.
+    #[test]
+    fn reconcile_orphaned_tasks_fails_only_non_terminal_rows() {
+        let conn = test_conn();
+        let running = create_for_cwd(&conn, "a", "claude", Path::new("/x")).unwrap();
+        set_status(&conn, running, TaskStatus::Running).unwrap();
+        let created = create_for_cwd(&conn, "b", "claude", Path::new("/x")).unwrap();
+        let done = create_for_cwd(&conn, "c", "claude", Path::new("/x")).unwrap();
+        finish(&conn, done, TaskStatus::Completed, None, None, Some(0), false, Some("ok"), false)
+            .unwrap();
+
+        assert_eq!(reconcile_orphaned_tasks(&conn).unwrap(), 2);
+        assert_eq!(get(&conn, running).unwrap().unwrap().status, TaskStatus::Failed);
+        assert_eq!(get(&conn, created).unwrap().unwrap().status, TaskStatus::Failed);
+        let done_row = get(&conn, done).unwrap().unwrap();
+        assert_eq!(done_row.status, TaskStatus::Completed);
+        assert_eq!(done_row.summary.as_deref(), Some("ok"));
+        assert!(get(&conn, running)
+            .unwrap()
+            .unwrap()
+            .summary
+            .unwrap()
+            .contains("interrupted"));
+    }
+
+    /// `task cancel --force` / `task cleanup --force` route through
+    /// `force_fail`: it clears a wedged non-terminal row and is a no-op on
+    /// one that already finished, so the flag is safe to pass blindly.
+    #[test]
+    fn force_fail_clears_stuck_rows_and_ignores_terminal_ones() {
+        let conn = test_conn();
+        let stuck = create_for_cwd(&conn, "a", "claude", Path::new("/x")).unwrap();
+        set_status(&conn, stuck, TaskStatus::Running).unwrap();
+        let rec = force_fail(&conn, stuck, "force-cancelled").unwrap();
+        assert_eq!(rec.status, TaskStatus::Failed);
+        assert_eq!(rec.summary.as_deref(), Some("force-cancelled"));
+
+        let done = create_for_cwd(&conn, "b", "claude", Path::new("/x")).unwrap();
+        finish(&conn, done, TaskStatus::Completed, None, None, Some(0), false, Some("ok"), false)
+            .unwrap();
+        let rec = force_fail(&conn, done, "should be ignored").unwrap();
+        assert_eq!(rec.status, TaskStatus::Completed);
+        assert_eq!(rec.summary.as_deref(), Some("ok"));
     }
 }

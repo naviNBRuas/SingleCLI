@@ -1216,9 +1216,20 @@ enum TaskCommand {
         json: bool,
     },
     /// Stops a task started with `--background` before it finishes on its own.
-    Cancel { id: i64 },
+    Cancel {
+        id: i64,
+        /// Force-clear a row stuck non-terminal with no live process (a
+        /// daemon-crash zombie) — marks it failed.
+        #[arg(long)]
+        force: bool,
+    },
     /// Removes a finished task's git worktree and any leftover live-output file.
-    Cleanup { id: i64 },
+    Cleanup {
+        id: i64,
+        /// Clean up even a still-running/created row, marking it failed first.
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -2021,12 +2032,12 @@ fn main() -> anyhow::Result<()> {
                 let response = client::send(&socket_path, Request::TaskInspect { id })?;
                 render::print(response, json);
             }
-            TaskCommand::Cancel { id } => {
-                let response = client::send(&socket_path, Request::TaskCancel { id })?;
+            TaskCommand::Cancel { id, force } => {
+                let response = client::send(&socket_path, Request::TaskCancel { id, force })?;
                 render::print(response, false);
             }
-            TaskCommand::Cleanup { id } => {
-                let response = client::send(&socket_path, Request::TaskCleanup { id })?;
+            TaskCommand::Cleanup { id, force } => {
+                let response = client::send(&socket_path, Request::TaskCleanup { id, force })?;
                 render::print(response, false);
             }
         },

@@ -256,6 +256,11 @@ pub enum Request {
     /// started in the background).
     TaskCancel {
         id: i64,
+        /// Mark a row stuck non-terminal with no live process behind it
+        /// (e.g. a daemon-crash zombie the startup sweep missed) `Failed`
+        /// directly, instead of the "isn't currently running" error.
+        #[serde(default)]
+        force: bool,
     },
     /// Removes a finished (`Completed`/`Failed`/`Cancelled`) task's git
     /// worktree and any leftover live-output file — SingleCLI never does
@@ -263,6 +268,10 @@ pub enum Request {
     /// inspecting after the fact. Errors if the task is still `Running`.
     TaskCleanup {
         id: i64,
+        /// Clean up a still-`Running`/`Created` row anyway, marking it
+        /// `Failed` first so it doesn't linger as a phantom "running".
+        #[serde(default)]
+        force: bool,
     },
     /// Shows the diff a worktree-isolated task's branch would bring in if
     /// merged — never merges. See `single_core::worktree::diff`.
