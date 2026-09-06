@@ -168,6 +168,31 @@ patch version (`0.0.x`) carries fixes, per [CONTRIBUTING.md](CONTRIBUTING.md).
   fallback chain repeated the same concurrency-limited agent — the slot
   is now released as soon as the agent's subprocess actually finishes.
 
+## [0.6.0]
+
+Backfilled 2026-09-06 — this section was missing (the `0.7.0` and
+`0.8.0` work landed above it without one). Contents reconstructed from
+the `0.5.0..0.6.0` commit range.
+
+- Added: `singlecli-mcp` — an MCP server exposing SingleCLI's own
+  commands as tools (`task_run`, `orchestrate_run`,
+  `orchestrate_parallel_run`, `orchestrate_graph_run`, plus agent,
+  memory, and provider tools), synced alongside the MCP registry/gateway.
+- Added: `single-lsp` — a dynamic LSP proxy that spawns the real language
+  server for an open file's extension on first use, with a generated
+  Claude Code plugin manifest driven by the LSP registry (filename-keyed
+  presets that Claude Code's manifest schema rejects are skipped).
+- Added: `--real-home` on `provider sync`, `plugin sync`,
+  `install-integrations`, and `uninstall-integrations` — write into the
+  actual `$HOME` instead of an isolated copy.
+- Added: task lifecycle hooks (`single task-hook add/list/remove/test`).
+- Added: `single web` pattern-library browsing (`single web patterns
+  list|search`) via the new `single-web` crate.
+- Fixed: `singlecli-mcp` now canonicalizes `cwd` client-side before
+  sending requests.
+- Fixed: `plugin sync` backs up `claude`'s `settings.json` before it
+  writes into a real home.
+
 ## [0.5.0]
 
 - Added: `task run --allow-fallback` fails over to another agent/account
