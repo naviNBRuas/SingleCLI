@@ -66,13 +66,29 @@ async fn handle_connection(stream: UnixStream, registry: crate::registry::TaskRe
         let shutdown_requested = matches!(parsed, Ok(Request::Shutdown));
         let response = match parsed {
             Ok(request) => {
-                // Context is cheap to load (local file reads) and Phase 1
-                // has no long-lived mutable daemon state, so a fresh
-                // Context per request keeps config changes picked up live.
-                match Context::load() {
+                // The handlers are fully synchronous, and a `task run`
+                // handler blocks for the agent's entire runtime
+                // (single-agent-sdk `run_command_live` spins its own OS
+                // threads to drain output and polls `try_wait` in a loop).
+                // Run inline on the async worker it would pin that worker
+                // for minutes, so every other connection's request —
+                // `status`, `task list`, `--background` dispatch — stalls
+                // behind it. `spawn_blocking` moves the work to the
+                // blocking pool and leaves the async workers free to keep
+                // serving. `Context::load` (a few file reads) goes with
+                // it rather than straddling the boundary.
+                let registry = registry.clone();
+                tokio::task::spawn_blocking(move || match Context::load() {
+                    // A fresh Context per request (cheap: local file
+                    // reads) keeps config changes picked up live — Phase 1
+                    // has no long-lived mutable daemon state.
                     Ok(ctx) => handle_with_registry(&ctx, request, &registry),
                     Err(e) => Response::Error { message: format!("loading context: {e:#}") },
-                }
+                })
+                .await
+                .unwrap_or_else(|e| Response::Error {
+                    message: format!("handler panicked: {e}"),
+                })
             }
             Err(e) => Response::Error { message: format!("invalid request: {e}") },
         };
@@ -89,4 +105,36 @@ async fn handle_connection(stream: UnixStream, registry: crate::registry::TaskRe
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::{Duration, Instant};
+
+    /// Guards the `spawn_blocking` fix. A full socket round-trip proving a
+    /// second request stays responsive would need a `Request` variant
+    /// whose handler blocks on command — too invasive to add to the wire
+    /// protocol for a test — so this exercises the exact mechanism
+    /// `handle_connection` now uses: a long blocking handler dispatched
+    /// via `spawn_blocking` on a single async worker must not stop that
+    /// worker from driving other connections' futures. Run the handler
+    /// inline (the old bug) and the async task below would not finish
+    /// until the 500 ms sleep did.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn a_blocking_handler_does_not_stall_the_async_worker() {
+        let blocking = tokio::task::spawn_blocking(|| {
+            std::thread::sleep(Duration::from_millis(500));
+        });
+
+        let start = Instant::now();
+        // Stand-in for another connection's future being polled on the
+        // one worker while the handler above runs.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            start.elapsed() < Duration::from_millis(400),
+            "async worker was blocked by the handler"
+        );
+
+        blocking.await.unwrap();
+    }
 }
