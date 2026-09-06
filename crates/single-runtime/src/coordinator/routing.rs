@@ -184,6 +184,39 @@ impl PoolHealth {
     fn usable(&self, agent: &str) -> bool {
         self.detected_authed.contains(agent) && !self.rate_limited.contains(agent)
     }
+
+    /// builds a live snapshot: `detected_authed` from registry adapter
+    /// discovery (an installed agent — an auth probe here would reintroduce
+    /// the E27.01 `agent list` hang, so detection is the bar and a genuine
+    /// auth failure surfaces as a dispatch failure the scheduler retries);
+    /// `rate_limited` from any `tasks` row flagged `rate_limited` in the
+    /// last 15 minutes.
+    pub fn probe(
+        registry: &[single_core::registry::AgentDefinition],
+        agents_dir: &std::path::Path,
+        conn: &rusqlite::Connection,
+    ) -> Self {
+        let detected_authed = registry
+            .iter()
+            .filter(|a| {
+                single_agent_sdk::adapters::for_agent_with_custom(&a.name, agents_dir, registry)
+                    .map(|ad| ad.discover().detected)
+                    .unwrap_or(false)
+            })
+            .map(|a| a.name.clone())
+            .collect();
+
+        let cutoff = (chrono::Utc::now() - chrono::Duration::minutes(15)).to_rfc3339();
+        let rate_limited = conn
+            .prepare("SELECT DISTINCT agent FROM tasks WHERE rate_limited = 1 AND updated_at >= ?1")
+            .and_then(|mut stmt| {
+                stmt.query_map([cutoff], |r| r.get::<_, String>(0))?
+                    .collect::<rusqlite::Result<BTreeSet<_>>>()
+            })
+            .unwrap_or_default();
+
+        Self { detected_authed, rate_limited }
+    }
 }
 
 /// walks the `(kind, effort)` candidate list and returns the first agent

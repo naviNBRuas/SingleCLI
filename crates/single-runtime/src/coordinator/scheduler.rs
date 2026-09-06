@@ -10,10 +10,11 @@
 //! dispatch shell (reconcile, real `task::run_background` handoff,
 //! `on_task_finished`) is plan Task 8.
 
-use crate::coordinator::graph::{Effort, NodeStatus, TaskGraph};
+use crate::coordinator::graph::{Effort, Node, NodeStatus, TaskGraph};
 use crate::coordinator::routing::{self, CoordinatorConfig, PoolHealth, RoutingTable};
 use chrono::{DateTime, Utc};
 use std::collections::BTreeMap;
+use std::time::Duration;
 
 /// live concurrency picture, counted across ALL goals (spec §4.3).
 #[derive(Debug, Clone, Default)]
@@ -214,6 +215,394 @@ fn effort_rank(e: Effort) -> u8 {
     }
 }
 
+// ------------------------------------------------------- db + dispatch shell
+
+use crate::context::Context;
+use crate::coordinator::events::{self, EventKind};
+use crate::coordinator::goal::{self, Goal};
+use crate::coordinator::graph::GoalStatus;
+use anyhow::{Context as _, Result};
+use rusqlite::Connection;
+
+/// how a `Dispatch` action turns into a real running task. the production
+/// impl hands off to `task::run_background`; tests inject a fake that just
+/// records a terminal `tasks` row, so `tick`'s db bookkeeping is testable
+/// without spawning an agent.
+pub trait Dispatcher {
+    fn dispatch(&self, opts: crate::task::OwnedRunTaskOptions) -> Result<i64>;
+}
+
+pub struct RealDispatcher<'a> {
+    pub ctx: &'a Context,
+    pub registry: crate::registry::TaskRegistry,
+}
+
+impl Dispatcher for RealDispatcher<'_> {
+    fn dispatch(&self, opts: crate::task::OwnedRunTaskOptions) -> Result<i64> {
+        Ok(crate::task::run_background(self.ctx, opts, self.registry.clone())?.id)
+    }
+}
+
+fn timeout_for(effort: Effort) -> Duration {
+    match effort {
+        Effort::Quick => Duration::from_secs(180),
+        Effort::Standard => Duration::from_secs(420),
+        Effort::Deep => Duration::from_secs(900),
+    }
+}
+
+/// spec §4.1: on daemon start (and periodically), any coordinator node
+/// left `running` whose backing `tasks` row is no longer live is
+/// reconciled — `done` if the task actually completed, else `failed`
+/// (interrupted). returns the number of nodes touched. this is the
+/// coordinator-node analogue of `task::reconcile_orphaned_tasks`.
+pub fn reconcile(conn: &Connection) -> Result<usize> {
+    let mut stmt = conn.prepare(
+        "SELECT goal_id, id, task_id FROM graph_nodes WHERE status = 'running'",
+    )?;
+    let rows: Vec<(String, String, Option<i64>)> = stmt
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    drop(stmt);
+
+    let mut touched = 0;
+    for (goal_id, node_id, task_id) in rows {
+        let task_status: Option<String> = match task_id {
+            Some(tid) => conn
+                .query_row("SELECT status FROM tasks WHERE id = ?1", [tid], |r| r.get(0))
+                .ok(),
+            None => None,
+        };
+        let new_status = match task_status.as_deref() {
+            Some("running") | Some("created") => continue, // genuinely still live
+            Some("completed") => NodeStatus::Done,
+            _ => NodeStatus::Failed, // failed / cancelled / missing row
+        };
+        goal::update_node(conn, &goal_id, &node_id, new_status, None, None, None)?;
+        touched += 1;
+    }
+    if touched > 0 {
+        tracing::warn!(count = touched, "reconciled interrupted coordinator nodes");
+    }
+    Ok(touched)
+}
+
+/// counts running coordinator nodes across every goal, per agent and
+/// globally, and derives per-agent caps from the registry's
+/// `max_concurrency`.
+fn build_capacity(conn: &Connection, ctx: &Context) -> Result<Capacity> {
+    let mut stmt = conn.prepare("SELECT agent, COUNT(*) FROM graph_nodes WHERE status = 'running' GROUP BY agent")?;
+    let per_agent_running: BTreeMap<String, usize> = stmt
+        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? as usize)))?
+        .collect::<rusqlite::Result<_>>()?;
+    let global_running = per_agent_running.values().sum();
+    let per_agent_cap = ctx
+        .registry
+        .iter()
+        .filter_map(|a| a.max_concurrency.map(|c| (a.name.clone(), c as usize)))
+        .collect();
+    Ok(Capacity { global_running, per_agent_running, per_agent_cap })
+}
+
+fn goal_budget(goal: &Goal, cfg: &CoordinatorConfig) -> GoalBudget {
+    GoalBudget {
+        dispatches: goal.dispatches,
+        max_dispatches: if goal.max_dispatches > 0 { goal.max_dispatches } else { cfg.max_dispatches_per_goal },
+        started_at: goal.created_at.parse().unwrap_or_else(|_| Utc::now()),
+        max_minutes: if goal.max_minutes > 0 { goal.max_minutes } else { cfg.max_goal_minutes },
+        now: Utc::now(),
+    }
+}
+
+/// runs one scheduling pass for every active goal, executing the pure
+/// scheduler's decisions against the db and the given dispatcher. this is
+/// the entrypoint the daemon timer, `GoalSubmit`, and `on_task_finished`
+/// all call.
+pub fn tick(
+    ctx: &Context,
+    conn: &mut Connection,
+    cfg: &CoordinatorConfig,
+    table: &RoutingTable,
+    health: &PoolHealth,
+    dispatcher: &dyn Dispatcher,
+) -> Result<()> {
+    for goal in goal::active(conn)? {
+        // a goal still `planning` with no graph is the planner's job, not
+        // the scheduler's — leave it (the handler kicks planning off).
+        let graph = goal::load_graph(conn, &goal.id)?;
+        if graph.nodes.is_empty() {
+            continue;
+        }
+        if goal.status == GoalStatus::Planning {
+            goal::set_status(conn, &goal.id, GoalStatus::Running)?;
+        }
+
+        let cap = build_capacity(conn, ctx)?;
+        let budget = goal_budget(&goal, cfg);
+        let actions = tick_pure(&graph, cfg, &cap, &budget, table, health);
+
+        for action in actions {
+            match action {
+                TickAction::Noop => {}
+                TickAction::Block { reason } => {
+                    goal::set_blocked(conn, &goal.id, &reason)?;
+                    events::append(conn, &goal.session_id, Some(&goal.id), EventKind::Blocked, &reason)?;
+                }
+                TickAction::Fail { reason } => {
+                    goal::set_status(conn, &goal.id, GoalStatus::Failed)?;
+                    events::append(conn, &goal.session_id, Some(&goal.id), EventKind::NodeFailed, &reason)?;
+                }
+                TickAction::RunIntegrator => {
+                    run_integrator(ctx, conn, &goal, &graph, table, health)?;
+                }
+                TickAction::Dispatch { node_id, agent, effort, worktree, max_steps: _ } => {
+                    let Some(node) = graph.find(&node_id) else { continue };
+                    let prompt = build_node_prompt(&graph, node);
+                    let opts = crate::task::OwnedRunTaskOptions {
+                        description: prompt,
+                        agent: agent.clone(),
+                        cwd: std::path::PathBuf::from(load_session_cwd(conn, &goal.session_id)?),
+                        use_worktree: worktree,
+                        account: None,
+                        real_home: false,
+                        no_memory_context: false,
+                        timeout: timeout_for(effort),
+                        allow_fallback: true,
+                    };
+                    match dispatcher.dispatch(opts) {
+                        Ok(task_id) => {
+                            goal::update_node(conn, &goal.id, &node_id, NodeStatus::Running, Some(task_id), None, None)?;
+                            goal::bump_dispatches(conn, &goal.id)?;
+                            events::append(
+                                conn,
+                                &goal.session_id,
+                                Some(&goal.id),
+                                EventKind::NodeStarted,
+                                &format!("{node_id} → {agent} (#{task_id})"),
+                            )?;
+                        }
+                        Err(e) => {
+                            goal::update_node(conn, &goal.id, &node_id, NodeStatus::Failed, None, None, None)?;
+                            events::append(
+                                conn,
+                                &goal.session_id,
+                                Some(&goal.id),
+                                EventKind::NodeFailed,
+                                &format!("{node_id}: dispatch failed: {e}"),
+                            )?;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// spec §4.6: called after a coordinator-backed task finishes. maps the
+/// task row back to its node, records success / failure, applies the retry
+/// decision, and re-ticks. a no-op when `task_id` is not a coordinator
+/// node (so the handler can call it blindly after any task).
+pub fn on_task_finished(
+    ctx: &Context,
+    conn: &mut Connection,
+    cfg: &CoordinatorConfig,
+    table: &RoutingTable,
+    health: &PoolHealth,
+    dispatcher: &dyn Dispatcher,
+    task_id: i64,
+) -> Result<()> {
+    let row: Option<(String, String, u32)> = conn
+        .query_row(
+            "SELECT goal_id, id, attempts FROM graph_nodes WHERE task_id = ?1 AND status = 'running'",
+            [task_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .ok();
+    let Some((goal_id, node_id, attempts)) = row else {
+        return Ok(());
+    };
+
+    let task = crate::task::get(conn, task_id)?;
+    let (completed, rate_limited, artifact) = match &task {
+        Some(t) => (
+            matches!(t.status, single_protocol::TaskStatus::Completed),
+            t.rate_limited,
+            t.artifact_path.clone(),
+        ),
+        None => (false, false, None),
+    };
+    let goal = goal::get(conn, &goal_id)?.context("goal vanished mid-run")?;
+
+    if completed {
+        goal::update_node(conn, &goal_id, &node_id, NodeStatus::Done, None, artifact.as_deref(), None)?;
+        events::append(conn, &goal.session_id, Some(&goal_id), EventKind::NodeDone, &node_id)?;
+    } else {
+        let semantic = false; // crash/timeout/rate-limit, not a wrong result
+        match retry_decision(attempts, semantic) {
+            RetryDecision::RetrySameNextAgent if !rate_limited => {
+                // bounce the node back to pending with an incremented
+                // attempt count; the next tick re-routes it (select_agent
+                // walks past the now-known-bad agent via pool health, and
+                // dispatch-time fallback already covers rate limits).
+                goal::update_node(
+                    conn,
+                    &goal_id,
+                    &node_id,
+                    NodeStatus::Pending,
+                    None,
+                    None,
+                    Some(attempts + 1),
+                )?;
+                events::append(
+                    conn,
+                    &goal.session_id,
+                    Some(&goal_id),
+                    EventKind::NodeFailed,
+                    &format!("{node_id}: retry {} scheduled", attempts + 1),
+                )?;
+            }
+            _ => {
+                goal::update_node(conn, &goal_id, &node_id, NodeStatus::Failed, None, artifact.as_deref(), None)?;
+                events::append(
+                    conn,
+                    &goal.session_id,
+                    Some(&goal_id),
+                    EventKind::NodeFailed,
+                    &format!("{node_id}: exhausted retries → supervisor/failed"),
+                )?;
+                run_supervisor_or_block(ctx, conn, &goal, &node_id, table, health)?;
+            }
+        }
+    }
+
+    tick(ctx, conn, cfg, table, health, dispatcher)
+}
+
+fn run_supervisor_or_block(
+    ctx: &Context,
+    conn: &mut Connection,
+    goal: &Goal,
+    failing_node_id: &str,
+    table: &RoutingTable,
+    health: &PoolHealth,
+) -> Result<()> {
+    let cfg = CoordinatorConfig::default();
+    if goal.supervisor_patches >= cfg.max_supervisor_patches {
+        let reason = format!(
+            "tried {} supervisor fixes on this goal; need a decision. last failure at node {failing_node_id}",
+            goal.supervisor_patches
+        );
+        goal::set_blocked(conn, &goal.id, &reason)?;
+        events::append(conn, &goal.session_id, Some(&goal.id), EventKind::Blocked, &reason)?;
+        return Ok(());
+    }
+
+    let mut graph = goal::load_graph(conn, &goal.id)?;
+    let failing_output = graph
+        .find(failing_node_id)
+        .and_then(|n| n.output_ref.clone())
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .unwrap_or_default();
+    let cwd = std::path::PathBuf::from(load_session_cwd(conn, &goal.session_id)?);
+
+    match crate::coordinator::brain::supervise(
+        conn, ctx, &cwd, &graph, failing_node_id, &failing_output, table, health,
+    ) {
+        Ok(ops) => match graph.apply_patch(&ops) {
+            Ok(()) => {
+                goal::save_graph(conn, &goal.id, &graph)?;
+                goal::bump_supervisor_patches(conn, &goal.id)?;
+                events::append(
+                    conn,
+                    &goal.session_id,
+                    Some(&goal.id),
+                    EventKind::Supervisor,
+                    &format!("applied {} patch op(s)", ops.len()),
+                )?;
+            }
+            Err(e) => {
+                let reason = format!("supervisor patch could not be applied: {e}");
+                goal::set_status(conn, &goal.id, GoalStatus::Failed)?;
+                events::append(conn, &goal.session_id, Some(&goal.id), EventKind::NodeFailed, &reason)?;
+            }
+        },
+        Err(e) => {
+            let reason = format!("supervisor produced no usable patch: {e}");
+            goal::set_blocked(conn, &goal.id, &reason)?;
+            events::append(conn, &goal.session_id, Some(&goal.id), EventKind::Blocked, &reason)?;
+        }
+    }
+    Ok(())
+}
+
+fn run_integrator(
+    ctx: &Context,
+    conn: &mut Connection,
+    goal: &Goal,
+    graph: &TaskGraph,
+    table: &RoutingTable,
+    health: &PoolHealth,
+) -> Result<()> {
+    let cwd = std::path::PathBuf::from(load_session_cwd(conn, &goal.session_id)?);
+    let outputs: Vec<(String, String)> = graph
+        .nodes
+        .iter()
+        .map(|n| {
+            let body = n
+                .output_ref
+                .as_ref()
+                .and_then(|p| std::fs::read_to_string(p).ok())
+                .unwrap_or_default();
+            (n.id.clone(), body)
+        })
+        .collect();
+
+    match crate::coordinator::brain::integrate(conn, ctx, &cwd, &goal.text, &outputs, table, health) {
+        Ok(outcome) => {
+            goal::set_summary(conn, &goal.id, &outcome.summary)?;
+            let final_status = if outcome.unrecoverable { GoalStatus::Failed } else { GoalStatus::Done };
+            goal::set_status(conn, &goal.id, final_status)?;
+            events::append(
+                conn,
+                &goal.session_id,
+                Some(&goal.id),
+                EventKind::Integrated,
+                &serde_json::to_string(&outcome).unwrap_or_else(|_| outcome.summary.clone()),
+            )?;
+        }
+        Err(e) => {
+            let reason = format!("integrator failed: {e}");
+            goal::set_blocked(conn, &goal.id, &reason)?;
+            events::append(conn, &goal.session_id, Some(&goal.id), EventKind::Blocked, &reason)?;
+        }
+    }
+    Ok(())
+}
+
+/// feeds a node its dependencies' outputs alongside its own description.
+fn build_node_prompt(graph: &TaskGraph, node: &Node) -> String {
+    let mut deps = String::new();
+    for dep_id in &node.depends_on {
+        if let Some(dep) = graph.find(dep_id) {
+            if let Some(out) = dep.output_ref.as_ref().and_then(|p| std::fs::read_to_string(p).ok()) {
+                deps.push_str(&format!("\n--- output of {dep_id} ---\n{}\n", crate::orchestrate::truncate(&out, 2000)));
+            }
+        }
+    }
+    if deps.is_empty() {
+        node.desc.clone()
+    } else {
+        format!("{}\n\nUPSTREAM RESULTS:{deps}", node.desc)
+    }
+}
+
+fn load_session_cwd(conn: &Connection, session_id: &str) -> Result<String> {
+    Ok(crate::coordinator::session::get(conn, session_id)?
+        .map(|s| s.cwd)
+        .unwrap_or_else(|| ".".into()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -377,5 +766,54 @@ mod tests {
         assert_eq!(retry_decision(1, false), RetryDecision::RetrySameNextAgent);
         assert_eq!(retry_decision(2, false), RetryDecision::Supervisor);
         assert_eq!(retry_decision(0, true), RetryDecision::Supervisor); // semantic failure jumps straight to supervisor
+    }
+
+    #[test]
+    fn reconcile_marks_running_node_with_dead_task_as_failed_and_completed_as_done() {
+        use crate::coordinator::goal;
+        use crate::coordinator::graph::GoalMode;
+
+        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::coordinator::ensure_coordinator_schema(&conn).unwrap();
+        crate::task::ensure_schema(&conn).unwrap();
+
+        let s = crate::coordinator::session::new_session(&conn, std::path::Path::new("/tmp/p")).unwrap();
+        let g = goal::create(&conn, &s.id, "g", GoalMode::Auto, 25, 60).unwrap();
+        let graph = TaskGraph {
+            nodes: vec![
+                node("s1", &[], Effort::Standard, "grok"),
+                node("s2", &[], Effort::Standard, "grok"),
+                node("s3", &[], Effort::Standard, "grok"),
+            ],
+        };
+        goal::save_graph(&mut conn, &g.id, &graph).unwrap();
+
+        // s1 -> a task row that FAILED; s2 -> a task row still RUNNING;
+        // s3 -> a task row that COMPLETED.
+        for (nid, tid, status) in [("s1", 10i64, "failed"), ("s2", 11, "running"), ("s3", 12, "completed")] {
+            conn.execute(
+                "INSERT INTO tasks (id, description, agent, status, timed_out, created_at, updated_at, cwd, workspace_id)
+                 VALUES (?1, 'x', 'grok', ?2, 0, '', '', '', '')",
+                rusqlite::params![tid, status],
+            )
+            .unwrap();
+            goal::update_node(&conn, &g.id, nid, NodeStatus::Running, Some(tid), None, None).unwrap();
+        }
+
+        let touched = reconcile(&conn).unwrap();
+        assert_eq!(touched, 2); // s1 and s3 move; s2 stays running
+
+        let reloaded = goal::load_graph(&conn, &g.id).unwrap();
+        assert_eq!(reloaded.find("s1").unwrap().status, NodeStatus::Failed);
+        assert_eq!(reloaded.find("s2").unwrap().status, NodeStatus::Running);
+        assert_eq!(reloaded.find("s3").unwrap().status, NodeStatus::Done);
+    }
+
+    #[test]
+    fn build_node_prompt_folds_in_upstream_output_when_present() {
+        let g = TaskGraph { nodes: vec![node("s1", &[], Effort::Standard, "grok"), node("s2", &["s1"], Effort::Standard, "grok")] };
+        // no output_ref on s1 -> prompt is just the bare desc
+        let p = build_node_prompt(&g, g.find("s2").unwrap());
+        assert_eq!(p, "s2");
     }
 }

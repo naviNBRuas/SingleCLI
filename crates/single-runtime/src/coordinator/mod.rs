@@ -20,6 +20,9 @@ pub mod routing;
 pub mod scheduler;
 pub mod session;
 
+use crate::context::Context;
+use crate::coordinator::routing::{CoordinatorConfig, PoolHealth, RoutingTable};
+use anyhow::{Context as _, Result};
 use rusqlite::Connection;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -32,6 +35,62 @@ pub fn ensure_coordinator_schema(conn: &Connection) -> anyhow::Result<()> {
     goal::ensure_schema(conn)?; // goals + graph_nodes
     events::ensure_schema(conn)?;
     Ok(())
+}
+
+fn load_env(ctx: &Context, conn: &Connection) -> (CoordinatorConfig, RoutingTable, PoolHealth) {
+    let cfg = CoordinatorConfig::load(&ctx.dirs);
+    let table = RoutingTable::load(&ctx.dirs);
+    let health = PoolHealth::probe(&ctx.registry, &ctx.dirs.agents_dir(), conn);
+    (cfg, table, health)
+}
+
+/// plans a goal still in `planning` with no graph: runs the planner brain
+/// role, persists the graph, and moves the goal to `running`. safe to call
+/// repeatedly — a no-op once a graph exists.
+pub fn plan_goal(ctx: &Context, conn: &mut Connection, goal_id: &str) -> Result<()> {
+    let goal = goal::get(conn, goal_id)?.context("no such goal")?;
+    if !goal::load_graph(conn, goal_id)?.nodes.is_empty() {
+        return Ok(());
+    }
+    let (_cfg, table, health) = load_env(ctx, conn);
+    let cwd = session::get(conn, &goal.session_id)?
+        .map(|s| s.cwd)
+        .unwrap_or_else(|| ".".into());
+    let graph = brain::plan(conn, ctx, &goal.text, std::path::Path::new(&cwd), &table, &health)?;
+    events::append(
+        conn,
+        &goal.session_id,
+        Some(goal_id),
+        events::EventKind::Plan,
+        &format!("planned {} node(s)", graph.nodes.len()),
+    )?;
+    goal::save_graph(conn, goal_id, &graph)?;
+    goal::set_status(conn, goal_id, graph::GoalStatus::Running)?;
+    Ok(())
+}
+
+/// one full scheduling pass across every active goal — reconcile is the
+/// caller's job (daemon start). called by the daemon tick timer, after
+/// `GoalSubmit`, and after any task finishes.
+pub fn drive(ctx: &Context, conn: &mut Connection, registry: &crate::registry::TaskRegistry) -> Result<()> {
+    ensure_coordinator_schema(conn)?;
+    let (cfg, table, health) = load_env(ctx, conn);
+    let dispatcher = scheduler::RealDispatcher { ctx, registry: registry.clone() };
+    scheduler::tick(ctx, conn, &cfg, &table, &health, &dispatcher)
+}
+
+/// maps a finished task back to its coordinator node (no-op if it isn't
+/// one) and advances the goal.
+pub fn notify_task_finished(
+    ctx: &Context,
+    conn: &mut Connection,
+    registry: &crate::registry::TaskRegistry,
+    task_id: i64,
+) -> Result<()> {
+    ensure_coordinator_schema(conn)?;
+    let (cfg, table, health) = load_env(ctx, conn);
+    let dispatcher = scheduler::RealDispatcher { ctx, registry: registry.clone() };
+    scheduler::on_task_finished(ctx, conn, &cfg, &table, &health, &dispatcher, task_id)
 }
 
 /// monotonic-ish id like `sess_lz4f9k0q_0007`. not a security token — just
