@@ -1004,7 +1004,7 @@ fn execute(
 
     std::fs::create_dir_all(ctx.dirs.artifacts_dir())?;
     let live_output_path = ctx.dirs.task_live_output_path(id);
-    let max_concurrency = ctx.registry.iter().find(|a| a.name == opts.agent).and_then(|a| a.max_concurrency);
+    let max_concurrency = ctx.find_agent(&opts.agent).and_then(|a| a.max_concurrency);
     // Scoped tightly around the subprocess run only: `maybe_fail_over`
     // below can recursively call `execute()` again on this same thread
     // for the *same* agent (e.g. an opencode/acct-a -> opencode/acct-b
@@ -1111,16 +1111,16 @@ fn execute(
                 Some(&error_text),
                 rate_limited,
             )?;
-            crate::state::record_event(conn, "task.failed", &format!("#{id} {e:#}"))?;
+            crate::state::record_event(conn, "task.failed", &format!("#{id} {error_text}"))?;
             remember_failure(
                 conn,
                 id,
                 opts.agent,
                 project.clone(),
                 opts.description,
-                &format!("{e:#}"),
+                &error_text,
             );
-            failure_text = Some(format!("{e:#}"));
+            failure_text = Some(error_text);
         }
     }
 
@@ -1135,11 +1135,12 @@ fn execute(
 }
 
 /// One hop of `task run --allow-fallback`: if `id`'s failure looks like a
-/// rate limit (the account was already marked `rate_limited`, or the
-/// output matches `single_core::ratelimit`'s generic signals) and a
-/// fallback chain has an entry after `opts.agent`/`opts.account`, marks
-/// the account rate-limited (if not already) and runs a linked follow-up
-/// task against the chain's next entry. The follow-up also carries
+/// rate limit — `rate_limited` is decided by the caller (`execute`, via
+/// `single_core::ratelimit::looks_like_rate_limit` on the output), or the
+/// account was already marked `rate_limited` here — and a fallback chain
+/// has an entry after `opts.agent`/`opts.account`, marks the account
+/// rate-limited (if not already) and runs a linked follow-up task against
+/// the chain's next entry. The follow-up also carries
 /// `allow_fallback: true`, so a chain of several hops walks itself one
 /// link at a time via this same function — bounded automatically, since
 /// `single_core::fallback::next_after` only ever advances forward through
