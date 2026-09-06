@@ -9,6 +9,36 @@ patch version (`0.0.x`) carries fixes, per [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## [Unreleased]
 
+## [0.9.6]
+
+Cleanup pass from `docs/queue/E27-singlecli-followups/singlecli-followups.md`.
+Kept as a patch release — `0.10.0` is reserved for the Coordinator
+redesign (E27.02); the additive flags below are conveniences, not that.
+
+- Fixed: `single provider add` on an already-registered provider rebuilt
+  the whole entry from the flags passed, silently dropping an existing
+  `base_url` or `models` list. It now merges — omitted fields keep their
+  value, `models` upsert by id — so `add` is a safe way to add one model
+  to a provider (there is still no separate `provider update`).
+- Fixed: `--allow-fallback` did not fail over on an Anthropic HTTP 529
+  `overloaded_error`; `529` and `overloaded` are now detected signals.
+- Added: `--json` on `single worktree diff` / `single worktree merge`
+  (the only list-ish commands that lacked it), and a post-merge hint
+  pointing at `single task cleanup <id>` since the worktree and branch
+  outlive the merge.
+- Added: `single provider inspect` shows the provider's `models` list,
+  which it persisted but never displayed.
+- Added: `SINGLE_MCP_IDLE_TIMEOUT_SECS` / `SINGLE_MCP_SWEEP_INTERVAL_SECS`
+  override `single-mcp`'s 600 s / 60 s defaults — mainly so the
+  lazy-spawn / reuse / idle-eviction cycle is testable without a
+  ten-minute wait. (Verified end-to-end: discovery spawns nothing, first
+  `invoke_mcp` spawns one child, a second reuses its PID, idle eviction
+  kills the OS process, a later call respawns.)
+- Internal: reuse one error binding in `task::execute`'s failure arm; use
+  `Context::find_agent` instead of an inline registry scan; correct
+  `maybe_fail_over`'s doc comment.
+- Docs: backfilled the missing `## [0.6.0]` changelog section.
+
 ## [0.9.5]
 
 - Fixed: `single doctor` (and the `status` / `agent list` fan-out) drove
