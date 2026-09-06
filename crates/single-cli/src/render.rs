@@ -830,6 +830,12 @@ fn print_provider(p: &single_protocol::ProviderSpec) {
     if let Some(url) = &p.base_url {
         println!("  base url:   {url}");
     }
+    if !p.models.is_empty() {
+        println!("  models:");
+        for m in &p.models {
+            println!("    {} ({})", m.id, m.name);
+        }
+    }
 }
 
 fn print_kg_entity(e: &single_protocol::KgEntity) {

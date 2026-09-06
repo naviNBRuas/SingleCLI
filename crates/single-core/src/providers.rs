@@ -32,10 +32,33 @@ pub fn save(path: &Path, providers: &[ProviderSpec]) -> Result<()> {
     std::fs::write(path, rendered).with_context(|| format!("writing {}", path.display()))
 }
 
+/// Register a provider, or update one that already exists. There is no
+/// separate `provider update` / `add-model` command, so `add` doubles as
+/// both: a field the caller left empty means "keep what's already there",
+/// not "clear it" — otherwise re-running `add` to tweak one flag silently
+/// dropped `base_url` and `models`. Non-empty fields overwrite; `models`
+/// merge additively (upsert by id).
 pub fn add(path: &Path, provider: ProviderSpec) -> Result<()> {
     let mut providers = load(path)?;
-    providers.retain(|p| p.name != provider.name);
-    providers.push(provider);
+    match providers.iter_mut().find(|p| p.name == provider.name) {
+        Some(existing) => {
+            if provider.base_url.is_some() {
+                existing.base_url = provider.base_url;
+            }
+            if !provider.env_var_name.is_empty() {
+                existing.env_var_name = provider.env_var_name;
+            }
+            for model in provider.models {
+                match existing.models.iter_mut().find(|m| m.id == model.id) {
+                    Some(slot) => *slot = model,
+                    None => existing.models.push(model),
+                }
+            }
+            // `secret_name` follows the `provider:<name>` convention and
+            // never changes for a given name — leave the existing one.
+        }
+        None => providers.push(provider),
+    }
     save(path, &providers)
 }
 
@@ -196,7 +219,7 @@ mod tests {
     }
 
     #[test]
-    fn add_replaces_existing_by_name() {
+    fn add_updates_an_existing_provider_in_place() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("providers.toml");
         add(&path, sample()).unwrap();
@@ -206,6 +229,36 @@ mod tests {
         let loaded = load(&path).unwrap();
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].base_url.as_deref(), Some("https://custom.example.com"));
+    }
+
+    #[test]
+    fn add_preserves_fields_the_caller_left_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("providers.toml");
+        add(&path, ProviderSpec {
+            name: "zen".into(),
+            env_var_name: "OPENCODE_API_KEY".into(),
+            secret_name: "provider:zen".into(),
+            base_url: Some("https://opencode.ai/zen/v1".into()),
+            models: vec![single_protocol::ModelSpec { id: "a".into(), name: "A".into() }],
+        })
+        .unwrap();
+
+        // Re-add naming only the new model — base_url and the existing
+        // model must survive, and the new model is appended.
+        add(&path, ProviderSpec {
+            name: "zen".into(),
+            env_var_name: "OPENCODE_API_KEY".into(),
+            secret_name: "provider:zen".into(),
+            base_url: None,
+            models: vec![single_protocol::ModelSpec { id: "b".into(), name: "B".into() }],
+        })
+        .unwrap();
+
+        let loaded = find(&path, "zen").unwrap().unwrap();
+        assert_eq!(loaded.base_url.as_deref(), Some("https://opencode.ai/zen/v1"));
+        let ids: Vec<&str> = loaded.models.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, ["a", "b"]);
     }
 
     #[test]
