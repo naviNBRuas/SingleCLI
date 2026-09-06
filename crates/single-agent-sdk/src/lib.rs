@@ -9,5 +9,5 @@ pub mod provider_sync;
 pub mod run;
 
 pub use adapter::AgentAdapter;
-pub use discover::{discover, Discovery};
+pub use discover::{augmented_path, discover, Discovery};
 pub use single_protocol::McpServerSpec;

@@ -11,5 +11,15 @@ async fn main() -> anyhow::Result<()> {
     let dirs = SingleDirs::discover()?;
     dirs.ensure_created()?;
 
+    // The launcher's pinned `PATH` (the systemd unit's, in practice) is
+    // hand-maintained and goes stale — a new agent bin dir or a bumped
+    // Node version drops out of detection until it is edited. Append the
+    // standard install locations that exist, keeping the launcher's own
+    // entries first so nothing it set is overridden.
+    if let Ok(home) = single_core::paths::real_home_dir() {
+        let path = single_agent_sdk::augmented_path(std::env::var("PATH").ok().as_deref(), &home);
+        std::env::set_var("PATH", path);
+    }
+
     single_runtime::server::serve(&dirs.socket_path()).await
 }

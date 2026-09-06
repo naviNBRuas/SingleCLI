@@ -10,9 +10,70 @@
 //! leaks enough stuck child processes to OOM the daemon.
 
 use std::io::Read;
+use std::path::Path;
 use std::process::{Command, Output, Stdio};
 use std::sync::{Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant};
+
+/// Return `$PATH` with the well-known agent bin dirs that exist on disk
+/// appended, without touching the order or precedence of anything already
+/// there.
+///
+/// The daemon inherits whatever `PATH` its launcher pinned — for the
+/// systemd unit that is a hand-maintained list, so a newly installed
+/// agent (or a bumped Node version under nvm) silently reads as "not
+/// installed" until someone edits the unit. Appending the standard
+/// install locations here means detection keeps working without that
+/// edit; existing entries stay first, so nothing overrides a binary the
+/// operator deliberately put earlier on `PATH`.
+pub fn augmented_path(current: Option<&str>, home: &Path) -> String {
+    let mut entries: Vec<String> = current
+        .unwrap_or_default()
+        .split(':')
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect();
+
+    let mut candidates: Vec<std::path::PathBuf> = [
+        ".local/bin",
+        ".local/share/single/bin",
+        ".opencode/bin",
+        ".bun/bin",
+        ".deno/bin",
+        ".cargo/bin",
+        ".codex/bin",
+        ".kilo/bin",
+        "go/bin",
+        ".local/go/bin",
+        ".npm-global/bin",
+        ".local/share/pnpm",
+    ]
+    .iter()
+    .map(|rel| home.join(rel))
+    .collect();
+
+    // Every installed Node under nvm has its own `bin`; the active one
+    // changes on a version bump, so add all of them rather than guess.
+    if let Ok(versions) = std::fs::read_dir(home.join(".nvm/versions/node")) {
+        for entry in versions.flatten() {
+            if entry.path().is_dir() {
+                candidates.push(entry.path().join("bin"));
+            }
+        }
+    }
+
+    for cand in candidates {
+        let Some(cand) = cand.to_str().map(str::to_string) else { continue };
+        // Only append a dir that (a) is not already on PATH at any
+        // position and (b) actually exists — a missing dir on PATH just
+        // slows every lookup.
+        if !entries.iter().any(|e| e == &cand) && Path::new(&cand).is_dir() {
+            entries.push(cand);
+        }
+    }
+
+    entries.join(":")
+}
 
 /// Upper bound for `<cmd> --version`. Real CLIs answer in well under a
 /// second; anything past this is a hang, not a slow start.
@@ -180,6 +241,43 @@ mod tests {
         let out = output_within(Command::new("sleep").arg("30"), Duration::from_millis(200));
         assert!(out.is_none());
         assert!(start.elapsed() < Duration::from_secs(2));
+    }
+
+    #[test]
+    fn augmented_path_appends_existing_agent_dirs_without_reordering() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(home.path().join(".local/bin")).unwrap();
+        std::fs::create_dir_all(home.path().join(".bun/bin")).unwrap();
+        // .opencode/bin deliberately not created.
+
+        let out = augmented_path(Some("/usr/bin:/bin"), home.path());
+        let parts: Vec<&str> = out.split(':').collect();
+
+        // Original entries stay first, in order.
+        assert_eq!(&parts[..2], &["/usr/bin", "/bin"]);
+        // Existing default dirs are appended...
+        let local_bin = home.path().join(".local/bin").to_str().unwrap().to_string();
+        let bun_bin = home.path().join(".bun/bin").to_str().unwrap().to_string();
+        assert!(parts.contains(&local_bin.as_str()));
+        assert!(parts.contains(&bun_bin.as_str()));
+        // ...but a default dir that does not exist on disk is not.
+        let opencode_bin = home.path().join(".opencode/bin").to_str().unwrap().to_string();
+        assert!(!parts.contains(&opencode_bin.as_str()));
+
+        // Every original entry precedes every appended one.
+        let last_original = parts.iter().position(|p| *p == "/bin").unwrap();
+        let first_appended = parts.iter().position(|p| *p == local_bin).unwrap();
+        assert!(last_original < first_appended);
+    }
+
+    #[test]
+    fn augmented_path_does_not_duplicate_a_dir_already_on_path() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(home.path().join(".local/bin")).unwrap();
+        let local_bin = home.path().join(".local/bin").to_str().unwrap().to_string();
+
+        let out = augmented_path(Some(&format!("{local_bin}:/usr/bin")), home.path());
+        assert_eq!(out.matches(&local_bin).count(), 1);
     }
 
     #[test]
