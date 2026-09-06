@@ -80,7 +80,14 @@ pub fn builtin_registry() -> Vec<AgentDefinition> {
                 source: "https://github.com/openai/codex/blob/main/README.md".into(),
             }),
             unverified: false,
-            home_requirement: HomeRequirement::IsolatedOnly,
+            // codex >= 0.147 stores its ChatGPT OAuth token in the
+            // session-global OS keyring (observed: `keyring.load
+            // service=…` / `failed to write OAuth tokens to keyring` in the
+            // binary; `.codex/auth.json` only holds a plain API key). An
+            // isolated `$HOME` can neither hold nor shadow that, so a login
+            // there never persists and every run 401s — it must use the
+            // real environment.
+            home_requirement: HomeRequirement::RealRequired,
             max_concurrency: None,
             capabilities: CapabilityFlags {
                 streaming: true,
@@ -203,7 +210,14 @@ pub fn builtin_registry() -> Vec<AgentDefinition> {
                 source: "https://cursor.com/docs/cli/installation".into(),
             }),
             unverified: false,
-            home_requirement: HomeRequirement::IsolatedOnly,
+            // cursor-agent stores its auth token via a pluggable
+            // credential store that defaults to the OS keyring
+            // (`AGENT_CLI_CREDENTIAL_STORE`; "Authentication tokens stored
+            // securely" on login, and `.cursor/cli-config.json` no longer
+            // carries an `authInfo` field). Session-global, so — like
+            // codex — it can only authenticate against the real
+            // environment.
+            home_requirement: HomeRequirement::RealRequired,
             max_concurrency: None,
             capabilities: CapabilityFlags {
                 streaming: true, // --output-format stream-json observed in --help
@@ -860,10 +874,17 @@ mod home_requirement_tests {
     }
 
     #[test]
-    fn cursor_grok_codex_break_under_real_home() {
-        assert_eq!(find("cursor").home_requirement, HomeRequirement::IsolatedOnly);
+    fn grok_is_isolated_only() {
         assert_eq!(find("grok").home_requirement, HomeRequirement::IsolatedOnly);
-        assert_eq!(find("codex").home_requirement, HomeRequirement::IsolatedOnly);
+    }
+
+    #[test]
+    fn codex_and_cursor_require_real_home() {
+        // Both moved their auth token into the session-global OS keyring;
+        // an isolated $HOME can neither hold nor shadow it, so a login
+        // there never persists. See their registry-entry comments.
+        assert_eq!(find("codex").home_requirement, HomeRequirement::RealRequired);
+        assert_eq!(find("cursor").home_requirement, HomeRequirement::RealRequired);
     }
 
     #[test]

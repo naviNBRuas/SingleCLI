@@ -776,14 +776,37 @@ fn execute(
         &format!("#{id} cwd={}", run_cwd.display()),
     )?;
 
+    // Agents whose auth is `RealRequired` (registry) can only ever
+    // authenticate against the real ambient environment — e.g. codex and
+    // cursor keep their OAuth token in the session-global OS keyring, which
+    // an isolated `$HOME` neither contains nor can shadow. Running them in
+    // an isolated home just produces a guaranteed 401. Treat them like
+    // `--real-home` unless a specific `--account` was asked for (which the
+    // caller must have a reason to expect works).
+    let forced_real_home = !opts.real_home
+        && opts.account.is_none()
+        && ctx
+            .registry
+            .iter()
+            .find(|a| a.name == opts.agent)
+            .map(|a| a.home_requirement == single_protocol::HomeRequirement::RealRequired)
+            .unwrap_or(false);
+    if forced_real_home {
+        crate::state::record_event(
+            conn,
+            "task.real_home",
+            &format!("#{id} {} authenticates only against the real environment", opts.agent),
+        )?;
+    }
+
     // Every run goes against a SingleCLI-managed home, never the real
     // ambient $HOME (single_core::agent_home docs) — either the default
     // per-agent isolated home, or, when --account is given, that named
     // account's own isolated home (single_core::account docs) — unless
     // `real_home` explicitly opts out (see RunTaskOptions::real_home
-    // docs), in which case `home` stays None and the agent inherits the
-    // daemon's own real environment.
-    let home: Option<std::path::PathBuf> = if opts.real_home {
+    // docs), or the agent is `RealRequired` (above), in which case `home`
+    // stays None and the agent inherits the daemon's own real environment.
+    let home: Option<std::path::PathBuf> = if opts.real_home || forced_real_home {
         None
     } else {
         let resolved = match opts.account {

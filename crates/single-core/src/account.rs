@@ -102,6 +102,58 @@ fn profile_dir(accounts_root: &Path, agent: &str, name: &str) -> PathBuf {
     accounts_root.join(agent).join(name)
 }
 
+/// Ask an agent CLI whether it is currently authenticated, by running its
+/// own status subcommand with `HOME` set to `home`. For agents (codex,
+/// cursor) whose token lives in the OS keyring rather than a file, this is
+/// the only reliable check. Bounded by a short timeout — a status
+/// subcommand that hangs reads as "not logged in" rather than blocking
+/// `has_live_login`'s infallible `bool` return. Exit 0 with output that
+/// does not say "not logged in" / "no credentials" counts as logged in.
+fn cli_reports_logged_in(home: &Path, command: &str, args: &[&str]) -> bool {
+    use std::io::Read;
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
+
+    let Ok(mut child) = Command::new(command)
+        .args(args)
+        .env("HOME", home)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+    else {
+        return false;
+    };
+
+    let deadline = Instant::now() + Duration::from_secs(6);
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return false;
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(50)),
+            Err(_) => return false,
+        }
+    };
+
+    let mut out = String::new();
+    if let Some(mut o) = child.stdout.take() {
+        let _ = o.read_to_string(&mut out);
+    }
+    if let Some(mut e) = child.stderr.take() {
+        let _ = e.read_to_string(&mut out);
+    }
+    let lower = out.to_ascii_lowercase();
+    status.success()
+        && !lower.contains("not logged in")
+        && !lower.contains("no credentials")
+        && !lower.contains("please run")
+        && !lower.contains("please log in")
+}
+
 /// Reads a secret from the desktop OS keyring (`secret-tool`), for agents
 /// (e.g. copilot) whose real login token lives there instead of a file
 /// under `$HOME` — the secret-service D-Bus daemon is system-wide, not
@@ -185,13 +237,25 @@ fn restore_copilot_credentials(config_path: &Path, profile: &Path) -> Result<()>
 pub fn has_live_login(home: &Path, agent: &str) -> bool {
     match agent {
         "claude" => home.join(".claude/.credentials.json").exists(),
-        "codex" => home.join(".codex/auth.json").exists(),
+        // codex >= 0.147 keeps its OAuth token in the OS keyring, not
+        // `.codex/auth.json` (that file is API-key only). Ask codex itself,
+        // in the given HOME, whether it is logged in. `.codex/auth.json`
+        // still counts (plain API-key auth).
+        "codex" => {
+            home.join(".codex/auth.json").exists()
+                || cli_reports_logged_in(home, "codex", &["login", "status"])
+        }
         "grok" => home.join(".grok/auth.json").exists(),
         "codebuff" => home.join(".config/manicode/credentials.json").exists(),
-        "cursor" => extract_json_fields(&home.join(".cursor/cli-config.json"), &["authInfo"])
-            .ok()
-            .and_then(|f| f.get("authInfo").cloned())
-            .is_some_and(|v| !v.is_null()),
+        // cursor-agent moved its token to the OS keyring too; the old
+        // `.cursor/cli-config.json` `authInfo` field is gone. Ask the CLI.
+        "cursor" => {
+            extract_json_fields(&home.join(".cursor/cli-config.json"), &["authInfo"])
+                .ok()
+                .and_then(|f| f.get("authInfo").cloned())
+                .is_some_and(|v| !v.is_null())
+                || cli_reports_logged_in(home, "cursor-agent", &["status"])
+        }
         "copilot" => copilot_identity(home)
             .map(|(host, login)| keyring_lookup("copilot-cli", &copilot_keyring_username(&host, &login)).is_some())
             .unwrap_or(false),

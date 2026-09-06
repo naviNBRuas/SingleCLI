@@ -2700,6 +2700,31 @@ fn run_agent_login(
         anyhow::bail!("{agent} is not installed; run `single agent install {agent} --yes` first");
     }
     let real_home = single_core::paths::real_home_dir()?;
+
+    // `RealRequired` agents (codex, cursor) authenticate against the
+    // session-global OS keyring — an isolated `$HOME` can't hold that
+    // token, so logging in there just loses it. Log in against the real
+    // environment, and don't try to snapshot a per-account credential file
+    // that doesn't exist. `single task run --agent <a>` already routes
+    // these to the real home automatically (see task.rs `forced_real_home`).
+    let real_required = single_core::builtin_registry()
+        .into_iter()
+        .find(|a| a.name == agent)
+        .map(|a| a.home_requirement == single_protocol::HomeRequirement::RealRequired)
+        .unwrap_or(false);
+
+    if real_required {
+        println!("logging in to {agent} (real environment — its auth is keyring-backed and session-global)...");
+        adapter.login(&real_home)?;
+        println!("done.");
+        if single_core::account::has_live_login(&real_home, agent) {
+            println!("{agent} is logged in. `single task run --agent {agent}` will use it.");
+        } else {
+            eprintln!("note: {agent} did not report a persisted login afterwards — re-run its own `{agent} login` / status command directly to check.");
+        }
+        return Ok(());
+    }
+
     let home = single_core::agent_home::ensure_bootstrapped(&dirs.homes_dir(), &real_home, agent)?;
     println!(
         "logging in to {agent} (isolated home: {})...",
