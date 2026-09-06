@@ -20,7 +20,7 @@
 //! **Idle eviction**: a spawned server stays in `sessions` (and its child
 //! process alive) only while something's actually using it — a background
 //! sweep (`spawn_idle_sweeper`) drops any session untouched for longer than
-//! `IDLE_TIMEOUT`, so a task that used `postgres` for ten minutes and moved
+//! the idle timeout, so a task that used `postgres` for ten minutes and moved
 //! on doesn't keep that process (and every other server it ever touched)
 //! resident for the rest of the agent's session. Eviction is just removing
 //! the map entry: once nothing else holds the `Arc<ChildSession>`,
@@ -63,10 +63,26 @@ type ChildSession = rmcp::service::RunningService<RoleClient, ()>;
 /// How long a spawned server may sit unused before the sweep evicts it.
 /// Generous enough that a task pausing between tool calls doesn't thrash
 /// respawns, short enough that an agent's whole session doesn't keep every
-/// server it ever touched resident.
-const IDLE_TIMEOUT: Duration = Duration::from_secs(600);
+/// server it ever touched resident. `SINGLE_MCP_IDLE_TIMEOUT_SECS`
+/// overrides it — mainly so the lazy-spawn / reuse / eviction cycle can
+/// be exercised end-to-end without a ten-minute wait.
+const DEFAULT_IDLE_TIMEOUT_SECS: u64 = 600;
 /// How often the sweep checks for idle sessions.
-const SWEEP_INTERVAL: Duration = Duration::from_secs(60);
+/// `SINGLE_MCP_SWEEP_INTERVAL_SECS` overrides it, same rationale.
+const DEFAULT_SWEEP_INTERVAL_SECS: u64 = 60;
+
+fn duration_from_env(var: &str, default_secs: u64) -> Duration {
+    let secs = std::env::var(var).ok().and_then(|v| v.parse::<u64>().ok()).filter(|s| *s > 0).unwrap_or(default_secs);
+    Duration::from_secs(secs)
+}
+
+fn idle_timeout() -> Duration {
+    duration_from_env("SINGLE_MCP_IDLE_TIMEOUT_SECS", DEFAULT_IDLE_TIMEOUT_SECS)
+}
+
+fn sweep_interval() -> Duration {
+    duration_from_env("SINGLE_MCP_SWEEP_INTERVAL_SECS", DEFAULT_SWEEP_INTERVAL_SECS)
+}
 
 struct SessionEntry {
     session: Arc<ChildSession>,
@@ -249,17 +265,18 @@ fn is_idle(last_used: Instant, now: Instant, timeout: Duration) -> bool {
 }
 
 /// Runs for the lifetime of the gateway process, dropping any spawned
-/// server's session once it's been unused for `IDLE_TIMEOUT`. Holds its own
+/// server's session once it's been unused for the idle timeout. Holds its own
 /// `Arc` clone of the map rather than a reference to `Gateway`, so it can be
 /// started from `Gateway::new()` before the `Gateway` itself is handed to
 /// `.serve()`.
 fn spawn_idle_sweeper(sessions: Arc<Mutex<HashMap<String, SessionEntry>>>) {
     tokio::spawn(async move {
+        let (sweep, timeout) = (sweep_interval(), idle_timeout());
         loop {
-            tokio::time::sleep(SWEEP_INTERVAL).await;
+            tokio::time::sleep(sweep).await;
             let now = Instant::now();
             let mut sessions = sessions.lock().await;
-            sessions.retain(|_, entry| !is_idle(entry.last_used, now, IDLE_TIMEOUT));
+            sessions.retain(|_, entry| !is_idle(entry.last_used, now, timeout));
         }
     });
 }
