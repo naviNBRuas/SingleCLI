@@ -9,6 +9,14 @@ patch version (`0.0.x`) carries fixes, per [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## [Unreleased]
 
+## [0.9.3]
+
+- Removed: the `gemini` agent and the `gemini` provider preset. Google
+  discontinued the standalone Gemini CLI (its agent role is covered by
+  `agy`/Antigravity) and its API is now Google AI Studio — the provider
+  preset is replaced by `google` (`GOOGLE_API_KEY`, same
+  OpenAI-compatible `v1beta/openai` endpoint). `qwen-code` is unaffected.
+
 ## [0.9.2]
 
 - Fixed: `single-runtimed` now reconciles orphaned tasks on startup. A
