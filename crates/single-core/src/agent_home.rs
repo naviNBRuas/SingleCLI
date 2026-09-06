@@ -177,9 +177,21 @@ fn copy_dir_recursive(source: &Path, dest: &Path) -> Result<()> {
         let dest_path = dest.join(entry.file_name());
         if file_type.is_dir() {
             copy_dir_recursive(&entry.path(), &dest_path)?;
-        } else {
-            std::fs::copy(entry.path(), &dest_path)?;
+        } else if file_type.is_file() {
+            // Best-effort per file: a real agent config dir can hold a
+            // FIFO/socket (an IDE-integration socket, a `daemon.lock`
+            // that's really a pipe) or a file the owning app deletes out
+            // from under us mid-copy. `fs::copy` errors hard on those
+            // (`copy_file_range` returns ENXIO for a non-regular source,
+            // ENOENT for a vanished one) — a single odd entry shouldn't
+            // abort bootstrapping the whole isolated home, so skip it and
+            // keep going. `is_file()` above already filters out the
+            // obvious special types before we even try.
+            if let Err(e) = std::fs::copy(entry.path(), &dest_path) {
+                tracing::debug!(path = %entry.path().display(), error = %e, "skipping unreadable entry during isolated-home bootstrap");
+            }
         }
+        // Anything else (FIFO, socket, char/block device) is skipped.
     }
     Ok(())
 }
