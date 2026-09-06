@@ -732,6 +732,91 @@ fn print_data(data: ResponseData) {
                 println!("{profile}");
             }
         }
+        ResponseData::Session(s) => {
+            println!("{}  {}  [{}]", s.id, s.cwd, s.status);
+            if !s.title.is_empty() {
+                println!("  {}", s.title);
+            }
+        }
+        ResponseData::Sessions(sessions) => {
+            if sessions.is_empty() {
+                println!("(no sessions)");
+            }
+            for s in sessions {
+                println!("{:<26} {:<8} {}", s.id, s.status, s.title);
+            }
+        }
+        ResponseData::GoalId(id) => println!("{id}"),
+        ResponseData::Goals(goals) => {
+            if goals.is_empty() {
+                println!("(no goals)");
+            }
+            for g in goals {
+                println!(
+                    "{:<24} {:<10} {:>2}/{:<2}  {}",
+                    g.id, g.status, g.dispatches, g.max_dispatches, g.text
+                );
+            }
+        }
+        ResponseData::GoalView(v) => {
+            println!("{}  [{}]  {}", v.goal.id, v.goal.status, v.goal.text);
+            println!(
+                "  dispatches {}/{}  mode {}",
+                v.goal.dispatches, v.goal.max_dispatches, v.goal.mode
+            );
+            if let Some(r) = &v.blocked_reason {
+                println!("  blocked: {r}");
+            }
+            if let Some(r) = &v.result_summary {
+                println!("  result: {r}");
+            }
+            if !v.nodes.is_empty() {
+                println!("  nodes:");
+                for n in &v.nodes {
+                    let dep = if n.depends_on.is_empty() {
+                        String::new()
+                    } else {
+                        format!("  <- {}", n.depends_on.join(","))
+                    };
+                    let tid = n.task_id.map(|t| format!(" #{t}")).unwrap_or_default();
+                    println!(
+                        "    {:<4} {:<8}/{:<8} {:<9} {}{}{}",
+                        n.id, n.kind, n.effort, n.status, n.agent, tid, dep
+                    );
+                }
+            }
+            if !v.recent_events.is_empty() {
+                println!("  events:");
+                for e in &v.recent_events {
+                    println!("    {} {:<12} {}", e.ts, e.kind, e.body);
+                }
+            }
+        }
+        ResponseData::CoordinatorEvents(events) => {
+            for e in events {
+                println!("{} {:<12} {}", e.ts, e.kind, e.body);
+            }
+        }
+        ResponseData::CoordinatorSnapshot(s) => {
+            println!("coordinator — max_parallel {}", s.max_parallel);
+            let show = |label: &str, goals: &[single_protocol::GoalSummary]| {
+                if !goals.is_empty() {
+                    println!("  {label}:");
+                    for g in goals {
+                        println!("    {:<24} {}", g.id, g.text);
+                    }
+                }
+            };
+            show("running", &s.running_goals);
+            show("queued", &s.queued_goals);
+            show("blocked", &s.blocked_goals);
+            println!("  pool:");
+            for p in s.pool {
+                let cap = p.cap.map(|c| c.to_string()).unwrap_or_else(|| "-".into());
+                let rl = if p.rate_limited { " rate-limited" } else { "" };
+                println!("    {:<20} {}/{}{}", p.agent, p.running, cap, rl);
+            }
+        }
         ResponseData::Empty => {}
     }
 }

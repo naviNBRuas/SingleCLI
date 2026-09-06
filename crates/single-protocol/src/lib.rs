@@ -593,6 +593,50 @@ pub enum Request {
     PluginAddPreset {
         name: String,
     },
+
+    // ---- coordinator (spec E27.02 §6) ---------------------------------
+    /// Opens a conversation thread. One per Zed panel thread.
+    SessionNew {
+        cwd: String,
+    },
+    SessionList,
+    SessionClose {
+        session_id: String,
+    },
+    /// Submits a goal into a session; the coordinator plans and drives it.
+    GoalSubmit {
+        session_id: String,
+        text: String,
+        #[serde(default)]
+        mode: Option<String>,
+        #[serde(default)]
+        max_dispatches: Option<u32>,
+        #[serde(default)]
+        max_minutes: Option<u32>,
+    },
+    GoalStatus {
+        goal_id: String,
+    },
+    GoalList {
+        #[serde(default)]
+        session_id: Option<String>,
+    },
+    /// Adds context / raises the budget (`budget=N`) / answers a blocked
+    /// question, then re-ticks.
+    GoalAmend {
+        goal_id: String,
+        text: String,
+    },
+    GoalCancel {
+        goal_id: String,
+    },
+    /// Poll (the messenger long-polls) for a session's events after an id.
+    SessionEvents {
+        session_id: String,
+        since_event_id: i64,
+    },
+    /// Cross-thread snapshot: running/queued goals + pool capacity.
+    CoordinatorStatus,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -690,7 +734,87 @@ pub enum ResponseData {
     PluginSyncResults(Vec<PluginInstallResult>),
     WorktreeDiff(String),
     WorktreeMerged(WorktreeMergeResult),
+
+    // ---- coordinator (spec E27.02 §6) --------------------------------
+    Session(SessionInfo),
+    Sessions(Vec<SessionInfo>),
+    GoalId(String),
+    GoalView(GoalView),
+    Goals(Vec<GoalSummary>),
+    CoordinatorEvents(Vec<CoordinatorEvent>),
+    CoordinatorSnapshot(CoordinatorSnapshot),
+
     Empty,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SessionInfo {
+    pub id: String,
+    pub cwd: String,
+    pub title: String,
+    pub created_at: String,
+    pub updated_at: String,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GoalSummary {
+    pub id: String,
+    pub session_id: String,
+    pub text: String,
+    pub mode: String,
+    pub status: String,
+    pub dispatches: u32,
+    pub max_dispatches: u32,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NodeView {
+    pub id: String,
+    pub desc: String,
+    pub kind: String,
+    pub effort: String,
+    pub agent: String,
+    pub depends_on: Vec<String>,
+    pub status: String,
+    pub task_id: Option<i64>,
+    pub attempts: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CoordinatorEvent {
+    pub id: i64,
+    pub goal_id: Option<String>,
+    pub ts: String,
+    pub kind: String,
+    pub body: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GoalView {
+    pub goal: GoalSummary,
+    pub blocked_reason: Option<String>,
+    pub result_summary: Option<String>,
+    pub nodes: Vec<NodeView>,
+    pub recent_events: Vec<CoordinatorEvent>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PoolAgentStatus {
+    pub agent: String,
+    pub running: usize,
+    pub cap: Option<usize>,
+    pub rate_limited: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CoordinatorSnapshot {
+    pub running_goals: Vec<GoalSummary>,
+    pub queued_goals: Vec<GoalSummary>,
+    pub blocked_goals: Vec<GoalSummary>,
+    pub pool: Vec<PoolAgentStatus>,
+    pub max_parallel: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1671,6 +1795,57 @@ mod tests {
                 assert!(candidate_agents.is_empty());
             }
             other => panic!("expected OrchestrateGraph, got {other:?}; json={json}"),
+        }
+    }
+
+    #[test]
+    fn coordinator_requests_round_trip_through_json() {
+        let reqs = vec![
+            Request::SessionNew { cwd: "/tmp/p".into() },
+            Request::SessionList,
+            Request::SessionClose { session_id: "sess_1".into() },
+            Request::GoalSubmit {
+                session_id: "sess_1".into(),
+                text: "do the thing".into(),
+                mode: Some("auto".into()),
+                max_dispatches: Some(10),
+                max_minutes: None,
+            },
+            Request::GoalStatus { goal_id: "goal_1".into() },
+            Request::GoalList { session_id: None },
+            Request::GoalAmend { goal_id: "goal_1".into(), text: "budget=30".into() },
+            Request::GoalCancel { goal_id: "goal_1".into() },
+            Request::SessionEvents { session_id: "sess_1".into(), since_event_id: 4 },
+            Request::CoordinatorStatus,
+        ];
+        for r in reqs {
+            let json = serde_json::to_string(&r).unwrap();
+            let back: Request = serde_json::from_str(&json).unwrap();
+            assert_eq!(
+                serde_json::to_value(&r).unwrap(),
+                serde_json::to_value(&back).unwrap(),
+                "round-trip changed {json}"
+            );
+        }
+    }
+
+    #[test]
+    fn coordinator_responses_round_trip_through_json() {
+        let data = vec![
+            ResponseData::GoalId("goal_1".into()),
+            ResponseData::Sessions(vec![SessionInfo {
+                id: "sess_1".into(),
+                cwd: "/tmp".into(),
+                title: "t".into(),
+                created_at: "now".into(),
+                updated_at: "now".into(),
+                status: "active".into(),
+            }]),
+            ResponseData::Empty,
+        ];
+        for d in data {
+            let json = serde_json::to_string(&d).unwrap();
+            let _back: ResponseData = serde_json::from_str(&json).unwrap();
         }
     }
 }

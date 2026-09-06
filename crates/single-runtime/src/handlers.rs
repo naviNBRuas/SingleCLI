@@ -1509,6 +1509,164 @@ fn dispatch(
             single_core::profile::use_profile(&ctx.dirs, &name)?;
             Ok(ResponseData::Empty)
         }
+
+        // ---- coordinator (spec E27.02 §6) ---------------------------
+        Request::SessionNew { cwd } => {
+            let conn = coordinator_db(ctx)?;
+            let s = crate::coordinator::session::new_session(&conn, std::path::Path::new(&cwd))?;
+            Ok(ResponseData::Session(session_info(s)))
+        }
+        Request::SessionList => {
+            let conn = coordinator_db(ctx)?;
+            let out = crate::coordinator::session::list(&conn)?.into_iter().map(session_info).collect();
+            Ok(ResponseData::Sessions(out))
+        }
+        Request::SessionClose { session_id } => {
+            let conn = coordinator_db(ctx)?;
+            crate::coordinator::session::close(&conn, &session_id)?;
+            Ok(ResponseData::Empty)
+        }
+        Request::GoalSubmit { session_id, text, mode, max_dispatches, max_minutes } => {
+            let mut conn = coordinator_db(ctx)?;
+            let gmode = mode
+                .as_deref()
+                .and_then(|m| crate::coordinator::graph::GoalMode::parse(m).ok())
+                .unwrap_or(crate::coordinator::graph::GoalMode::Auto);
+            let cfg = crate::coordinator::routing::CoordinatorConfig::load(&ctx.dirs);
+            let g = crate::coordinator::goal::create(
+                &conn,
+                &session_id,
+                &text,
+                gmode,
+                max_dispatches.unwrap_or(cfg.max_dispatches_per_goal),
+                max_minutes.unwrap_or(cfg.max_goal_minutes),
+            )?;
+            // plan + first tick, best-effort: a planning failure leaves the
+            // goal recoverable (blocked / re-amendable) rather than losing it.
+            if let Err(e) = crate::coordinator::plan_goal(ctx, &mut conn, &g.id) {
+                let _ = crate::coordinator::goal::set_blocked(&conn, &g.id, &format!("planning failed: {e:#}"));
+            } else if let Err(e) = crate::coordinator::drive(ctx, &mut conn, registry) {
+                tracing::warn!(goal = %g.id, error = %e, "initial coordinator drive failed");
+            }
+            Ok(ResponseData::GoalId(g.id))
+        }
+        Request::GoalStatus { goal_id } => {
+            let conn = coordinator_db(ctx)?;
+            let g = crate::coordinator::goal::get(&conn, &goal_id)?
+                .ok_or_else(|| anyhow::anyhow!("no such goal: {goal_id}"))?;
+            let nodes = crate::coordinator::goal::load_graph(&conn, &goal_id)?
+                .nodes
+                .into_iter()
+                .map(|n| single_protocol::NodeView {
+                    id: n.id,
+                    desc: n.desc,
+                    kind: n.kind.as_str().to_string(),
+                    effort: n.effort.as_str().to_string(),
+                    agent: n.agent,
+                    depends_on: n.depends_on,
+                    status: n.status.as_str().to_string(),
+                    task_id: n.task_id,
+                    attempts: n.attempts,
+                })
+                .collect();
+            let recent_events = crate::coordinator::events::for_goal(&conn, &goal_id, 40)?
+                .into_iter()
+                .map(coordinator_event)
+                .collect();
+            Ok(ResponseData::GoalView(single_protocol::GoalView {
+                goal: goal_summary(&g),
+                blocked_reason: g.blocked_reason.clone(),
+                result_summary: g.result_summary.clone(),
+                nodes,
+                recent_events,
+            }))
+        }
+        Request::GoalList { session_id } => {
+            let conn = coordinator_db(ctx)?;
+            let out = crate::coordinator::goal::list(&conn, session_id.as_deref())?
+                .iter()
+                .map(goal_summary)
+                .collect();
+            Ok(ResponseData::Goals(out))
+        }
+        Request::GoalAmend { goal_id, text } => {
+            let mut conn = coordinator_db(ctx)?;
+            let g = crate::coordinator::goal::get(&conn, &goal_id)?
+                .ok_or_else(|| anyhow::anyhow!("no such goal: {goal_id}"))?;
+            // `budget=N` raises the dispatch cap and re-opens a blocked goal;
+            // anything else is recorded as an amendment note.
+            if let Some(n) = text.strip_prefix("budget=").and_then(|s| s.trim().parse::<u32>().ok()) {
+                crate::coordinator::goal::raise_dispatch_cap(&conn, &goal_id, n)?;
+            } else {
+                crate::coordinator::events::append(
+                    &conn,
+                    &g.session_id,
+                    Some(&goal_id),
+                    crate::coordinator::events::EventKind::Message,
+                    &format!("amendment: {text}"),
+                )?;
+            }
+            let _ = crate::coordinator::drive(ctx, &mut conn, registry);
+            Ok(ResponseData::Empty)
+        }
+        Request::GoalCancel { goal_id } => {
+            let conn = coordinator_db(ctx)?;
+            crate::coordinator::goal::set_status(
+                &conn,
+                &goal_id,
+                crate::coordinator::graph::GoalStatus::Cancelled,
+            )?;
+            Ok(ResponseData::Empty)
+        }
+        Request::SessionEvents { session_id, since_event_id } => {
+            let conn = coordinator_db(ctx)?;
+            let out = crate::coordinator::events::since(&conn, &session_id, since_event_id)?
+                .into_iter()
+                .map(coordinator_event)
+                .collect();
+            Ok(ResponseData::CoordinatorEvents(out))
+        }
+        Request::CoordinatorStatus => {
+            let conn = coordinator_db(ctx)?;
+            let all = crate::coordinator::goal::list(&conn, None)?;
+            let pick = |want: crate::coordinator::graph::GoalStatus| {
+                all.iter().filter(|g| g.status == want).map(goal_summary).collect::<Vec<_>>()
+            };
+            let cfg = crate::coordinator::routing::CoordinatorConfig::load(&ctx.dirs);
+            let health = crate::coordinator::routing::PoolHealth::probe(
+                &ctx.registry,
+                &ctx.dirs.agents_dir(),
+                &conn,
+            );
+            let mut running_per_agent: std::collections::BTreeMap<String, usize> = Default::default();
+            {
+                let mut stmt = conn.prepare(
+                    "SELECT agent, COUNT(*) FROM graph_nodes WHERE status = 'running' GROUP BY agent",
+                )?;
+                let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? as usize)))?;
+                for row in rows {
+                    let (a, c) = row?;
+                    running_per_agent.insert(a, c);
+                }
+            }
+            let pool = ctx
+                .registry
+                .iter()
+                .map(|a| single_protocol::PoolAgentStatus {
+                    agent: a.name.clone(),
+                    running: running_per_agent.get(&a.name).copied().unwrap_or(0),
+                    cap: a.max_concurrency.map(|c| c as usize),
+                    rate_limited: health.rate_limited.contains(&a.name),
+                })
+                .collect();
+            Ok(ResponseData::CoordinatorSnapshot(single_protocol::CoordinatorSnapshot {
+                running_goals: pick(crate::coordinator::graph::GoalStatus::Running),
+                queued_goals: pick(crate::coordinator::graph::GoalStatus::Queued),
+                blocked_goals: pick(crate::coordinator::graph::GoalStatus::Blocked),
+                pool,
+                max_parallel: cfg.max_parallel,
+            }))
+        }
     }
 }
 
@@ -1627,6 +1785,41 @@ fn notes_db(ctx: &Context) -> anyhow::Result<rusqlite::Connection> {
     let conn = crate::state::open(&ctx.dirs.db_path())?;
     single_core::notes::ensure_schema(&conn)?;
     Ok(conn)
+}
+
+fn coordinator_db(ctx: &Context) -> anyhow::Result<rusqlite::Connection> {
+    let conn = crate::state::open(&ctx.dirs.db_path())?;
+    crate::task::ensure_schema(&conn)?; // graph nodes point at tasks rows
+    crate::coordinator::ensure_coordinator_schema(&conn)?;
+    Ok(conn)
+}
+
+fn goal_summary(g: &crate::coordinator::goal::Goal) -> single_protocol::GoalSummary {
+    single_protocol::GoalSummary {
+        id: g.id.clone(),
+        session_id: g.session_id.clone(),
+        text: g.text.clone(),
+        mode: g.mode.as_str().to_string(),
+        status: g.status.as_str().to_string(),
+        dispatches: g.dispatches,
+        max_dispatches: g.max_dispatches,
+        created_at: g.created_at.clone(),
+    }
+}
+
+fn session_info(s: crate::coordinator::session::Session) -> single_protocol::SessionInfo {
+    single_protocol::SessionInfo {
+        id: s.id,
+        cwd: s.cwd,
+        title: s.title,
+        created_at: s.created_at,
+        updated_at: s.updated_at,
+        status: s.status,
+    }
+}
+
+fn coordinator_event(e: crate::coordinator::events::Event) -> single_protocol::CoordinatorEvent {
+    single_protocol::CoordinatorEvent { id: e.id, goal_id: e.goal_id, ts: e.ts, kind: e.kind, body: e.body }
 }
 
 fn documents_db(ctx: &Context) -> anyhow::Result<rusqlite::Connection> {
