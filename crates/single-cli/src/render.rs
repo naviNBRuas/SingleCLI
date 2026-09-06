@@ -309,7 +309,7 @@ fn print_data(data: ResponseData) {
                     format!("{:?}", task.status).to_lowercase(),
                     task.agent,
                     task.created_at,
-                    task.description
+                    one_line_description(&task.description, 80)
                 );
             }
         }
@@ -847,5 +847,50 @@ fn install_summary(method: &InstallMethod) -> String {
         InstallMethod::StandaloneBinary { detail } => format!("standalone ({detail})"),
         InstallMethod::PackageManager { detail } => format!("package manager ({detail})"),
         InstallMethod::Unsupported { reason } => format!("unsupported ({reason})"),
+    }
+}
+
+/// A task description can be a full multi-line agent prompt. `single task
+/// list` is a one-row-per-task table (and gets piped to `grep`), so it
+/// shows only the first line, clipped to `max_chars`, with a trailing `…`
+/// whenever anything was dropped. `single task inspect` still prints the
+/// description in full.
+fn one_line_description(description: &str, max_chars: usize) -> String {
+    let first_line = description.lines().next().unwrap_or("");
+    let clipped: String = first_line.chars().take(max_chars).collect();
+    let dropped_tail = clipped.chars().count() < first_line.chars().count();
+    let dropped_lines = description.trim_end() != first_line;
+    if dropped_tail || dropped_lines {
+        format!("{clipped}…")
+    } else {
+        clipped
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::one_line_description;
+
+    #[test]
+    fn one_line_description_leaves_a_short_single_line_untouched() {
+        assert_eq!(one_line_description("add a .gitignore", 80), "add a .gitignore");
+    }
+
+    #[test]
+    fn one_line_description_marks_a_dropped_second_line() {
+        assert_eq!(
+            one_line_description("first line\nsecond line", 80),
+            "first line…"
+        );
+    }
+
+    #[test]
+    fn one_line_description_ignores_a_bare_trailing_newline() {
+        assert_eq!(one_line_description("only line\n", 80), "only line");
+    }
+
+    #[test]
+    fn one_line_description_clips_an_overlong_first_line() {
+        assert_eq!(one_line_description(&"x".repeat(200), 10), format!("{}…", "x".repeat(10)));
     }
 }
