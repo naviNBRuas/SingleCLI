@@ -1,6 +1,7 @@
 pub mod billing;
 pub mod bootstrap;
 pub mod context;
+pub mod coordinator;
 pub mod docker;
 pub mod doctor;
 pub mod documents;

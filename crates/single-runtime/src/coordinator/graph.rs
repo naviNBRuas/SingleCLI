@@ -1,0 +1,299 @@
+//! the `TaskGraph` value type (spec §3.3) and the pure operations the
+//! scheduler and supervisor run over it: ready-set, critical-path depth,
+//! and patch-op application. no db, no io — `goal.rs` persists it.
+
+use anyhow::{bail, Result};
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+
+macro_rules! str_enum {
+    ($name:ident { $($variant:ident => $s:literal),+ $(,)? }) => {
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+        #[serde(rename_all = "snake_case")]
+        pub enum $name { $($variant),+ }
+        impl $name {
+            pub fn as_str(self) -> &'static str {
+                match self { $(Self::$variant => $s),+ }
+            }
+            pub fn parse(s: &str) -> Result<Self> {
+                match s { $($s => Ok(Self::$variant),)+ other => bail!("unknown {}: {other}", stringify!($name)) }
+            }
+        }
+    };
+}
+
+str_enum!(NodeKind {
+    Code => "code", Test => "test", Research => "research", Review => "review",
+    Docs => "docs", Infra => "infra", Plan => "plan", Supervise => "supervise",
+    Integrate => "integrate",
+});
+
+str_enum!(Effort { Quick => "quick", Standard => "standard", Deep => "deep" });
+
+str_enum!(NodeStatus {
+    Pending => "pending", Ready => "ready", Running => "running", Done => "done",
+    Failed => "failed", Skipped => "skipped", Blocked => "blocked",
+});
+
+str_enum!(GoalMode { Auto => "auto", Plan => "plan", Careful => "careful", Dry => "dry" });
+
+str_enum!(GoalStatus {
+    Planning => "planning", Running => "running", Queued => "queued", Blocked => "blocked",
+    Done => "done", Failed => "failed", Cancelled => "cancelled",
+});
+
+impl NodeKind {
+    /// spec §11.3: `code` / `infra` nodes run in their own worktree by
+    /// default; `research` / `review` / `docs` and the brain kinds run in
+    /// the goal cwd (read-only or additive).
+    pub fn default_worktree(self) -> bool {
+        matches!(self, NodeKind::Code | NodeKind::Infra)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Node {
+    pub id: String,
+    pub desc: String,
+    pub kind: NodeKind,
+    pub effort: Effort,
+    #[serde(default)]
+    pub agent: String,
+    #[serde(default)]
+    pub depends_on: Vec<String>,
+    #[serde(default = "pending")]
+    pub status: NodeStatus,
+    #[serde(default)]
+    pub task_id: Option<i64>,
+    #[serde(default)]
+    pub attempts: u32,
+    #[serde(default)]
+    pub worktree: bool,
+    #[serde(default)]
+    pub output_ref: Option<String>,
+}
+
+fn pending() -> NodeStatus {
+    NodeStatus::Pending
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct TaskGraph {
+    pub nodes: Vec<Node>,
+}
+
+/// one supervisor edit to the graph (spec §5.2). the scheduler applies a
+/// list of these and re-ticks; `Block` is the only op that reaches the
+/// human, `Abort` fails the goal.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "op", rename_all = "snake_case")]
+pub enum PatchOp {
+    Retarget { node: String, #[serde(default)] kind: Option<NodeKind>, #[serde(default)] agent: Option<String> },
+    Split { node: String, into: Vec<Node> },
+    MarkOptional { node: String },
+    AddDependency { node: String, on: String },
+    Block { node: String, question: String },
+    Abort { reason: String },
+}
+
+impl TaskGraph {
+    pub fn find(&self, id: &str) -> Option<&Node> {
+        self.nodes.iter().find(|n| n.id == id)
+    }
+    pub fn find_mut(&mut self, id: &str) -> Option<&mut Node> {
+        self.nodes.iter_mut().find(|n| n.id == id)
+    }
+
+    /// nodes eligible to run now: `pending`/`ready` and every dependency is
+    /// `done` or `skipped`. a dependency id with no matching node counts as
+    /// unsatisfied (defensive — a malformed plan can't unblock a node).
+    pub fn ready_set(&self) -> Vec<&Node> {
+        self.nodes
+            .iter()
+            .filter(|n| matches!(n.status, NodeStatus::Pending | NodeStatus::Ready))
+            .filter(|n| {
+                n.depends_on.iter().all(|dep| {
+                    matches!(
+                        self.find(dep).map(|d| d.status),
+                        Some(NodeStatus::Done) | Some(NodeStatus::Skipped)
+                    )
+                })
+            })
+            .collect()
+    }
+
+    /// longest chain of dependents rooted at `id` (0 = nothing depends on
+    /// it). the scheduler prefers higher values at admit time so the
+    /// critical path is never the thing left waiting.
+    pub fn critical_path_depth(&self, id: &str) -> usize {
+        let mut memo: HashMap<&str, usize> = HashMap::new();
+        self.depth_of(id, &mut memo)
+    }
+
+    fn depth_of<'a>(&'a self, id: &'a str, memo: &mut HashMap<&'a str, usize>) -> usize {
+        if let Some(&d) = memo.get(id) {
+            return d;
+        }
+        let dependents: Vec<&str> = self
+            .nodes
+            .iter()
+            .filter(|n| n.depends_on.iter().any(|d| d == id))
+            .map(|n| n.id.as_str())
+            .collect();
+        let d = dependents.iter().map(|dep| 1 + self.depth_of(dep, memo)).max().unwrap_or(0);
+        memo.insert(id, d);
+        d
+    }
+
+    pub fn is_all_terminal(&self) -> bool {
+        self.nodes.iter().all(|n| {
+            matches!(
+                n.status,
+                NodeStatus::Done | NodeStatus::Failed | NodeStatus::Skipped | NodeStatus::Blocked
+            )
+        })
+    }
+
+    pub fn has_failure(&self) -> bool {
+        self.nodes.iter().any(|n| n.status == NodeStatus::Failed)
+    }
+
+    /// applies supervisor patch ops in order. an `Abort` short-circuits
+    /// with an error tagged so the scheduler can fail the goal.
+    pub fn apply_patch(&mut self, ops: &[PatchOp]) -> Result<()> {
+        for op in ops {
+            match op {
+                PatchOp::Retarget { node, kind, agent } => {
+                    let n = self.find_mut(node).ok_or_else(|| anyhow::anyhow!("retarget: no node {node}"))?;
+                    if let Some(k) = kind {
+                        n.kind = *k;
+                    }
+                    if let Some(a) = agent {
+                        n.agent = a.clone();
+                    }
+                    // give the retargeted node a fresh shot
+                    n.status = NodeStatus::Pending;
+                    n.task_id = None;
+                }
+                PatchOp::Split { node, into } => {
+                    if self.find(node).is_none() {
+                        bail!("split: no node {node}");
+                    }
+                    let new_ids: Vec<String> = into.iter().map(|n| n.id.clone()).collect();
+                    // rewire anything depending on the split node onto all
+                    // of its replacements
+                    for n in &mut self.nodes {
+                        if let Some(pos) = n.depends_on.iter().position(|d| d == node) {
+                            n.depends_on.remove(pos);
+                            n.depends_on.extend(new_ids.iter().cloned());
+                        }
+                    }
+                    self.nodes.retain(|n| &n.id != node);
+                    self.nodes.extend(into.iter().cloned());
+                }
+                PatchOp::MarkOptional { node } => {
+                    let n = self.find_mut(node).ok_or_else(|| anyhow::anyhow!("mark_optional: no node {node}"))?;
+                    // only skip if it hasn't already produced a result
+                    if !matches!(n.status, NodeStatus::Done | NodeStatus::Running) {
+                        n.status = NodeStatus::Skipped;
+                    }
+                }
+                PatchOp::AddDependency { node, on } => {
+                    if self.find(on).is_none() {
+                        bail!("add_dependency: no node {on}");
+                    }
+                    let n = self.find_mut(node).ok_or_else(|| anyhow::anyhow!("add_dependency: no node {node}"))?;
+                    if !n.depends_on.iter().any(|d| d == on) {
+                        n.depends_on.push(on.clone());
+                    }
+                }
+                PatchOp::Block { node, .. } => {
+                    let n = self.find_mut(node).ok_or_else(|| anyhow::anyhow!("block: no node {node}"))?;
+                    n.status = NodeStatus::Blocked;
+                }
+                PatchOp::Abort { reason } => {
+                    bail!("coordinator abort: {reason}");
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn node(id: &str, deps: &[&str]) -> Node {
+        Node {
+            id: id.into(),
+            desc: format!("do {id}"),
+            kind: NodeKind::Code,
+            effort: Effort::Standard,
+            agent: String::new(),
+            depends_on: deps.iter().map(|s| s.to_string()).collect(),
+            status: NodeStatus::Pending,
+            task_id: None,
+            attempts: 0,
+            worktree: false,
+            output_ref: None,
+        }
+    }
+
+    #[test]
+    fn ready_set_returns_only_dependency_satisfied_pending_nodes() {
+        let mut g = TaskGraph { nodes: vec![node("s1", &[]), node("s2", &["s1"])] };
+        let ready: Vec<_> = g.ready_set().iter().map(|n| n.id.clone()).collect();
+        assert_eq!(ready, vec!["s1"]);
+
+        g.find_mut("s1").unwrap().status = NodeStatus::Done;
+        let ready: Vec<_> = g.ready_set().iter().map(|n| n.id.clone()).collect();
+        assert_eq!(ready, vec!["s2"]);
+    }
+
+    #[test]
+    fn critical_path_prefers_longest_chain() {
+        let g = TaskGraph {
+            nodes: vec![node("s1", &[]), node("s2", &["s1"]), node("s3", &["s2"]), node("s4", &[])],
+        };
+        assert_eq!(g.critical_path_depth("s1"), 2);
+        assert_eq!(g.critical_path_depth("s4"), 0);
+    }
+
+    #[test]
+    fn apply_patch_split_rewires_dependents() {
+        let mut g = TaskGraph { nodes: vec![node("s1", &[]), node("s2", &["s1"])] };
+        g.apply_patch(&[PatchOp::Split {
+            node: "s1".into(),
+            into: vec![node("s1a", &[]), node("s1b", &[])],
+        }])
+        .unwrap();
+        assert!(g.find("s1").is_none());
+        let s2 = g.find("s2").unwrap();
+        assert_eq!(s2.depends_on, vec!["s1a", "s1b"]);
+    }
+
+    #[test]
+    fn apply_patch_mark_optional_skips_unrun_node() {
+        let mut g = TaskGraph { nodes: vec![node("s1", &[])] };
+        g.apply_patch(&[PatchOp::MarkOptional { node: "s1".into() }]).unwrap();
+        assert_eq!(g.find("s1").unwrap().status, NodeStatus::Skipped);
+    }
+
+    #[test]
+    fn apply_patch_abort_is_an_error() {
+        let mut g = TaskGraph { nodes: vec![node("s1", &[])] };
+        let err = g.apply_patch(&[PatchOp::Abort { reason: "no path".into() }]).unwrap_err();
+        assert!(err.to_string().contains("abort"));
+    }
+
+    #[test]
+    fn patch_ops_deserialize_from_json() {
+        let v: Vec<PatchOp> = serde_json::from_str(
+            r#"[{"op":"retarget","node":"s1","agent":"grok"},
+                {"op":"add_dependency","node":"s2","on":"s1"}]"#,
+        )
+        .unwrap();
+        assert_eq!(v.len(), 2);
+    }
+}
