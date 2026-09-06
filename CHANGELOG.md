@@ -9,11 +9,42 @@ patch version (`0.0.x`) carries fixes, per [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## [Unreleased]
 
+## [0.10.0]
+
+The Coordinator subsystem (`docs/queue/E27-singlecli-followups/02-coordinator-redesign.md`).
+SingleCLI can now take a goal and drive a self-organising pool of agents:
+a deterministic scheduler owns concurrency, the queue, per-goal budgets,
+retries and restart reconciliation, while an LLM is consulted only to
+plan, supervise on failure, and integrate. `single task run` and
+`single orchestrate-*` are unchanged low-level escape hatches.
+
+- Added: `crates/single-runtime/src/coordinator/` — four additive SQLite
+  tables (`sessions`, `goals`, `graph_nodes`, `coordinator_events`),
+  created idempotently and reconciled on daemon start so an interrupted
+  run leaves no permanent zombie rows.
+- Added: a pure `tick()` scheduler — ready-set from the dependency graph,
+  critical-path-first admission, global + per-agent concurrency caps,
+  a per-goal budget (default 25 dispatches or 60 minutes → the goal
+  `blocked`, raised with `single goal amend <id> budget=N`), single-retry
+  with agent advance, then a supervisor patch (capped at 5 per goal,
+  then `blocked`).
+- Added: routing — `~/.config/single/routing.toml` (per `kind` × `effort`
+  capability-ranked agent lists) and `~/.config/single/coordinator.toml`
+  (`max_parallel`, tick interval, budget caps). Nothing is pinned for
+  reasoning; planner / supervisor / integrator route through the same
+  table and pool-health filter as work, with dispatch-time fallback.
+- Added: socket requests `SessionNew/List/Close`, `GoalSubmit/Status/
+  List/Amend/Cancel`, `SessionEvents`, `CoordinatorStatus`, and the CLI
+  mirrors `single session {new,list,close}`,
+  `single goal {submit,status,list,amend,cancel}`,
+  `single coordinator status`.
+- Added: a scheduler tick-timer thread in `single-runtimed` that drives
+  every active goal on `coordinator.toml`'s interval (default 5s).
+
 ## [0.9.6]
 
 Cleanup pass from `docs/queue/E27-singlecli-followups/singlecli-followups.md`.
-Kept as a patch release — `0.10.0` is reserved for the Coordinator
-redesign (E27.02); the additive flags below are conveniences, not that.
+Kept as a patch release; the additive flags below are conveniences.
 
 - Fixed: `single provider add` on an already-registered provider rebuilt
   the whole entry from the flags passed, silently dropping an existing
