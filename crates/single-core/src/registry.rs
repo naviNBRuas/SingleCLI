@@ -712,9 +712,11 @@ pub fn builtin_registry() -> Vec<AgentDefinition> {
             notes: Some(
                 "Kilo Code — an actively-maintained open-source fork of OpenCode \
                  (github.com/Kilo-Org/kilocode). Installs via curl to ~/.kilo/bin/kilo. \
-                 `kilo run --auto \"<prompt>\"` confirmed non-interactive mode via --help. \
-                 `kilo auth login` confirmed real via --help. `kilo mcp add` confirmed real \
-                 via --help, but no logged-in account to inspect the config file shape."
+                 `kilo run \"<prompt>\"` is non-interactive per `kilo run --help` (v7.x; \
+                 the older `--auto`/`--dir` flags were dropped — kilo run now auto-approves \
+                 by default). `kilo auth login` confirmed real via --help. `kilo mcp add` \
+                 confirmed real via --help, but no logged-in account to inspect the config \
+                 file shape."
                     .into(),
             ),
         },

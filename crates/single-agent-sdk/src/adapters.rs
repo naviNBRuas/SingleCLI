@@ -35,6 +35,7 @@ pub struct ContinueCliAdapter;
 pub struct GrokAdapter;
 pub struct CrushAdapter;
 pub struct KiloCodeAdapter;
+pub struct MistralVibeAdapter;
 pub struct SingleAgentAdapter;
 
 impl AgentAdapter for ClaudeAdapter {
@@ -984,6 +985,73 @@ impl AgentAdapter for GrokAdapter {
     }
 }
 
+impl AgentAdapter for MistralVibeAdapter {
+    fn command(&self) -> &str {
+        "vibe"
+    }
+
+    // `vibe --help` lists no `mcp` subcommand and no logged-in account was
+    // available to inspect its config file, so MCP wiring stays
+    // unsupported rather than guessed — same reasoning as the other
+    // single-vendor CLIs here.
+    fn configure_mcp(&self, home: &Path, _servers: &[McpServerSpec], _dry_run: bool) -> Result<IntegrationWrite> {
+        Ok(unsupported_write("mistral-vibe", home, "vibe --help lists no mcp subcommand and its config file shape wasn't inspected without a logged-in account"))
+    }
+
+    fn remove_mcp(&self, home: &Path, _names: &[String], _dry_run: bool) -> Result<IntegrationWrite> {
+        Ok(unsupported_write("mistral-vibe", home, "vibe --help lists no mcp subcommand and its config file shape wasn't inspected without a logged-in account"))
+    }
+
+    /// `vibe -p <prompt> --auto-approve --output text --trust` — confirmed
+    /// non-interactive via `vibe --help` (`-p, --prompt`: "Run in
+    /// programmatic mode: send prompt, output response, and exit").
+    /// `-p` takes the value directly, so a `--` separator doesn't help
+    /// (same shape as grok's `--single`) and isn't needed for `single
+    /// task run`'s `---`-prefixed preamble. `--auto-approve` is
+    /// load-bearing: without it a tool call blocks on approval with no
+    /// TTY to answer through. `--trust` pre-empts vibe's first-run
+    /// directory-trust prompt the same way gemini's `--skip-trust` and
+    /// cursor's `--trust` do (harmless when already trusted — confirmed
+    /// live).
+    #[allow(clippy::too_many_arguments)]
+    fn run_prompt(
+        &self,
+        cwd: &Path,
+        prompt: &str,
+        backend: &ExecBackend,
+        live_output_path: Option<&Path>,
+        timeout: Duration,
+        cancel: Option<&std::sync::atomic::AtomicBool>,
+    ) -> Result<RunOutcome> {
+        run_command_live(
+            "vibe",
+            &[
+                "-p".to_string(),
+                prompt.to_string(),
+                "--auto-approve".to_string(),
+                "--output".to_string(),
+                "text".to_string(),
+                "--trust".to_string(),
+            ],
+            cwd,
+            backend,
+            live_output_path,
+            timeout,
+            cancel,
+        )
+    }
+
+    /// `vibe --setup` runs the interactive first-run configuration
+    /// (provider/model/API key) — confirmed via `vibe --help`.
+    fn login(&self, home: &Path) -> Result<()> {
+        run_interactive_with_home("vibe", &["--setup".to_string()], home)
+    }
+
+    fn login_supported(&self) -> bool {
+        true
+    }
+}
+
 impl AgentAdapter for CrushAdapter {
     fn command(&self) -> &str {
         "crush"
@@ -1050,12 +1118,14 @@ impl AgentAdapter for KiloCodeAdapter {
         Ok(unsupported_write("kilo", home, "kilo mcp add/list is real (confirmed via --help) but its config file shape wasn't inspected without a logged-in account"))
     }
 
-    /// `kilo run --auto -- "<prompt>" --dir <cwd>` — confirmed
-    /// non-interactive mode via `kilo run --help` on the reference
-    /// machine. `--auto` is load-bearing: without it, kilo asks for
-    /// permission before editing any file — there's no TTY to ask through
-    /// in a headless run, so it just exits having made no changes. Same
-    /// pattern as OpenCode's `--auto` (which Kilo forked from).
+    /// `kilo run -- "<prompt>"` — `kilo run [message..]` per `kilo run
+    /// --help` (v7.x). The earlier `--auto` / `--dir <cwd>` flags this
+    /// adapter passed were dropped in kilo 7.x (yargs now rejects them,
+    /// which hung the run) — kilo `run` auto-approves tool calls by
+    /// default now, and inherits the working directory from the spawned
+    /// process (`run_command_live` sets `current_dir`). The `--`
+    /// separator is kept so `single task run`'s `---`-prefixed memory
+    /// preamble isn't parsed as flags.
     #[allow(clippy::too_many_arguments)]
     fn run_prompt(
         &self,
@@ -1068,7 +1138,7 @@ impl AgentAdapter for KiloCodeAdapter {
     ) -> Result<RunOutcome> {
         run_command_live(
             "kilo",
-            &["run".to_string(), "--auto".to_string(), "--".to_string(), prompt.to_string(), "--dir".to_string(), cwd.display().to_string()],
+            &["run".to_string(), "--".to_string(), prompt.to_string()],
             cwd,
             backend,
             live_output_path,
@@ -1207,6 +1277,7 @@ pub fn for_agent(name: &str) -> Option<Box<dyn AgentAdapter>> {
         "grok" => Some(Box::new(GrokAdapter)),
         "crush" => Some(Box::new(CrushAdapter)),
         "kilocode" => Some(Box::new(KiloCodeAdapter)),
+        "mistral-vibe" => Some(Box::new(MistralVibeAdapter)),
         "single-agent" => Some(Box::new(SingleAgentAdapter)),
         _ => None,
     }
