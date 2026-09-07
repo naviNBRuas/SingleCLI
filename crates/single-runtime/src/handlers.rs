@@ -1912,6 +1912,11 @@ fn task_db(ctx: &Context) -> anyhow::Result<rusqlite::Connection> {
     crate::memory::ensure_schema(&conn)?;
     single_core::notes::ensure_schema(&conn)?;
     crate::knowledge_graph::ensure_schema(&conn)?;
+    // agent == "single-pool" reads pool_provider_keys/pool_usage/etc on
+    // every run (task::execute's special case) — needed here, not just
+    // server.rs's startup reconcile, so the in-process (no-daemon)
+    // fallback path also has the tables before the first pool run.
+    crate::pool::ensure_pool_schema(&conn)?;
     Ok(conn)
 }
 

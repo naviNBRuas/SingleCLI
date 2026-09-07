@@ -1298,6 +1298,32 @@ fn write_with_backup(agent: &str, path: &Path, rendered: &str, dry_run: bool) ->
     })
 }
 
+/// `single-pool` (E28) — a placeholder registration only. It never
+/// shells a binary, so `run_prompt` deliberately falls through to the
+/// trait's default `bail!`: `single-runtime::task::execute` special-cases
+/// `agent == "single-pool"` *before* ever calling `adapter.run_prompt`,
+/// dispatching to `pool_agent::run_as_task` instead, because that
+/// function needs the runtime's `&Connection` (for the ledger/cooldown/
+/// bandit tables) which this trait has no parameter for. This adapter
+/// exists only so `for_agent_with_custom("single-pool", ...)` resolves to
+/// `Some(..)` instead of task::execute bailing "unknown agent" before it
+/// ever reaches that special case.
+pub struct PoolAdapter;
+
+impl AgentAdapter for PoolAdapter {
+    fn command(&self) -> &str {
+        "single-pool"
+    }
+
+    fn configure_mcp(&self, home: &Path, _servers: &[McpServerSpec], _dry_run: bool) -> Result<IntegrationWrite> {
+        Ok(unsupported_write("single-pool", home, "single-pool is an internal HTTP-dispatch agent, not an MCP-capable CLI; nothing to configure"))
+    }
+
+    fn remove_mcp(&self, home: &Path, _names: &[String], _dry_run: bool) -> Result<IntegrationWrite> {
+        Ok(unsupported_write("single-pool", home, "single-pool is an internal HTTP-dispatch agent, not an MCP-capable CLI; nothing to remove"))
+    }
+}
+
 pub fn for_agent(name: &str) -> Option<Box<dyn AgentAdapter>> {
     match name {
         "claude" => Some(Box::new(ClaudeAdapter)),
@@ -1321,6 +1347,7 @@ pub fn for_agent(name: &str) -> Option<Box<dyn AgentAdapter>> {
         "kilocode" => Some(Box::new(KiloCodeAdapter)),
         "mistral-vibe" => Some(Box::new(MistralVibeAdapter)),
         "single-agent" => Some(Box::new(SingleAgentAdapter)),
+        "single-pool" => Some(Box::new(PoolAdapter)),
         _ => None,
     }
 }

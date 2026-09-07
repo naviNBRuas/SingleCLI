@@ -673,7 +673,10 @@ pub fn run(conn: &Connection, ctx: &Context, opts: RunTaskOptions) -> Result<Tas
     else {
         anyhow::bail!("unknown agent: {}", opts.agent);
     };
-    if !adapter.discover().detected {
+    // single-pool never shells a binary (see task::execute's special
+    // case + PoolAdapter's doc comment) so "is it on $PATH" is meaningless
+    // for it -- always considered available.
+    if opts.agent != "single-pool" && !adapter.discover().detected {
         anyhow::bail!(
             "agent '{}' is not installed; run `single setup --yes` first",
             opts.agent
@@ -744,7 +747,10 @@ pub fn run_background(
     else {
         anyhow::bail!("unknown agent: {}", opts.agent);
     };
-    if !adapter.discover().detected {
+    // single-pool never shells a binary (see task::execute's special
+    // case + PoolAdapter's doc comment) so "is it on $PATH" is meaningless
+    // for it -- always considered available.
+    if opts.agent != "single-pool" && !adapter.discover().detected {
         anyhow::bail!(
             "agent '{}' is not installed; run `single setup --yes` first",
             opts.agent
@@ -1086,7 +1092,20 @@ fn execute(
     // fallback chain) — holding this guard any longer than the run
     // itself would deadlock that recursive call forever waiting on a
     // slot only this (blocked) thread could ever release.
-    let outcome = {
+    let outcome = if opts.agent == "single-pool" {
+        // Never shells a binary: `pool_agent::run_as_task` dispatches
+        // straight to a provider's HTTP API via the ledger/bandit/cooldown
+        // engine, which needs `&Connection` — a parameter `AgentAdapter::
+        // run_prompt` doesn't have. This bypasses `adapter.run_prompt`
+        // entirely rather than shoehorning a DB handle through the trait.
+        // Task 14 note: `Exhausted` maps to the same "rate limited" text
+        // signal `ratelimit::looks_like_rate_limit` already recognizes, so
+        // every existing rate-limit-aware code path below (fallback,
+        // `remember_failure`, etc.) treats it correctly with no new
+        // plumbing; goal-level `waiting_on_capacity` semantics land in a
+        // later phase.
+        crate::pool_agent::run_as_task(conn, &prompt, opts.timeout, opts.account, crate::pool_agent::global_handoff_store())
+    } else {
         let _slot_guard = acquire_agent_slot(opts.agent, max_concurrency);
         let lop = Some(live_output_path.as_path());
         if opts.usage_json {
@@ -1424,6 +1443,7 @@ mod tests {
         memory::ensure_schema(&conn).unwrap();
         single_core::notes::ensure_schema(&conn).unwrap();
         crate::knowledge_graph::ensure_schema(&conn).unwrap();
+        crate::pool::ensure_pool_schema(&conn).unwrap();
         conn
     }
 
@@ -1986,5 +2006,45 @@ value = "-c"
         let rec = force_fail(&conn, done, "should be ignored").unwrap();
         assert_eq!(rec.status, TaskStatus::Completed);
         assert_eq!(rec.summary.as_deref(), Some("ok"));
+    }
+
+    /// E28 Task 14: `agent == "single-pool"` must never reach
+    /// `adapter.run_prompt` (which would try to shell a binary literally
+    /// named "single-pool" and fail) — it goes through
+    /// `pool_agent::run_as_task` instead. With zero pool provider keys
+    /// seeded, `bandit::pick` finds no candidates and `execute` returns
+    /// `Exhausted` immediately, with no network call — a clean signal
+    /// that the dispatch path taken was `pool_agent`, not a CLI shell
+    /// (which would instead fail with "unknown agent" or a shell error).
+    #[test]
+    fn task_run_with_agent_single_pool_calls_pool_agent_not_a_cli() {
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("SINGLE_CONFIG_DIR", dir.path());
+        let conn = test_conn();
+        let dirs = single_core::SingleDirs::from_root(dir.path().to_path_buf());
+        dirs.ensure_created().unwrap();
+
+        let ctx = Context { dirs, resolved: single_core::ResolvedConfig::default(), registry: single_core::builtin_registry() };
+        let this_repo = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let opts = RunTaskOptions {
+            description: "hello from the pool",
+            agent: "single-pool",
+            cwd: &this_repo,
+            use_worktree: false,
+            account: None,
+            real_home: true,
+            no_memory_context: true,
+            timeout: Duration::from_secs(5),
+            allow_fallback: false,
+            usage_json: false,
+        };
+
+        let task = run(&conn, &ctx, opts).unwrap();
+        assert_eq!(task.status, TaskStatus::Failed, "no keyed providers -> Exhausted -> a failed RunOutcome");
+        assert!(
+            task.rate_limited,
+            "Exhausted must map onto the existing rate-limited terminal shape (Task 14), got summary: {:?}",
+            task.summary
+        );
     }
 }

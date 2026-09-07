@@ -33,6 +33,8 @@ pub async fn serve(socket_path: &std::path::Path) -> Result<()> {
         crate::task::ensure_schema(&conn)?;
         crate::state::ensure_events_schema(&conn)?;
         crate::coordinator::ensure_coordinator_schema(&conn)?;
+        crate::pool::ensure_pool_schema(&conn)?; // E28: pool_usage/pool_leases/pool_cooldowns/pool_outcomes/pool_config + pool_keys
+
         let n = crate::task::reconcile_orphaned_tasks(&conn)?;
         // spec E27.02 §4.1: a daemon just starting owns no in-flight
         // coordinator nodes either — settle interrupted ones from their

@@ -768,6 +768,50 @@ pub fn builtin_registry() -> Vec<AgentDefinition> {
                     .into(),
             ),
         },
+        // E28's free-provider-pool agent — dispatches directly over HTTP
+        // to the vendored `single_core::free_pool` catalog via the
+        // bandit/ledger/cooldown engine (single-runtime::pool), never
+        // shells a binary. See `single_agent_sdk::adapters::PoolAdapter`'s
+        // doc comment for why its `run_prompt` is a placeholder and the
+        // real dispatch happens in `single-runtime::task::execute`'s
+        // special case instead.
+        AgentDefinition {
+            name: "single-pool".into(),
+            adapter: "pool".into(),
+            command: "single-pool".into(),
+            install_method: InstallMethod::Native {
+                detail: "Built into single-runtimed; no separate binary to install.".into(),
+            },
+            bootstrap_install: Some(BootstrapInstall {
+                command: "cargo build --release -p single-runtime".into(),
+                source: "https://github.com/naviNBRuas/SingleCLI".into(),
+            }),
+            unverified: false,
+            // No filesystem-based auth at all -- keys live in SingleCLI's
+            // own encrypted store (single_core::pool_keys), resolved
+            // identically regardless of $HOME. `Either` is the least
+            // restrictive value; this field is moot for an agent that
+            // never shells anything.
+            home_requirement: HomeRequirement::Either,
+            max_concurrency: None, // the ledger caps concurrency per (platform, model, key), not a process slot.
+            capabilities: CapabilityFlags {
+                streaming: false,
+                mcp: false,
+                lsp: false,
+                tools: false, // tool-call rescue exists in pool::client but isn't exposed as a first-class capability yet.
+                sessions: false,
+                structured_output: false,
+                non_interactive_run: true,
+            },
+            config_paths: vec!["free-pool.toml".into()],
+            notes: Some(
+                "The E28 free-provider pool agent: `single task run --agent single-pool` \
+                 picks a (provider, model, key) via the adaptive bandit and dispatches \
+                 straight to the provider's HTTP API, no CLI shelled. Use `single provider \
+                 list-free`/`add-free`/`sync-pool` to see and key the ~40-provider catalog."
+                    .into(),
+            ),
+        },
     ]
 }
 
