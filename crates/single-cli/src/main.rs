@@ -3,6 +3,7 @@ mod client;
 mod daemon;
 mod internal_lsp_manifest;
 mod render;
+mod serve_openai;
 mod update;
 
 use clap::{Parser, Subcommand};
@@ -328,6 +329,21 @@ enum Command {
     /// a coordinator goal, progress streams back. Not a one-shot command —
     /// it runs until stdin closes.
     Acp,
+    /// Run a local HTTP server that speaks the OpenAI chat-completions API
+    /// over the SingleCLI pool — point Zed's `language_models.openai_compatible`
+    /// at `http://<addr>/v1`. Runs until interrupted.
+    Serve {
+        /// The only supported mode today; required.
+        #[arg(long)]
+        openai: bool,
+        #[arg(long, default_value = "127.0.0.1:8765")]
+        addr: String,
+        /// Force every request onto this agent instead of routing.
+        #[arg(long)]
+        agent: Option<String>,
+        #[arg(long, default_value = "180")]
+        timeout_secs: u64,
+    },
     /// Undocumented: internal helpers other SingleCLI-owned tooling shells out to.
     #[command(hide = true, subcommand)]
     Internal(InternalCommand),
@@ -1415,6 +1431,13 @@ fn main() -> anyhow::Result<()> {
     // request — it manages its own socket calls per ACP method.
     if let Command::Acp = command {
         return acp::run(socket_path);
+    }
+    // Likewise the OpenAI proxy — a long-running HTTP server.
+    if let Command::Serve { openai, addr, agent, timeout_secs } = command {
+        if !openai {
+            anyhow::bail!("`single serve` currently supports only --openai");
+        }
+        return serve_openai::run(serve_openai::Config { socket_path, addr, agent, timeout_secs });
     }
 
     // Interactive login needs the user's real terminal (browser OAuth
@@ -2706,6 +2729,7 @@ fn main() -> anyhow::Result<()> {
             eprintln!("watch it iterate:  single goal status <goal_id>");
         }
         Command::Acp => unreachable!("handled before the socket-based dispatch above"),
+        Command::Serve { .. } => unreachable!("handled before the socket-based dispatch above"),
         Command::Update { .. } => unreachable!("handled before the socket-based dispatch above"),
         Command::Internal(_) => unreachable!("handled before the socket-based dispatch above"),
     }

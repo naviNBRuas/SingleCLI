@@ -44,6 +44,14 @@ plan, supervise on failure, and integrate. `single task run` and
   for every registered agent on every scheduler tick and every
   `CoordinatorStatus` (~24s). It is now an in-process `$PATH` check;
   `single coordinator status` returns in ~10ms.
+- Added: `single serve --openai` — a local OpenAI-compatible HTTP proxy
+  over the pool (`GET /v1/models`, `POST /v1/chat/completions`, non-stream
+  + single-chunk SSE). Each request flattens the chat messages to a
+  prompt, picks an agent (`model` name if it's a real agent, else routed
+  like `code/quick`, or `--agent`), and runs one `task run --allow-fallback`
+  — so a 429 hops the fallback chain. Point Zed's
+  `language_models.openai_compatible` at `http://127.0.0.1:8765/v1`. No
+  new dependency (hand-rolled HTTP/1.1 on `std::net`).
 - Added: `single loop <goal> [--agent X] [--max-iters N]` — keep one
   agent iterating until it replies with a line containing only `DONE`,
   or the cap is hit. Sugar over the coordinator's new `careful` goal
