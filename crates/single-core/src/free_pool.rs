@@ -28,6 +28,12 @@ pub struct FreeProvider {
     pub timeout: Duration,
     pub quirks: Quirks,
     pub free_note: &'static str,
+    /// Coarse 1 (smallest/least capable) - 10 (largest/most capable)
+    /// rank used by the bandit's intelligence term (spec §6.4). No
+    /// authoritative source this iteration (D3: no live feed) -- a
+    /// hand-set heuristic, documented seam for a future signed catalog
+    /// to replace with real benchmark-derived ranks.
+    pub intelligence_rank: u8,
 }
 
 /// Which HTTP shape a provider speaks. `OpenAiCompat` covers the 33
@@ -184,6 +190,7 @@ pub static FREE_PROVIDERS: &[FreeProvider] = &[
         timeout: S60,
         quirks: NO_QUIRKS,
         free_note: "per-project free tier pool",
+        intelligence_rank: 5,
     },
     FreeProvider {
         id: "groq",
@@ -197,6 +204,7 @@ pub static FREE_PROVIDERS: &[FreeProvider] = &[
         timeout: S30,
         quirks: NO_QUIRKS,
         free_note: "account pool; some models rpd 1000 / tpm 8000",
+        intelligence_rank: 5,
     },
     FreeProvider {
         id: "cerebras",
@@ -210,6 +218,7 @@ pub static FREE_PROVIDERS: &[FreeProvider] = &[
         timeout: S30,
         quirks: NO_QUIRKS,
         free_note: "free tier, published limits vary by model",
+        intelligence_rank: 5,
     },
     FreeProvider {
         id: "nvidia",
@@ -223,6 +232,7 @@ pub static FREE_PROVIDERS: &[FreeProvider] = &[
         timeout: S180,
         quirks: Quirks { force_single_tool_call: true, ..NO_QUIRKS },
         free_note: "credit pool ~40 rpm account-wide",
+        intelligence_rank: 5,
     },
     FreeProvider {
         id: "mistral",
@@ -236,6 +246,7 @@ pub static FREE_PROVIDERS: &[FreeProvider] = &[
         timeout: S30,
         quirks: NO_QUIRKS,
         free_note: "free tier",
+        intelligence_rank: 5,
     },
     FreeProvider {
         id: "openrouter",
@@ -249,6 +260,7 @@ pub static FREE_PROVIDERS: &[FreeProvider] = &[
         timeout: S30,
         quirks: NO_QUIRKS,
         free_note: "`:free` pool 1000/day (50/day if <10 credits)",
+        intelligence_rank: 5,
     },
     FreeProvider {
         id: "github-models",
@@ -262,6 +274,7 @@ pub static FREE_PROVIDERS: &[FreeProvider] = &[
         timeout: S30,
         quirks: NO_QUIRKS,
         free_note: "`<publisher>/<model>` ids",
+        intelligence_rank: 5,
     },
     FreeProvider {
         id: "cohere",
@@ -275,6 +288,7 @@ pub static FREE_PROVIDERS: &[FreeProvider] = &[
         timeout: S30,
         quirks: NO_QUIRKS,
         free_note: "free trial key",
+        intelligence_rank: 5,
     },
     FreeProvider {
         id: "cloudflare",
@@ -288,6 +302,7 @@ pub static FREE_PROVIDERS: &[FreeProvider] = &[
         timeout: S30,
         quirks: NO_QUIRKS,
         free_note: "account_id:token compound key",
+        intelligence_rank: 5,
     },
     FreeProvider {
         id: "zhipu",
@@ -301,6 +316,7 @@ pub static FREE_PROVIDERS: &[FreeProvider] = &[
         timeout: S60,
         quirks: NO_QUIRKS,
         free_note: "domestic->global host re-probe",
+        intelligence_rank: 5,
     },
     FreeProvider {
         id: "ollama-cloud",
@@ -314,6 +330,7 @@ pub static FREE_PROVIDERS: &[FreeProvider] = &[
         timeout: S120,
         quirks: NO_QUIRKS,
         free_note: "reasoning in message.reasoning",
+        intelligence_rank: 5,
     },
     FreeProvider {
         id: "kilo",
@@ -327,6 +344,7 @@ pub static FREE_PROVIDERS: &[FreeProvider] = &[
         timeout: S30,
         quirks: Quirks { validate_url: Some("/api/gateway/models"), ..NO_QUIRKS },
         free_note: "200 req/hr per IP; prompts logged for training",
+        intelligence_rank: 5,
     },
     FreeProvider {
         id: "pollinations",
@@ -340,6 +358,7 @@ pub static FREE_PROVIDERS: &[FreeProvider] = &[
         timeout: S30,
         quirks: Quirks { validate_url: Some("/account/key"), ..NO_QUIRKS },
         free_note: "validate /account/key (public /v1/models lies)",
+        intelligence_rank: 5,
     },
     FreeProvider {
         id: "llm7",
@@ -353,6 +372,7 @@ pub static FREE_PROVIDERS: &[FreeProvider] = &[
         timeout: S30,
         quirks: NO_QUIRKS,
         free_note: "100 req/hr; anon key works for basic use",
+        intelligence_rank: 5,
     },
     FreeProvider {
         id: "huggingface",
@@ -366,6 +386,7 @@ pub static FREE_PROVIDERS: &[FreeProvider] = &[
         timeout: S30,
         quirks: NO_QUIRKS,
         free_note: "$0.10/mo router credit",
+        intelligence_rank: 5,
     },
     FreeProvider {
         id: "opencode-zen",
@@ -379,6 +400,7 @@ pub static FREE_PROVIDERS: &[FreeProvider] = &[
         timeout: S30,
         quirks: NO_QUIRKS,
         free_note: "trial-only promo roster",
+        intelligence_rank: 5,
     },
     FreeProvider {
         id: "ovh",
@@ -392,6 +414,7 @@ pub static FREE_PROVIDERS: &[FreeProvider] = &[
         timeout: S30,
         quirks: NO_QUIRKS,
         free_note: "2 req/min per IP per model",
+        intelligence_rank: 5,
     },
     FreeProvider {
         id: "agnes",
@@ -405,6 +428,7 @@ pub static FREE_PROVIDERS: &[FreeProvider] = &[
         timeout: S60,
         quirks: NO_QUIRKS,
         free_note: "~30 concurrent -> 429",
+        intelligence_rank: 5,
     },
     FreeProvider {
         id: "reka",
@@ -418,6 +442,7 @@ pub static FREE_PROVIDERS: &[FreeProvider] = &[
         timeout: S30,
         quirks: NO_QUIRKS,
         free_note: "recurring monthly credit, no card",
+        intelligence_rank: 5,
     },
     FreeProvider {
         id: "siliconflow",
@@ -431,6 +456,7 @@ pub static FREE_PROVIDERS: &[FreeProvider] = &[
         timeout: S30,
         quirks: NO_QUIRKS,
         free_note: "media only (FLUX.1-schnell, CosyVoice2) — registered, unroutable this iteration",
+        intelligence_rank: 5,
     },
     FreeProvider {
         id: "routeway",
@@ -444,6 +470,7 @@ pub static FREE_PROVIDERS: &[FreeProvider] = &[
         timeout: S30,
         quirks: Quirks { browser_ua: true, ..NO_QUIRKS },
         free_note: "~5 rpm observed (doc says 20/200)",
+        intelligence_rank: 5,
     },
     FreeProvider {
         id: "bazaarlink",
@@ -457,6 +484,7 @@ pub static FREE_PROVIDERS: &[FreeProvider] = &[
         timeout: S30,
         quirks: NO_QUIRKS,
         free_note: "auto:free route only",
+        intelligence_rank: 5,
     },
     FreeProvider {
         id: "ainative",
@@ -470,6 +498,7 @@ pub static FREE_PROVIDERS: &[FreeProvider] = &[
         timeout: S30,
         quirks: NO_QUIRKS,
         free_note: "~10M tok/mo (unverified)",
+        intelligence_rank: 5,
     },
     FreeProvider {
         id: "aion",
@@ -483,6 +512,7 @@ pub static FREE_PROVIDERS: &[FreeProvider] = &[
         timeout: S30,
         quirks: NO_QUIRKS,
         free_note: "no-card, 30-day account age gate",
+        intelligence_rank: 5,
     },
     FreeProvider {
         id: "requesty",
@@ -496,6 +526,7 @@ pub static FREE_PROVIDERS: &[FreeProvider] = &[
         timeout: S30,
         quirks: NO_QUIRKS,
         free_note: "shared free pool",
+        intelligence_rank: 5,
     },
     FreeProvider {
         id: "navyai",
@@ -509,6 +540,7 @@ pub static FREE_PROVIDERS: &[FreeProvider] = &[
         timeout: S30,
         quirks: NO_QUIRKS,
         free_note: "150K tok/day, 20 rpm; needs explicit User-Agent",
+        intelligence_rank: 5,
     },
     FreeProvider {
         id: "nara",
@@ -522,6 +554,7 @@ pub static FREE_PROVIDERS: &[FreeProvider] = &[
         timeout: S30,
         quirks: NO_QUIRKS,
         free_note: "shared free pool; Telegram channel verification",
+        intelligence_rank: 5,
     },
     FreeProvider {
         id: "sea-lion",
@@ -535,6 +568,7 @@ pub static FREE_PROVIDERS: &[FreeProvider] = &[
         timeout: S30,
         quirks: NO_QUIRKS,
         free_note: "10 rpm recurring; Google sign-in, no card, no region wall",
+        intelligence_rank: 5,
     },
     FreeProvider {
         id: "orcarouter",
@@ -548,6 +582,7 @@ pub static FREE_PROVIDERS: &[FreeProvider] = &[
         timeout: S30,
         quirks: NO_QUIRKS,
         free_note: "shared $0 pool, unpublished limits; 429 is a clean quota signal",
+        intelligence_rank: 5,
     },
     FreeProvider {
         id: "unorouter",
@@ -561,6 +596,7 @@ pub static FREE_PROVIDERS: &[FreeProvider] = &[
         timeout: S30,
         quirks: NO_QUIRKS,
         free_note: "account-wide per-minute `:free` pool",
+        intelligence_rank: 5,
     },
     FreeProvider {
         id: "xkiro",
@@ -574,6 +610,7 @@ pub static FREE_PROVIDERS: &[FreeProvider] = &[
         timeout: S30,
         quirks: Quirks { validate_url: Some("/v1/usage"), ..NO_QUIRKS },
         free_note: "5M tok/day account-wide",
+        intelligence_rank: 5,
     },
     FreeProvider {
         id: "radeon",
@@ -587,6 +624,7 @@ pub static FREE_PROVIDERS: &[FreeProvider] = &[
         timeout: S30,
         quirks: Quirks { no_tools: true, ..NO_QUIRKS },
         free_note: "rotating public roster, header-reported limits; no parallel tools, 10-min gen window",
+        intelligence_rank: 5,
     },
     FreeProvider {
         id: "bai",
@@ -600,6 +638,7 @@ pub static FREE_PROVIDERS: &[FreeProvider] = &[
         timeout: S30,
         quirks: NO_QUIRKS,
         free_note: "limited-time 0-credit promo",
+        intelligence_rank: 5,
     },
     FreeProvider {
         id: "anyapi",
@@ -613,6 +652,7 @@ pub static FREE_PROVIDERS: &[FreeProvider] = &[
         timeout: S30,
         quirks: NO_QUIRKS,
         free_note: "100K tok/day, no published rpm",
+        intelligence_rank: 5,
     },
     FreeProvider {
         id: "electronhub",
@@ -626,6 +666,7 @@ pub static FREE_PROVIDERS: &[FreeProvider] = &[
         timeout: S30,
         quirks: Quirks { validate_url: Some("/v1/user/me"), ..NO_QUIRKS },
         free_note: "shared weekly credit pool",
+        intelligence_rank: 5,
     },
     FreeProvider {
         id: "experiential",
@@ -639,6 +680,7 @@ pub static FREE_PROVIDERS: &[FreeProvider] = &[
         timeout: S30,
         quirks: Quirks { validate_url: Some("/v1/models"), ..NO_QUIRKS },
         free_note: "shared monthly credit pool; authed /v1/models",
+        intelligence_rank: 5,
     },
     FreeProvider {
         id: "sail",
@@ -652,6 +694,7 @@ pub static FREE_PROVIDERS: &[FreeProvider] = &[
         timeout: S30,
         quirks: NO_QUIRKS,
         free_note: "$5/mo credit then pay-go; flex-only models",
+        intelligence_rank: 5,
     },
     FreeProvider {
         id: "modelscope",
@@ -665,6 +708,7 @@ pub static FREE_PROVIDERS: &[FreeProvider] = &[
         timeout: S30,
         quirks: Quirks { region_wall: true, real_name_auth: true, validate_cache: Some(Duration::from_secs(86_400)), ..NO_QUIRKS },
         free_note: "magic-grain quota; Alibaba China + real-name",
+        intelligence_rank: 5,
     },
     FreeProvider {
         id: "qianfan",
@@ -678,6 +722,7 @@ pub static FREE_PROVIDERS: &[FreeProvider] = &[
         timeout: S30,
         quirks: Quirks { region_wall: true, real_name_auth: true, ..NO_QUIRKS },
         free_note: "ERNIE-Speed/Lite/Tiny free; Chinese real-name auth",
+        intelligence_rank: 5,
     },
     FreeProvider {
         id: "volcengine",
@@ -691,6 +736,7 @@ pub static FREE_PROVIDERS: &[FreeProvider] = &[
         timeout: S30,
         quirks: Quirks { region_wall: true, real_name_auth: true, ..NO_QUIRKS },
         free_note: "2M tok/day/model + 500K new-user; real-name auth",
+        intelligence_rank: 5,
     },
     FreeProvider {
         id: "longcat",
@@ -704,6 +750,7 @@ pub static FREE_PROVIDERS: &[FreeProvider] = &[
         timeout: S30,
         quirks: NO_QUIRKS,
         free_note: "daily free quota; email signup works outside China",
+        intelligence_rank: 5,
     },
     FreeProvider {
         id: "xfyun",
@@ -717,6 +764,7 @@ pub static FREE_PROVIDERS: &[FreeProvider] = &[
         timeout: S30,
         quirks: Quirks { region_wall: true, real_name_auth: true, ..NO_QUIRKS },
         free_note: "Lite model free, no published ceiling; console APIPassword",
+        intelligence_rank: 5,
     },
     FreeProvider {
         id: "aihorde",
@@ -735,6 +783,7 @@ pub static FREE_PROVIDERS: &[FreeProvider] = &[
             ..NO_QUIRKS
         },
         free_note: "kudos-based queue proxy",
+        intelligence_rank: 5,
     },
     FreeProvider {
         id: "custom",
@@ -748,6 +797,7 @@ pub static FREE_PROVIDERS: &[FreeProvider] = &[
         timeout: S120,
         quirks: NO_QUIRKS,
         free_note: "user-supplied local/self-hosted endpoint",
+        intelligence_rank: 5,
     },
 ];
 
