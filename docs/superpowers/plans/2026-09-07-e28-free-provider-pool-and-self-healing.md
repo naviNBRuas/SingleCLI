@@ -272,11 +272,11 @@ Pure / in-mem SQLite, exhaustively unit-tested, no HTTP yet.
 - `fn pick(conn, kind, effort, strategy: &Strategy, candidates: &[(String,String,String)], now_ms) -> Option<(String,String,String)>` — scores every `(platform, model, key_id)` candidate not benched/disabled, applies headroom from `ledger::admit` remaining-fraction, returns the top pick (or `priority` strategy: first admissible in chain order, no scoring).
 - CLI-facing: `fn key_selection(mode: KeySelection, platform: &str, candidates: &[String]) -> Option<String>` where `enum KeySelection { Auto, LeastRemaining }` — `LeastRemaining` skipped for `pools::is_shared_pool` platforms (every key reports the same number there).
 
-- [ ] **Step 1:** failing tests: `posterior_starts_at_uniform_beta_1_1`, `posterior_decays_with_2day_half_life`, `thompson_sample_bounded_0_1`, `strategy_weights_sum_to_one_for_every_named_strategy`, `effective_score_is_base_times_headroom_times_ratelimit`, `timeout_counts_as_reliability_fail_and_speed_sample` (a `record_outcome(ok=false, latency_ms=timeout_value, ...)` still contributes a speed sample), `priority_strategy_ignores_score_takes_first_admissible`, `least_remaining_skipped_for_shared_pools`.
-- [ ] **Step 2:** FAIL.
-- [ ] **Step 3:** implement.
-- [ ] **Step 4:** PASS; `cargo build -p single-runtime -j2`.
-- [ ] **Step 5: Commit:** `feat: pool bandit — Thompson-sampled reliability/speed/intelligence scoring`
+- [x] **Step 1:** failing tests: `posterior_starts_at_uniform_beta_1_1`, `posterior_decays_with_2day_half_life`, `thompson_sample_bounded_0_1`, `strategy_weights_sum_to_one_for_every_named_strategy`, `effective_score_is_base_times_headroom_times_ratelimit`, `timeout_counts_as_reliability_fail_and_speed_sample` (a `record_outcome(ok=false, latency_ms=timeout_value, ...)` still contributes a speed sample), `priority_strategy_ignores_score_takes_first_admissible`, `least_remaining_skipped_for_shared_pools`.
+- [x] **Step 2:** FAIL.
+- [x] **Step 3:** implement.
+- [x] **Step 4:** PASS; `cargo build -p single-runtime -j2`.
+- [x] **Step 5: Commit:** `feat: pool bandit — Thompson-sampled reliability/speed/intelligence scoring`
 
 ---
 
@@ -291,11 +291,11 @@ Pure / in-mem SQLite, exhaustively unit-tested, no HTTP yet.
 - `DegradeConfig { healthy_ratio: f64, min_providers: usize, entry_grace_ms: i64, exit_grace_ms: i64 }` + `Default` + env overrides `SINGLE_POOL_DEGRADED_{HEALTHY_RATIO,MIN_PROVIDERS,ENTRY_GRACE_MS,EXIT_GRACE_MS}`.
 - `fn exploration_enabled(mode: Mode) -> bool` — `false` in `Degraded` (bandit sticks to scored order of survivors, no Thompson exploration).
 
-- [ ] **Step 1:** failing tests: `enters_degraded_after_entry_grace_below_threshold`, `does_not_flap_before_entry_grace_elapsed`, `exits_degraded_after_exit_grace_above_threshold`, `no_transition_below_min_providers`, `exploration_disabled_in_degraded_mode`.
-- [ ] **Step 2:** FAIL.
-- [ ] **Step 3:** implement.
-- [ ] **Step 4:** PASS; `cargo build -p single-runtime -j2`.
-- [ ] **Step 5: Commit:** `feat: pool degraded-mode health state machine`
+- [x] **Step 1:** failing tests: `enters_degraded_after_entry_grace_below_threshold`, `does_not_flap_before_entry_grace_elapsed`, `exits_degraded_after_exit_grace_above_threshold`, `no_transition_below_min_providers`, `exploration_disabled_in_degraded_mode`.
+- [x] **Step 2:** FAIL.
+- [x] **Step 3:** implement.
+- [x] **Step 4:** PASS; `cargo build -p single-runtime -j2`.
+- [x] **Step 5: Commit:** `feat: pool degraded-mode health state machine`
 
 ---
 
@@ -309,11 +309,11 @@ Pure / in-mem SQLite, exhaustively unit-tested, no HTTP yet.
 - `fn inject(store: &HandoffStore, session_key: &str, new_provider: &str, new_model: &str, messages: &mut Vec<ChatMessage>) -> bool` — returns whether it injected; prepends the exact spec §6.7 system-message template **only** when: an entry exists for the key, `last_provider_model != (new_provider, new_model)`, and no handoff message is already present in `messages`. Updates the stored `last_provider_model` regardless.
 - `fn record_summary(store, session_key, summary: String, provider: &str, model: &str)` — called after each turn to keep `messages_summary`/`last_provider_model` current.
 
-- [ ] **Step 1:** failing tests: `injects_on_model_switch`, `does_not_inject_on_first_request` (no prior entry), `does_not_inject_on_same_model_continuation`, `does_not_inject_twice_if_already_present`, `session_key_uses_explicit_id_when_given`, `session_key_falls_back_to_sha1_of_first_message`, `entry_expires_after_ttl` (inject with a manually-aged timestamp → treated as absent).
-- [ ] **Step 2:** FAIL.
-- [ ] **Step 3:** implement.
-- [ ] **Step 4:** PASS; `cargo build -p single-runtime -j2`.
-- [ ] **Step 5: Commit:** `feat: pool context-handoff on model switch`
+- [x] **Step 1:** failing tests: `injects_on_model_switch`, `does_not_inject_on_first_request` (no prior entry), `does_not_inject_on_same_model_continuation`, `does_not_inject_twice_if_already_present`, `session_key_uses_explicit_id_when_given`, `session_key_falls_back_to_sha1_of_first_message`, `entry_expires_after_ttl` (inject with a manually-aged timestamp → treated as absent).
+- [x] **Step 2:** FAIL.
+- [x] **Step 3:** implement.
+- [x] **Step 4:** PASS; `cargo build -p single-runtime -j2`.
+- [x] **Step 5: Commit:** `feat: pool context-handoff on model switch`
 
 ---
 
