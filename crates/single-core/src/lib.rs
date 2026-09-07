@@ -14,6 +14,7 @@ pub mod notes;
 pub mod paths;
 pub mod permissions;
 pub mod plugins;
+pub mod pool_keys;
 pub mod preferences;
 pub mod profile;
 pub mod project_context;
