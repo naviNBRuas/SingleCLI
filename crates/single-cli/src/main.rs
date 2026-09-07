@@ -2312,14 +2312,10 @@ fn main() -> anyhow::Result<()> {
                 anyhow::bail!("--orchestrator {orchestrator:?} requires --goal");
             }
             let parsed: Vec<single_protocol::ParallelTaskSpec> = tasks
-                .into_iter()
-                .map(|t| {
-                    let (agent, description) = t.split_once(':').ok_or_else(|| {
-                        anyhow::anyhow!("--task '{t}' must be in the form <agent>:<description>, e.g. claude:\"implement the API\"")
-                    })?;
-                    Ok(single_protocol::ParallelTaskSpec { agent: agent.to_string(), description: description.to_string() })
-                })
+                .iter()
+                .map(|t| parse_parallel_task(t))
                 .collect::<anyhow::Result<Vec<_>>>()?;
+            let dispatched = parsed.len();
             let response = client::send(
                 &socket_path,
                 Request::OrchestrateParallel {
@@ -2333,7 +2329,17 @@ fn main() -> anyhow::Result<()> {
                     candidate_agents,
                 },
             )?;
-            render::print(response, false);
+            if background {
+                // The daemon returns an empty batch immediately for a
+                // background run (each sub-task creates its own row on its
+                // own thread) — printing `Relay (0 step(s)):` there reads
+                // like nothing ran, so say what actually happened.
+                println!(
+                    "dispatched {dispatched} sub-task(s) in the background — poll `single task list` / `single task inspect <id>`"
+                );
+            } else {
+                render::print(response, false);
+            }
         }
         Command::OrchestrateGraph {
             tasks,
@@ -2360,6 +2366,7 @@ fn main() -> anyhow::Result<()> {
                 .into_iter()
                 .map(|task| parse_graph_task(&task))
                 .collect::<anyhow::Result<Vec<_>>>()?;
+            let dispatched = nodes.len();
             let response = client::send(
                 &socket_path,
                 Request::OrchestrateGraph {
@@ -2373,7 +2380,13 @@ fn main() -> anyhow::Result<()> {
                     candidate_agents,
                 },
             )?;
-            render::print(response, false);
+            if background {
+                println!(
+                    "dispatched a {dispatched}-node graph in the background — poll `single task list` / `single task inspect <id>`"
+                );
+            } else {
+                render::print(response, false);
+            }
         }
         Command::Provider { action } => match action {
             ProviderCommand::Add {
@@ -3129,6 +3142,23 @@ fn parse_orchestrator(value: &str) -> anyhow::Result<single_protocol::Orchestrat
     }
 }
 
+/// One `--task <agent>:<description>` for `single orchestrate-parallel`.
+/// Splits on the first `:` only, so a description can itself contain colons.
+fn parse_parallel_task(value: &str) -> anyhow::Result<single_protocol::ParallelTaskSpec> {
+    let (agent, description) = value.split_once(':').ok_or_else(|| {
+        anyhow::anyhow!(
+            "--task '{value}' must be <agent>:<description>, e.g. claude:\"implement the API\""
+        )
+    })?;
+    if agent.trim().is_empty() || description.trim().is_empty() {
+        anyhow::bail!("--task '{value}' has an empty agent or description");
+    }
+    Ok(single_protocol::ParallelTaskSpec {
+        agent: agent.to_string(),
+        description: description.to_string(),
+    })
+}
+
 /// After a successful `single agent login`, registers this login as a
 /// named account automatically — otherwise it only appears in `single
 /// account list`/the TUI Accounts tab after a separate manual `single
@@ -3251,5 +3281,53 @@ mod graph_task_parsing_tests {
             }
             _ => panic!("expected Command::Loop"),
         }
+    }
+
+    // --- E27.01 regression: `orchestrate-* --task` must parse every spec.
+    //     (The old "Relay (0 step(s)):" was a `--background` render bug, not
+    //     a parse failure — see the honest background message in the
+    //     dispatch arms — but keep the parse itself pinned.)
+
+    #[test]
+    fn orchestrate_parallel_collects_every_repeated_task_flag() {
+        let cli = Cli::try_parse_from([
+            "single", "orchestrate-parallel",
+            "--task", "grok:say ONE",
+            "--task", "opencode:say TWO",
+            "--task", "single-nvidia:say THREE",
+        ])
+        .unwrap();
+        match cli.command {
+            Some(Command::OrchestrateParallel { tasks, .. }) => assert_eq!(tasks.len(), 3),
+            _ => panic!("expected Command::OrchestrateParallel"),
+        }
+    }
+
+    #[test]
+    fn parse_parallel_task_splits_on_the_first_colon_only() {
+        let spec = parse_parallel_task("grok:reply with a URL like https://x.test").unwrap();
+        assert_eq!(spec.agent, "grok");
+        assert_eq!(spec.description, "reply with a URL like https://x.test");
+        assert!(parse_parallel_task("no-colon-here").is_err());
+        assert!(parse_parallel_task("grok:").is_err());
+        assert!(parse_parallel_task(":desc").is_err());
+    }
+
+    #[test]
+    fn orchestrate_graph_parses_every_repeated_task_flag_into_nodes() {
+        let cli = Cli::try_parse_from([
+            "single", "orchestrate-graph",
+            "--task", "id=a,agent=grok,desc=say AAA",
+            "--task", "id=b,agent=opencode,desc=say BBB,depends_on=a",
+        ])
+        .unwrap();
+        let tasks = match cli.command {
+            Some(Command::OrchestrateGraph { tasks, .. }) => tasks,
+            _ => panic!("expected Command::OrchestrateGraph"),
+        };
+        let nodes: Vec<_> = tasks.iter().map(|t| parse_graph_task(t).unwrap()).collect();
+        assert_eq!(nodes.len(), 2);
+        assert_eq!(nodes[0].id, "a");
+        assert_eq!(nodes[1].depends_on, vec!["a"]);
     }
 }

@@ -44,6 +44,13 @@ plan, supervise on failure, and integrate. `single task run` and
   for every registered agent on every scheduler tick and every
   `CoordinatorStatus` (~24s). It is now an in-process `$PATH` check;
   `single coordinator status` returns in ~10ms.
+- Fixed: `single orchestrate-parallel --background` / `orchestrate-graph
+  --background` printed `Relay (0 step(s)):` / `Graph (0 node(s)):`, which
+  read as "nothing ran" — the daemon returns an empty batch immediately
+  for a background run (each sub-task creates its own row on its own
+  thread). Now: `dispatched N sub-task(s) in the background — poll
+  \`single task list\``. Blocking runs were always fine; `--task` parsing
+  was never broken (regression tests added).
 - Fixed: syncing a provider into opencode under a name that also exists in
   models.dev's registry (`nvidia`, `openrouter`, `mistral`, …) made
   opencode merge that provider's entire registry catalog — 100+ models,
