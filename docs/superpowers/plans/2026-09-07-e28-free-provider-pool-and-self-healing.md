@@ -387,11 +387,11 @@ Pure / in-mem SQLite, exhaustively unit-tested, no HTTP yet.
   8. all eligible exhausted → `PoolAgentOutcome::Exhausted { earliest_recovery_ms }` (the earliest `until_ms` across attempted cooldowns) — **not** a plain `Err`, this is what Phase 6's auto-continue consumes.
 - `single task run --agent single-pool "…"` works standalone — a one-shot fallback loop, no coordinator required.
 
-- [ ] **Step 1:** failing tests (fake `PoolWire`/dispatcher injected, no real network): `execute_picks_and_dispatches_via_bandit`, `execute_injects_handoff_on_model_switch`, `execute_records_outcome_on_success`, `execute_benches_and_retries_next_candidate_on_429`, `execute_returns_exhausted_when_all_candidates_fail`.
-- [ ] **Step 2:** FAIL.
-- [ ] **Step 3:** implement.
-- [ ] **Step 4:** PASS; `cargo build -p single-runtime -j2`.
-- [ ] **Step 5: Commit:** `feat: single-pool agent adapter`
+- [x] **Step 1:** failing tests (fake `PoolWire`/dispatcher injected, no real network): `execute_picks_and_dispatches_via_bandit`, `execute_injects_handoff_on_model_switch`, `execute_records_outcome_on_success`, `execute_benches_and_retries_next_candidate_on_429`, `execute_returns_exhausted_when_all_candidates_fail`.
+- [x] **Step 2:** FAIL.
+- [x] **Step 3:** implement.
+- [x] **Step 4:** PASS; `cargo build -p single-runtime -j2`.
+- [x] **Step 5: Commit:** `feat: single-pool agent adapter`
 
 ---
 
@@ -401,11 +401,11 @@ Pure / in-mem SQLite, exhaustively unit-tested, no HTTP yet.
 
 **Interfaces:** the existing dispatch switch gains a `"pool"` arm calling `pool_agent::execute` instead of shelling a CLI binary; `PoolAgentOutcome::Exhausted` maps to the task's existing "rate limited" terminal shape so today's `single task run` UX (which already understands rate-limited tasks per E27) doesn't need new plumbing yet — full `waiting_on_capacity` goal-level semantics land in Phase 6.
 
-- [ ] **Step 1:** failing integration-shaped test with a fake dispatcher: `task_run_with_agent_single_pool_calls_pool_agent_not_a_cli`.
-- [ ] **Step 2:** FAIL.
-- [ ] **Step 3:** implement the dispatch arm.
-- [ ] **Step 4:** PASS; `cargo build -p single-runtime -j2`.
-- [ ] **Step 5: Commit:** `feat: wire single-pool into task::run dispatch`
+- [x] **Step 1:** failing integration-shaped test with a fake dispatcher: `task_run_with_agent_single_pool_calls_pool_agent_not_a_cli`.
+- [x] **Step 2:** FAIL.
+- [x] **Step 3:** implement the dispatch arm.
+- [x] **Step 4:** PASS; `cargo build -p single-runtime -j2`.
+- [x] **Step 5: Commit:** `feat: wire single-pool into task::run dispatch`
 
 ---
 
