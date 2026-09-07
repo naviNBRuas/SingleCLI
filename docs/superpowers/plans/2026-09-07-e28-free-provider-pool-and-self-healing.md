@@ -331,7 +331,7 @@ Pure / in-mem SQLite, exhaustively unit-tested, no HTTP yet.
 - **Tool-call rescue:** `fn rescue_tool_calls(text: &str) -> Option<Vec<ToolCall>>` — parses models that emit tool calls as prose into real `tool_calls`; only applied when the request needed tools and the model claims `supports_tools`.
 - `fn dispatch_openai_compat(...) -> Result<PoolResponse, PoolError>` where `PoolError` distinguishes `RateLimited { retry: Option<Duration> }` / `PaymentRequired` / `TierGate` / `AuthFailed` / `Transport` / `Other` — feeds directly into `cooldown::bench`'s `BenchKind`.
 
-- [ ] **Step 1:** failing tests against a hand-rolled `TcpListener` mock (or CHECK if `wiremock` is already a dev-dependency; if not, a `std::net::TcpListener` fixture is fine, no new dep):
+- [x] **Step 1:** failing tests against a hand-rolled `TcpListener` mock (or CHECK if `wiremock` is already a dev-dependency; if not, a `std::net::TcpListener` fixture is fine, no new dep):
   - `request_shape_has_correct_url_and_bearer_auth`
   - `browser_ua_quirk_sets_header`
   - `force_single_tool_call_drops_extra_tool_calls`
@@ -340,10 +340,10 @@ Pure / in-mem SQLite, exhaustively unit-tested, no HTTP yet.
   - `429_maps_to_rate_limited_pool_error_with_parsed_retry_after`
   - `hedge_abort_on_budget_expiry_is_not_recorded_as_a_health_failure`
   - `tool_call_rescue_parses_prose_tool_call`
-- [ ] **Step 2:** FAIL.
-- [ ] **Step 3:** implement `OpenAiCompatWire` + shared retry/hedge machinery reusable by the native wires in Task 12.
-- [ ] **Step 4:** PASS; `cargo build -p single-runtime -j2`.
-- [ ] **Step 5: Commit:** `feat: pool client — OpenAI-compat wire with retry budget and hedge-abort`
+- [x] **Step 2:** FAIL.
+- [x] **Step 3:** implement `OpenAiCompatWire` + shared retry/hedge machinery reusable by the native wires in Task 12.
+- [x] **Step 4:** PASS; `cargo build -p single-runtime -j2`.
+- [x] **Step 5: Commit:** `feat: pool client — OpenAI-compat wire with retry budget and hedge-abort`
 
 ---
 
@@ -360,11 +360,11 @@ Pure / in-mem SQLite, exhaustively unit-tested, no HTTP yet.
 - `SailWire` (Responses API background poll — registered per §17 resolution but `enabled=false` by default; wire still implemented so an operator who flips it on gets a working path)
 - `ModelScopeWire`, `PollinationsWire`, `ElectronHubWire`, `ExperientialWire` (custom validate-probe pattern)
 
-- [ ] **Step 1:** failing tests, one per wire, minimum: request shape (URL/auth placement) against the mock server; `ZhipuWire`'s host-reprobe behavior; `AiHordeWire`'s queue-poll loop (mock returns `queued` then `done`); `SailWire`'s background-poll shape.
-- [ ] **Step 2:** FAIL.
-- [ ] **Step 3:** implement each wire, reusing Task 11's retry/hedge/backoff plumbing.
-- [ ] **Step 4:** PASS; `cargo build -p single-runtime -j2`.
-- [ ] **Step 5: Commit:** `feat: pool client — native wires (google, cohere, cloudflare, zhipu, aihorde, sail, modelscope, pollinations, electronhub, experiential)`
+- [x] **Step 1:** failing tests, one per wire, minimum: request shape (URL/auth placement) against the mock server; `ZhipuWire`'s host-reprobe behavior; `AiHordeWire`'s queue-poll loop (mock returns `queued` then `done`); `SailWire`'s background-poll shape.
+- [x] **Step 2:** FAIL.
+- [x] **Step 3:** implement each wire, reusing Task 11's retry/hedge/backoff plumbing.
+- [x] **Step 4:** PASS; `cargo build -p single-runtime -j2`.
+- [x] **Step 5: Commit:** `feat: pool client — native wires (google, cohere, cloudflare, zhipu, aihorde, sail, modelscope, pollinations, electronhub, experiential)`
 
 ---
 
