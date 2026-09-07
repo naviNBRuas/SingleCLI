@@ -184,17 +184,17 @@ Pure / in-mem SQLite, exhaustively unit-tested, no HTTP yet.
 - `ledger::next_utc_midnight_ms(now_ms: i64) -> i64` (pure helper for RPD/TPD window math).
 - Degraded-DB fallback: if the SQLite write in `record`/`admit` fails, fall back to an in-process `Mutex<VecDeque<UsageEvent>>` capped at N entries (pruned on push) so admission math still works for the life of the process.
 
-- [ ] **Step 1:** failing tests:
+- [x] **Step 1:** failing tests:
   - `admission_denies_when_recorded_plus_inflight_plus_estimate_exceeds_limit`
   - `admission_skips_unset_limit_windows`
   - `rpd_window_resets_at_utc_midnight_not_24h_rolling`
   - `lease_acquire_release_is_idempotent`
   - `stale_lease_backstop_expires_after_2_minutes`
   - `degraded_db_fallback_keeps_admitting_from_memory` (simulate a write failure by pointing at a read-only path or an already-closed connection wrapper)
-- [ ] **Step 2:** `cargo test -p single-runtime pool::ledger -- --nocapture`, expect FAIL.
-- [ ] **Step 3:** implement. Reuse E27's `parse_or_estimate_tokens` seam for `chars/4` estimates (spec §6.1) — CHECK its current location (`single-runtime` or `single-core`) and import rather than reimplement.
-- [ ] **Step 4:** PASS; `cargo build -p single-runtime -j2`.
-- [ ] **Step 5: Commit:** `feat: pool quota ledger — 4-D admission, leases, UTC-midnight windows`
+- [x] **Step 2:** `cargo test -p single-runtime pool::ledger -- --nocapture`, expect FAIL.
+- [x] **Step 3:** implement. Reuse E27's `parse_or_estimate_tokens` seam for `chars/4` estimates (spec §6.1) — CHECK its current location (`single-runtime` or `single-core`) and import rather than reimplement.
+- [x] **Step 4:** PASS; `cargo build -p single-runtime -j2`.
+- [x] **Step 5: Commit:** `feat: pool quota ledger — 4-D admission, leases, UTC-midnight windows`
 
 ---
 
@@ -208,11 +208,11 @@ Pure / in-mem SQLite, exhaustively unit-tested, no HTTP yet.
 - `fn parse_prose(text: &str) -> Option<Duration>` — anchored patterns: "try again in N seconds/minutes", "retry after Nm/Nh".
 - `fn resolve(header: Option<&str>, body: Option<&serde_json::Value>, prose_fallback: Option<&str>) -> Option<Duration>` — header wins, else body, else prose; result clamped to 24h; **only the numeric duration is returned/kept, the caller never logs the raw body/prose** (spec §6.2 explicit privacy note — enforce by the type signature: this fn never returns the source string).
 
-- [ ] **Step 1:** failing tests: `header_delta_seconds`, `header_http_date`, `gemini_retryinfo_shape`, `snake_case_retry_after_shape`, `prose_try_again_in_30_seconds`, `prose_retry_after_2m`, `clamps_to_24h`, `header_wins_over_body_wins_over_prose`, `returns_none_when_nothing_parses`.
-- [ ] **Step 2:** FAIL.
-- [ ] **Step 3:** implement (no regex crate if avoidable — CHECK if `regex` is already a workspace dep before adding one; a small hand-rolled scanner is fine and keeps "no new dependency" honest if it isn't).
-- [ ] **Step 4:** PASS; `cargo build -p single-runtime -j2`.
-- [ ] **Step 5: Commit:** `feat: pool back-off parser (Retry-After, error-body shapes, prose)`
+- [x] **Step 1:** failing tests: `header_delta_seconds`, `header_http_date`, `gemini_retryinfo_shape`, `snake_case_retry_after_shape`, `prose_try_again_in_30_seconds`, `prose_retry_after_2m`, `clamps_to_24h`, `header_wins_over_body_wins_over_prose`, `returns_none_when_nothing_parses`.
+- [x] **Step 2:** FAIL.
+- [x] **Step 3:** implement (no regex crate if avoidable — CHECK if `regex` is already a workspace dep before adding one; a small hand-rolled scanner is fine and keeps "no new dependency" honest if it isn't).
+- [x] **Step 4:** PASS; `cargo build -p single-runtime -j2`.
+- [x] **Step 5: Commit:** `feat: pool back-off parser (Retry-After, error-body shapes, prose)`
 
 ---
 
@@ -230,11 +230,11 @@ Pure / in-mem SQLite, exhaustively unit-tested, no HTTP yet.
 - `fn cooldown_ceiling(conn) -> Duration` / `fn set_cooldown_ceiling(conn, Duration)` — operator override (`single pool cooldown-ceiling`), caps ladder + 402/403 benches, never shortens a provider-stated `Authoritative` time.
 - `fn clear(conn, key: Option<&str>) -> Result<()>` — `single pool cooldown-clear [--key <id>]`.
 
-- [ ] **Step 1:** failing tests: `ladder_escalates_over_scripted_hit_sequence` (90s→2m→10m→1h→1day), `success_clears_hit_counter`, `payment_required_benches_one_day_as_credit_provenance`, `local_error_never_enters_ladder`, `heuristic_capped_at_operator_ceiling`, `authoritative_never_shortened_by_ceiling`, `probe_candidates_only_heuristic_past_half_elapsed`.
-- [ ] **Step 2:** FAIL.
-- [ ] **Step 3:** implement.
-- [ ] **Step 4:** PASS; `cargo build -p single-runtime -j2`.
-- [ ] **Step 5: Commit:** `feat: pool cooldown ladder with provenance and operator ceiling`
+- [x] **Step 1:** failing tests: `ladder_escalates_over_scripted_hit_sequence` (90s→2m→10m→1h→1day), `success_clears_hit_counter`, `payment_required_benches_one_day_as_credit_provenance`, `local_error_never_enters_ladder`, `heuristic_capped_at_operator_ceiling`, `authoritative_never_shortened_by_ceiling`, `probe_candidates_only_heuristic_past_half_elapsed`.
+- [x] **Step 2:** FAIL.
+- [x] **Step 3:** implement.
+- [x] **Step 4:** PASS; `cargo build -p single-runtime -j2`.
+- [x] **Step 5: Commit:** `feat: pool cooldown ladder with provenance and operator ceiling`
 
 ---
 
@@ -247,11 +247,11 @@ Pure / in-mem SQLite, exhaustively unit-tested, no HTTP yet.
 - `fn is_shared_pool(platform: &str) -> bool` — true for the spec §6.3 list (`routeway, bazaarlink, unorouter, orcarouter, xkiro, anyapi, navyai, nara, sea-lion, aion, requesty`).
 - `fn aggregate_gate(conn, platform, key_id, models: &[&str], now_ms) -> AdmitResult` — sums per-model `pool_usage` windows for the same `platform+key_id` and admits/denies as one gate (uses `ledger::admit`'s window math per model, then combines).
 
-- [ ] **Step 1:** failing tests: `infer_pool_key_matches_spec_examples` (table-driven over the named platforms), `is_shared_pool_matches_spec_list`, `aggregate_gate_sums_across_models_for_same_key`.
-- [ ] **Step 2:** FAIL.
-- [ ] **Step 3:** implement.
-- [ ] **Step 4:** PASS; `cargo build -p single-runtime -j2`.
-- [ ] **Step 5: Commit:** `feat: provider-wide pool inference and shared-pool aggregate gating`
+- [x] **Step 1:** failing tests: `infer_pool_key_matches_spec_examples` (table-driven over the named platforms), `is_shared_pool_matches_spec_list`, `aggregate_gate_sums_across_models_for_same_key`.
+- [x] **Step 2:** FAIL.
+- [x] **Step 3:** implement.
+- [x] **Step 4:** PASS; `cargo build -p single-runtime -j2`.
+- [x] **Step 5: Commit:** `feat: provider-wide pool inference and shared-pool aggregate gating`
 
 ---
 
