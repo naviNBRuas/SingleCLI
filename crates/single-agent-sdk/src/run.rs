@@ -181,6 +181,7 @@ pub fn run_command_live(
         timed_out,
         cancelled,
         duration_ms: start.elapsed().as_millis(),
+        usage: None,
     })
 }
 

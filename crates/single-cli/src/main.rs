@@ -1296,6 +1296,12 @@ enum TaskCommand {
         /// against the chain's next entry. Off by default.
         #[arg(long)]
         allow_fallback: bool,
+        /// Run the agent in a structured-output mode that reports real
+        /// token usage where one exists (currently only `claude`, via
+        /// `--output-format json`). Otherwise a no-op — the task's token
+        /// counts are parse-or-estimated.
+        #[arg(long)]
+        usage_json: bool,
         #[arg(long)]
         json: bool,
     },
@@ -2097,6 +2103,7 @@ fn main() -> anyhow::Result<()> {
                 timeout_secs,
                 background,
                 allow_fallback,
+                usage_json,
                 json,
             } => {
                 let cwd = cwd.unwrap_or_else(|| ".".to_string());
@@ -2119,6 +2126,7 @@ fn main() -> anyhow::Result<()> {
                         timeout_secs,
                         background,
                         allow_fallback,
+                        usage_json,
                     },
                 )?;
                 render::print(response, json);

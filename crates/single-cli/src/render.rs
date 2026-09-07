@@ -764,6 +764,14 @@ fn print_data(data: ResponseData) {
                 "  dispatches {}/{}  mode {}",
                 v.goal.dispatches, v.goal.max_dispatches, v.goal.mode
             );
+            if v.total_prompt_tokens > 0 || v.total_completion_tokens > 0 {
+                println!(
+                    "  tokens ~{} in / ~{} out{}",
+                    v.total_prompt_tokens,
+                    v.total_completion_tokens,
+                    if v.any_tokens_estimated { " (estimated)" } else { "" }
+                );
+            }
             if let Some(r) = &v.blocked_reason {
                 println!("  blocked: {r}");
             }

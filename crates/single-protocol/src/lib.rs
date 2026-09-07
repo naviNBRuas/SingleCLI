@@ -236,6 +236,13 @@ pub enum Request {
         /// not something that happens under a plain `task run`.
         #[serde(default)]
         allow_fallback: bool,
+        /// Opt-in (default off): run the agent in a structured-output mode
+        /// that reports real token usage where one exists (currently only
+        /// `claude --output-format json`). Otherwise a no-op hint — the
+        /// task's token counts are parse-or-estimated. See
+        /// `AgentAdapter::run_prompt_json`.
+        #[serde(default)]
+        usage_json: bool,
     },
     TaskList,
     TaskInspect {
@@ -780,6 +787,15 @@ pub struct NodeView {
     pub status: String,
     pub task_id: Option<i64>,
     pub attempts: u32,
+    /// Token counts for this node's current task run (E27.03). `None`
+    /// until the node has run; `tokens_estimated` true when they are a
+    /// parse-or-estimate rather than an agent-reported figure.
+    #[serde(default)]
+    pub prompt_tokens: Option<i64>,
+    #[serde(default)]
+    pub completion_tokens: Option<i64>,
+    #[serde(default)]
+    pub tokens_estimated: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -798,6 +814,14 @@ pub struct GoalView {
     pub result_summary: Option<String>,
     pub nodes: Vec<NodeView>,
     pub recent_events: Vec<CoordinatorEvent>,
+    /// Sum of every node's task-run token counts (E27.03).
+    #[serde(default)]
+    pub total_prompt_tokens: i64,
+    #[serde(default)]
+    pub total_completion_tokens: i64,
+    /// True if any contributing count was a parse-or-estimate.
+    #[serde(default)]
+    pub any_tokens_estimated: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1289,6 +1313,17 @@ pub struct TaskRecord {
     /// `task::execute`.
     #[serde(default)]
     pub rate_limited: bool,
+    /// Prompt / completion token counts for this run (E27.03). `None` on a
+    /// task that produced no output. `tokens_estimated` is true when they
+    /// are a parse-of-output or a chars/4 fallback rather than a real
+    /// count reported by the agent (only `claude --output-format json`
+    /// reports real ones today).
+    #[serde(default)]
+    pub prompt_tokens: Option<i64>,
+    #[serde(default)]
+    pub completion_tokens: Option<i64>,
+    #[serde(default)]
+    pub tokens_estimated: bool,
 }
 
 /// One workspace (project) that at least one task has run against — the
@@ -1310,6 +1345,12 @@ pub struct WorkspaceInfo {
 /// The result of running an agent CLI non-interactively against a single
 /// prompt (spec section 39's `send`/lifecycle, scoped down to Phase 4's
 /// synchronous one-shot invocation — see `single-agent-sdk::adapter` docs).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct TokenUsage {
+    pub prompt_tokens: u64,
+    pub completion_tokens: u64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunOutcome {
     pub success: bool,
@@ -1322,6 +1363,13 @@ pub struct RunOutcome {
     /// so callers can tell "we gave up on it" from "you told it to stop".
     pub cancelled: bool,
     pub duration_ms: u128,
+    /// Real token counts, only ever set when the agent was run in a
+    /// structured-output mode that reports them (currently `claude
+    /// --output-format json` via `AgentAdapter::run_prompt_json`). `None`
+    /// means the caller must fall back to a parse-or-estimate — see
+    /// `single-runtime::task::record_token_usage`.
+    #[serde(default)]
+    pub usage: Option<TokenUsage>,
 }
 
 /// Metadata about a captured account-switch profile (spec section 41's

@@ -226,6 +226,7 @@ impl SingleCliServer {
             timeout_secs: Self::u64_arg(args, "timeout_secs", 300),
             background: false,
             allow_fallback: Self::bool_arg(args, "allow_fallback", false),
+            usage_json: Self::bool_arg(args, "usage_json", false),
         })
     }
 

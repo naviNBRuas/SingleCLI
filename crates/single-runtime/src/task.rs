@@ -96,6 +96,13 @@ pub fn ensure_schema(conn: &Connection) -> Result<()> {
     add_column_if_missing(conn, "tasks", "cwd", "TEXT NOT NULL DEFAULT ''")?;
     add_column_if_missing(conn, "tasks", "workspace_id", "TEXT NOT NULL DEFAULT ''")?;
     add_column_if_missing(conn, "tasks", "rate_limited", "INTEGER NOT NULL DEFAULT 0")?;
+    // Per-turn token accounting (E27.03). Real when the agent ran in a
+    // usage-reporting mode (`claude --output-format json`), otherwise a
+    // parse-of-output or a chars/4 estimate — `tokens_estimated = 1` says
+    // which. NULL on a task that never produced output (setup failure).
+    add_column_if_missing(conn, "tasks", "prompt_tokens", "INTEGER")?;
+    add_column_if_missing(conn, "tasks", "completion_tokens", "INTEGER")?;
+    add_column_if_missing(conn, "tasks", "tokens_estimated", "INTEGER NOT NULL DEFAULT 0")?;
     conn.execute(
         "CREATE TABLE IF NOT EXISTS workspaces (
             id TEXT PRIMARY KEY,
@@ -227,6 +234,9 @@ fn row_to_task(row: &rusqlite::Row) -> rusqlite::Result<TaskRecord> {
         cwd: row.get("cwd")?,
         workspace_id: row.get("workspace_id")?,
         rate_limited: row.get::<_, i64>("rate_limited")? != 0,
+        prompt_tokens: row.get("prompt_tokens").ok().flatten(),
+        completion_tokens: row.get("completion_tokens").ok().flatten(),
+        tokens_estimated: row.get::<_, i64>("tokens_estimated").unwrap_or(0) != 0,
     })
 }
 
@@ -369,6 +379,64 @@ fn finish(
     Ok(())
 }
 
+/// Records a finished task's token counts (E27.03). `estimated` is stored
+/// as `tokens_estimated` so downstream consumers can flag the number as
+/// approximate.
+fn record_token_usage(
+    conn: &Connection,
+    id: i64,
+    prompt_tokens: i64,
+    completion_tokens: i64,
+    estimated: bool,
+) -> Result<()> {
+    conn.execute(
+        "UPDATE tasks SET prompt_tokens = ?1, completion_tokens = ?2, tokens_estimated = ?3 WHERE id = ?4",
+        params![prompt_tokens, completion_tokens, estimated as i64, id],
+    )?;
+    Ok(())
+}
+
+/// Best-effort token counts for an agent that did not run in a
+/// usage-reporting mode. First tries to lift real numbers out of the
+/// captured output (some CLIs print a usage line even in text mode), then
+/// falls back to a `chars / 4` estimate. The returned bool is
+/// `estimated` — true when the chars/4 fallback was used.
+fn parse_or_estimate_tokens(_agent: &str, prompt: &str, stdout: &str, stderr: &str) -> (i64, i64, bool) {
+    let hay = format!("{stdout}\n{stderr}");
+
+    // shape 1: a JSON `"input_tokens": N ... "output_tokens": N` anywhere
+    // (claude/codex event lines, some wrappers).
+    let json_num = |key: &str| -> Option<i64> {
+        let pat = format!("\"{key}\"");
+        let idx = hay.find(&pat)? + pat.len();
+        let rest = hay[idx..].trim_start().strip_prefix(':')?.trim_start();
+        let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+        digits.parse().ok()
+    };
+    if let (Some(i), Some(o)) = (json_num("input_tokens"), json_num("output_tokens")) {
+        return (i, o, false);
+    }
+
+    // shape 2: a human line like "tokens: 1234 in, 567 out" / "input: 12
+    // output: 34" — grab the first two integers on any line mentioning
+    // "token".
+    for line in hay.lines().filter(|l| l.to_lowercase().contains("token")) {
+        let nums: Vec<i64> = line
+            .split(|c: char| !c.is_ascii_digit())
+            .filter(|s| !s.is_empty())
+            .filter_map(|s| s.parse().ok())
+            .collect();
+        if nums.len() >= 2 {
+            return (nums[0], nums[1], false);
+        }
+    }
+
+    // fallback: rough estimate. ~4 chars per token is the usual
+    // back-of-envelope for English + code.
+    let est = |s: &str| (s.chars().count() as i64 + 3) / 4;
+    (est(prompt), est(stdout), true)
+}
+
 fn set_status(conn: &Connection, id: i64, status: TaskStatus) -> Result<()> {
     let now = chrono::Utc::now().to_rfc3339();
     conn.execute(
@@ -447,6 +515,11 @@ pub struct RunTaskOptions<'a> {
     /// fallback chain (`single_core::fallback`) when this run's failure
     /// looks like a rate limit — see `execute`'s `maybe_fail_over`.
     pub allow_fallback: bool,
+    /// Opt-in (default off): run the agent in a structured-output mode
+    /// that reports real token usage where one exists (currently only
+    /// `claude --output-format json`); otherwise a no-op hint and the
+    /// run's usage is parse-or-estimated. See `AgentAdapter::run_prompt_json`.
+    pub usage_json: bool,
 }
 
 /// Cap on the injected memory/notes/knowledge preamble so it can't dwarf
@@ -631,6 +704,7 @@ pub struct OwnedRunTaskOptions {
     pub no_memory_context: bool,
     pub timeout: Duration,
     pub allow_fallback: bool,
+    pub usage_json: bool,
 }
 
 impl OwnedRunTaskOptions {
@@ -645,6 +719,7 @@ impl OwnedRunTaskOptions {
             no_memory_context: self.no_memory_context,
             timeout: self.timeout,
             allow_fallback: self.allow_fallback,
+            usage_json: self.usage_json,
         }
     }
 }
@@ -1013,14 +1088,12 @@ fn execute(
     // slot only this (blocked) thread could ever release.
     let outcome = {
         let _slot_guard = acquire_agent_slot(opts.agent, max_concurrency);
-        adapter.run_prompt(
-            &run_cwd,
-            &prompt,
-            &backend,
-            Some(&live_output_path),
-            opts.timeout,
-            cancel,
-        )
+        let lop = Some(live_output_path.as_path());
+        if opts.usage_json {
+            adapter.run_prompt_json(&run_cwd, &prompt, &backend, lop, opts.timeout, cancel)
+        } else {
+            adapter.run_prompt(&run_cwd, &prompt, &backend, lop, opts.timeout, cancel)
+        }
     };
     // Left in place (not deleted here) so a task's live output stays
     // inspectable right after it finishes, not just while it's running —
@@ -1082,6 +1155,15 @@ fn execute(
                 "task.failed"
             };
             crate::state::record_event(conn, event, &format!("#{id} {summary}"))?;
+            // Per-turn token accounting (E27.03): real counts if the agent
+            // reported them (usage-json mode), else parse-or-estimate from
+            // the captured output. Best-effort — a bookkeeping failure
+            // must not fail the task.
+            let (pt, ct, estimated) = match outcome.usage {
+                Some(u) => (u.prompt_tokens as i64, u.completion_tokens as i64, false),
+                None => parse_or_estimate_tokens(opts.agent, &prompt, &outcome.stdout, &outcome.stderr),
+            };
+            let _ = record_token_usage(conn, id, pt, ct, estimated);
             // A cancellation was requested, not a real failure — no
             // lesson to learn from it, so it skips `remember_failure`.
             if !outcome.success && !outcome.cancelled {
@@ -1192,6 +1274,7 @@ fn maybe_fail_over(conn: &Connection, ctx: &Context, id: i64, opts: &RunTaskOpti
         no_memory_context: opts.no_memory_context,
         timeout: opts.timeout,
         allow_fallback: true,
+        usage_json: false,
     };
     match create_for_cwd(conn, next_opts.description, next_opts.agent, next_opts.cwd) {
         Ok(next_id) => {
@@ -1298,6 +1381,40 @@ fn summarize(stdout: &str, stderr: &str, timed_out: bool, exit_code: Option<i32>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_or_estimate_tokens_reads_json_usage() {
+        let stdout = r#"...noise... {"usage": {"input_tokens": 1200, "output_tokens": 345}} tail"#;
+        let (p, c, est) = parse_or_estimate_tokens("claude", "prompt", stdout, "");
+        assert_eq!((p, c, est), (1200, 345, false));
+    }
+
+    #[test]
+    fn parse_or_estimate_tokens_reads_a_human_token_line() {
+        let stdout = "done.\nTokens: 900 prompt, 120 completion\n";
+        let (p, c, est) = parse_or_estimate_tokens("codex", "prompt", stdout, "");
+        assert_eq!((p, c, est), (900, 120, false));
+    }
+
+    #[test]
+    fn parse_or_estimate_tokens_falls_back_to_chars_over_four() {
+        let prompt = "a".repeat(40); // -> 10
+        let stdout = "b".repeat(20); // -> 5
+        let (p, c, est) = parse_or_estimate_tokens("opencode", &prompt, &stdout, "");
+        assert_eq!((p, c, est), (10, 5, true));
+    }
+
+    #[test]
+    fn record_token_usage_persists_and_round_trips_through_get() {
+        let conn = Connection::open_in_memory().unwrap();
+        ensure_schema(&conn).unwrap();
+        let id = create_for_cwd(&conn, "t", "claude", std::path::Path::new("/tmp")).unwrap();
+        record_token_usage(&conn, id, 111, 22, true).unwrap();
+        let rec = get(&conn, id).unwrap().unwrap();
+        assert_eq!(rec.prompt_tokens, Some(111));
+        assert_eq!(rec.completion_tokens, Some(22));
+        assert!(rec.tokens_estimated);
+    }
 
     fn test_conn() -> Connection {
         let conn = Connection::open_in_memory().unwrap();
@@ -1504,6 +1621,7 @@ value = "-c"
             no_memory_context: true, // prompt must equal `description` verbatim
             timeout: Duration::from_secs(5),
             allow_fallback: false,
+            usage_json: false,
         };
         let task = run(&conn, &ctx, opts).unwrap();
         assert_eq!(task.status, TaskStatus::Completed, "expected the sh command to succeed");
@@ -1564,6 +1682,7 @@ value = "-c"
             no_memory_context: false,
             timeout: Duration::from_secs(1),
             allow_fallback: false,
+            usage_json: false,
         };
         let task = run(&conn, &ctx, opts).unwrap();
         assert_eq!(task.status, TaskStatus::Failed);
@@ -1596,6 +1715,7 @@ value = "-c"
                 no_memory_context: false,
                 timeout: Duration::from_secs(1),
                 allow_fallback: false,
+                usage_json: false,
             },
         )
     }
@@ -1635,6 +1755,7 @@ value = "-c"
             no_memory_context: false,
             timeout: Duration::from_secs(1),
             allow_fallback: false,
+            usage_json: false,
         };
         let task = run(&conn, &ctx, opts).unwrap();
         assert_eq!(task.status, TaskStatus::Failed);
@@ -1689,6 +1810,7 @@ value = "-c"
             no_memory_context: true,
             timeout: Duration::from_secs(1),
             allow_fallback: true,
+            usage_json: false,
         };
         maybe_fail_over(&conn, &ctx, id, &opts, "Error: rate limit exceeded, try again later", true, None);
 
@@ -1738,6 +1860,7 @@ value = "-c"
             no_memory_context: true,
             timeout: Duration::from_secs(1),
             allow_fallback: true,
+            usage_json: false,
         };
         maybe_fail_over(&conn, &ctx, id, &opts, "error: file not found", false, None);
 

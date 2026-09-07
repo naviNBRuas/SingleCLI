@@ -505,6 +505,7 @@ fn dispatch(
             timeout_secs,
             background,
             allow_fallback,
+            usage_json,
         } => {
             if background {
                 let record = crate::task::run_background(
@@ -519,6 +520,7 @@ fn dispatch(
                         no_memory_context,
                         timeout: std::time::Duration::from_secs(timeout_secs),
                         allow_fallback,
+                        usage_json,
                     },
                     registry.clone(),
                 )?;
@@ -538,6 +540,7 @@ fn dispatch(
                     no_memory_context,
                     timeout: std::time::Duration::from_secs(timeout_secs),
                     allow_fallback,
+                    usage_json,
                 },
             )?;
             Ok(ResponseData::Task(record))
@@ -1554,19 +1557,38 @@ fn dispatch(
             let conn = coordinator_db(ctx)?;
             let g = crate::coordinator::goal::get(&conn, &goal_id)?
                 .ok_or_else(|| anyhow::anyhow!("no such goal: {goal_id}"))?;
-            let nodes = crate::coordinator::goal::load_graph(&conn, &goal_id)?
+            let task_tokens = |task_id: Option<i64>| -> (Option<i64>, Option<i64>, bool) {
+                let Some(tid) = task_id else { return (None, None, false) };
+                match crate::task::get(&conn, tid) {
+                    Ok(Some(t)) => (t.prompt_tokens, t.completion_tokens, t.tokens_estimated),
+                    _ => (None, None, false),
+                }
+            };
+            let mut total_p = 0i64;
+            let mut total_c = 0i64;
+            let mut any_est = false;
+            let nodes: Vec<_> = crate::coordinator::goal::load_graph(&conn, &goal_id)?
                 .nodes
                 .into_iter()
-                .map(|n| single_protocol::NodeView {
-                    id: n.id,
-                    desc: n.desc,
-                    kind: n.kind.as_str().to_string(),
-                    effort: n.effort.as_str().to_string(),
-                    agent: n.agent,
-                    depends_on: n.depends_on,
-                    status: n.status.as_str().to_string(),
-                    task_id: n.task_id,
-                    attempts: n.attempts,
+                .map(|n| {
+                    let (pt, ct, est) = task_tokens(n.task_id);
+                    total_p += pt.unwrap_or(0);
+                    total_c += ct.unwrap_or(0);
+                    any_est |= est;
+                    single_protocol::NodeView {
+                        id: n.id,
+                        desc: n.desc,
+                        kind: n.kind.as_str().to_string(),
+                        effort: n.effort.as_str().to_string(),
+                        agent: n.agent,
+                        depends_on: n.depends_on,
+                        status: n.status.as_str().to_string(),
+                        task_id: n.task_id,
+                        attempts: n.attempts,
+                        prompt_tokens: pt,
+                        completion_tokens: ct,
+                        tokens_estimated: est,
+                    }
                 })
                 .collect();
             let recent_events = crate::coordinator::events::for_goal(&conn, &goal_id, 40)?
@@ -1579,6 +1601,9 @@ fn dispatch(
                 result_summary: g.result_summary.clone(),
                 nodes,
                 recent_events,
+                total_prompt_tokens: total_p,
+                total_completion_tokens: total_c,
+                any_tokens_estimated: any_est,
             }))
         }
         Request::GoalList { session_id } => {

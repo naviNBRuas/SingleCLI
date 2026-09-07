@@ -31,6 +31,12 @@ pub struct CoordinatorConfig {
     pub max_goal_minutes: u32,
     /// per-goal supervisor-patch cap; the 6th trigger blocks instead (§5.2).
     pub max_supervisor_patches: u32,
+    /// agents to dispatch in structured-output mode so their runs report
+    /// real token counts (E27.03) — currently only `claude` has a verified
+    /// usage envelope. Empty by default; other agents' node token counts
+    /// are parse-or-estimated.
+    #[serde(default)]
+    pub usage_json_agents: Vec<String>,
 }
 
 impl Default for CoordinatorConfig {
@@ -41,6 +47,7 @@ impl Default for CoordinatorConfig {
             max_dispatches_per_goal: 25,
             max_goal_minutes: 60,
             max_supervisor_patches: 5,
+            usage_json_agents: Vec::new(),
         }
     }
 }

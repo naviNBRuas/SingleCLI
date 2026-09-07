@@ -383,6 +383,7 @@ pub fn tick(
                         no_memory_context: false,
                         timeout: timeout_for(effort),
                         allow_fallback: true,
+                        usage_json: cfg.usage_json_agents.iter().any(|a| a == &agent),
                     };
                     match dispatcher.dispatch(opts) {
                         Ok(task_id) => {

@@ -158,6 +158,7 @@ pub fn run(ctx: &Context, opts: GraphOrchestrateOptions<'_>) -> Result<Vec<TaskR
                             no_memory_context: false,
                             timeout,
                             allow_fallback: false,
+                            usage_json: false,
                         },
                     )?;
                     Ok((node.id, record))
@@ -268,6 +269,7 @@ pub fn plan_and_run(
             no_memory_context: true,
             timeout,
             allow_fallback: false,
+            usage_json: false,
         },
     )?;
     if planned.status != TaskStatus::Completed {
@@ -426,6 +428,9 @@ mod tests {
             cwd: String::new(),
             workspace_id: String::new(),
             rate_limited: false,
+            prompt_tokens: None,
+            completion_tokens: None,
+            tokens_estimated: false,
         }
     }
 }

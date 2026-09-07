@@ -44,6 +44,16 @@ plan, supervise on failure, and integrate. `single task run` and
   for every registered agent on every scheduler tick and every
   `CoordinatorStatus` (~24s). It is now an in-process `$PATH` check;
   `single coordinator status` returns in ~10ms.
+- Added: per-task token accounting. Every finished task records
+  `prompt_tokens` / `completion_tokens` (`tokens_estimated` flags a
+  parse-of-output or chars/4 fallback vs. a real agent-reported count).
+  `single task run --usage-json` and `coordinator.toml`'s
+  `usage_json_agents` run an agent in a usage-reporting mode where one
+  exists — currently `claude --output-format json`. `single goal status`
+  and the ACP turn summary now show `tokens ~N in / ~N out`.
+- Added: resumable ACP sessions. The `single acp` session id is now the
+  coordinator session id, so `session/load` rebinds to a prior thread and
+  replays its events after a fresh `single acp` start (Zed panel reload).
 - Added: `single acp` — a native Agent Client Protocol stdio bridge
   (newline-delimited JSON-RPC 2.0, protocol v1) for Zed's agent panel.
   It burns no agent itself: `/`-commands and status-y prompts answer

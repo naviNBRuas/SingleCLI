@@ -76,6 +76,48 @@ impl AgentAdapter for ClaudeAdapter {
         run_with_prompt_flag("claude", cwd, prompt, backend, live_output_path, timeout, cancel)
     }
 
+    /// `claude -p --output-format json -- "<prompt>"` — the JSON result
+    /// envelope carries `usage.{input,output}_tokens`. The `result` field
+    /// is unwrapped back into `stdout` so the captured artifact still holds
+    /// the answer text, not raw JSON. A parse miss (older claude, an error
+    /// envelope) returns the outcome unchanged with `usage: None`, so the
+    /// caller just falls back to estimating.
+    #[allow(clippy::too_many_arguments)]
+    fn run_prompt_json(
+        &self,
+        cwd: &Path,
+        prompt: &str,
+        backend: &ExecBackend,
+        live_output_path: Option<&Path>,
+        timeout: Duration,
+        cancel: Option<&std::sync::atomic::AtomicBool>,
+    ) -> Result<RunOutcome> {
+        let args = [
+            "-p".to_string(),
+            "--output-format".to_string(),
+            "json".to_string(),
+            "--".to_string(),
+            prompt.to_string(),
+        ];
+        let mut outcome =
+            run_command_live("claude", &args, cwd, backend, live_output_path, timeout, cancel)?;
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(outcome.stdout.trim()) {
+            if let Some(text) = v.get("result").and_then(|r| r.as_str()) {
+                outcome.stdout = text.to_string();
+            }
+            let u = v.get("usage");
+            let get = |k: &str| u.and_then(|u| u.get(k)).and_then(|n| n.as_u64());
+            if let (Some(inp), Some(out)) = (get("input_tokens"), get("output_tokens")) {
+                outcome.usage = Some(single_protocol::TokenUsage {
+                    prompt_tokens: inp + get("cache_read_input_tokens").unwrap_or(0)
+                        + get("cache_creation_input_tokens").unwrap_or(0),
+                    completion_tokens: out,
+                });
+            }
+        }
+        Ok(outcome)
+    }
+
     /// `claude plugin install <plugin[@marketplace]>` — confirmed real via
     /// `claude plugin --help` on the reference machine (aliased `claude
     /// plugin i`).

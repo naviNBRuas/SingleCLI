@@ -179,6 +179,7 @@ fn run_role(
             no_memory_context: true, // brain prompts are self-contained
             timeout: Duration::from_secs(240),
             allow_fallback: true,
+            usage_json: false,
         },
     )?;
     let out = task_output(&rec);

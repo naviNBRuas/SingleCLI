@@ -854,7 +854,7 @@ impl App {
         std::thread::spawn(move || {
             let result = (|| -> anyhow::Result<usize> {
                 if selected.len() == 1 {
-                    match call(&socket_path, &Request::TaskRun { description, agent: selected[0].clone(), cwd, use_worktree: false, account: None, real_home, no_memory_context: false, timeout_secs: 300, background: false, allow_fallback: false })? {
+                    match call(&socket_path, &Request::TaskRun { description, agent: selected[0].clone(), cwd, use_worktree: false, account: None, real_home, no_memory_context: false, timeout_secs: 300, background: false, allow_fallback: false, usage_json: false })? {
                         Response::Ok { .. } => Ok(1),
                         Response::Error { message } => anyhow::bail!(message),
                     }

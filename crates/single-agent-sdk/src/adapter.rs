@@ -89,6 +89,27 @@ pub trait AgentAdapter {
         anyhow::bail!("{} has no non-interactive run mode wired up", self.command())
     }
 
+    /// Same as `run_prompt`, but asks the agent for a structured-output
+    /// mode that reports real token usage (`RunOutcome::usage`). Opt-in
+    /// per agent — the coordinator sets it for agents listed in
+    /// `coordinator.toml`'s `usage_json_agents`, and `single task run
+    /// --usage-json` requests it directly. Default: fall through to
+    /// `run_prompt` (no usage; the caller then parse-or-estimates). Only
+    /// override where the agent has a verified JSON envelope carrying
+    /// usage — currently just `claude --output-format json`.
+    #[allow(clippy::too_many_arguments)]
+    fn run_prompt_json(
+        &self,
+        cwd: &Path,
+        prompt: &str,
+        backend: &ExecBackend,
+        live_output_path: Option<&Path>,
+        timeout: Duration,
+        cancel: Option<&std::sync::atomic::AtomicBool>,
+    ) -> Result<RunOutcome> {
+        self.run_prompt(cwd, prompt, backend, live_output_path, timeout, cancel)
+    }
+
     /// Installs a plugin via this agent's own real plugin-install command
     /// (`claude plugin install`, `codex plugin add`, `opencode plugin`,
     /// `agy plugin install` — verified per-agent, see each impl). `home`
