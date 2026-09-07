@@ -44,6 +44,13 @@ plan, supervise on failure, and integrate. `single task run` and
   for every registered agent on every scheduler tick and every
   `CoordinatorStatus` (~24s). It is now an in-process `$PATH` check;
   `single coordinator status` returns in ~10ms.
+- Fixed: syncing a provider into opencode under a name that also exists in
+  models.dev's registry (`nvidia`, `openrouter`, `mistral`, …) made
+  opencode merge that provider's entire registry catalog — 100+ models,
+  EOL'd ones included — over the one or two SingleCLI actually curated
+  (`opencode` 1.18.29: 1 declared → 101 listed). Such providers are now
+  written under a `single-<name>` key, which isn't in models.dev, so only
+  the declared models appear; use `opencode -m single-<name>/<id>`.
 - Added: `single serve --openai` — a local OpenAI-compatible HTTP proxy
   over the pool (`GET /v1/models`, `POST /v1/chat/completions`, non-stream
   + single-chunk SSE). Each request flattens the chat messages to a
