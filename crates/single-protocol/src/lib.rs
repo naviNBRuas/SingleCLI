@@ -474,6 +474,28 @@ pub enum Request {
         value: String,
     },
     BillingProviderList,
+    /// E28 §5.3 — the vendored ~40-provider free-LLM catalog
+    /// (`single_core::free_pool::FREE_PROVIDERS`), not `providers.toml`.
+    ProviderListFree,
+    /// Register one free-pool provider's key and validate it (best-effort
+    /// `quirks.validate_url` probe — a failed probe doesn't error the
+    /// command). The key value is prompted for client-side (hidden input)
+    /// when not passed, so it never crosses the wire unencrypted longer
+    /// than necessary.
+    ProviderAddFree {
+        id: String,
+        key: String,
+    },
+    /// Reconciles the vendored catalog into `providers.toml` as
+    /// `single-<id>` presets and into `free-pool.toml`'s per-provider
+    /// `enabled`/`disabled_reason` state. Idempotent.
+    ProviderSyncPool,
+    /// Per free-pool provider: keyed?, last validation, disabled reason
+    /// (region-walled/`sail`), and (until the pool engine's `ledger`/
+    /// `cooldown` modules land in Phase 2) `"n/a"` cooldown/headroom.
+    ProviderKeyStatus {
+        platform: Option<String>,
+    },
     UsageShow {
         provider: Option<String>,
     },
@@ -709,6 +731,11 @@ pub enum ResponseData {
     ProviderSyncResults(Vec<ProviderSyncResult>),
     ProviderKeys(Vec<ProviderKeySpec>),
     BillingProviders(Vec<BillingProviderInfo>),
+    FreeProviders(Vec<FreeProviderInfo>),
+    PoolSyncResult {
+        synced: usize,
+    },
+    PoolKeyStatuses(Vec<PoolKeyStatusInfo>),
     Usage(UsageSummary),
     KgEntityId(i64),
     KgEntity(KgEntity),
@@ -1603,6 +1630,40 @@ pub struct ProviderKeySpec {
     pub label: String,
     pub agent: Option<String>,
     pub secret_name: String,
+}
+
+/// One row of `single provider list-free` — a read-only view over
+/// `single_core::free_pool::FreeProvider`, flattened to plain
+/// serializable fields for the wire (the source struct holds `Duration`/
+/// enums that don't need to cross the CLI<->daemon boundary as-is).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FreeProviderInfo {
+    pub id: String,
+    pub display: String,
+    pub signup_url: String,
+    pub rpm: Option<u32>,
+    pub rpd: Option<u32>,
+    pub tpm: Option<u32>,
+    pub tpd: Option<u64>,
+    pub free_note: String,
+    /// Present only for the §17-resolved default-disabled providers
+    /// (`sail`, `modelscope`, `qianfan`, `volcengine`, `xfyun`).
+    pub disabled_reason: Option<String>,
+}
+
+/// One row of `single provider key-status`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PoolKeyStatusInfo {
+    pub platform: String,
+    pub keyed: bool,
+    pub valid: bool,
+    pub last_validated_at: Option<String>,
+    pub disabled_reason: Option<String>,
+    /// `"n/a"` until `single-runtime::pool::cooldown` lands (E28 Phase 2)
+    /// — see `ProviderKeyStatus`'s doc comment.
+    pub cooldown: String,
+    /// `"n/a"` until `single-runtime::pool::ledger` lands (E28 Phase 2).
+    pub headroom: String,
 }
 
 /// The result of trying to sync one provider's key into one agent's real

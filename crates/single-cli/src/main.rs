@@ -1074,6 +1074,26 @@ enum ProviderCommand {
         provider: String,
         value: String,
     },
+    /// List the vendored ~40-provider free-LLM catalog (E28 spec §5.3), not `providers.toml`.
+    ListFree {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Register one free-pool provider's key (prompted, hidden, if `--key` is omitted) and best-effort validate it.
+    AddFree {
+        id: String,
+        #[arg(long)]
+        key: Option<String>,
+    },
+    /// Reconcile the vendored catalog into `providers.toml` (`single-<id>` presets) and `free-pool.toml` (enabled/disabled state). Idempotent.
+    SyncPool,
+    /// Per free-pool provider: keyed?, last validation, disabled reason, cooldown/headroom (the latter two "n/a" until the pool engine lands).
+    KeyStatus {
+        #[arg(long)]
+        platform: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -2506,6 +2526,26 @@ fn main() -> anyhow::Result<()> {
                 )?;
                 render::print(response, false);
             }
+            ProviderCommand::ListFree { json } => {
+                let response = client::send(&socket_path, Request::ProviderListFree)?;
+                render::print(response, json);
+            }
+            ProviderCommand::AddFree { id, key } => {
+                let key = match key {
+                    Some(key) => key,
+                    None => rpassword::prompt_password(format!("API key for '{id}': "))?,
+                };
+                let response = client::send(&socket_path, Request::ProviderAddFree { id, key })?;
+                render::print(response, false);
+            }
+            ProviderCommand::SyncPool => {
+                let response = client::send(&socket_path, Request::ProviderSyncPool)?;
+                render::print(response, false);
+            }
+            ProviderCommand::KeyStatus { platform, json } => {
+                let response = client::send(&socket_path, Request::ProviderKeyStatus { platform })?;
+                render::print(response, json);
+            }
         },
         Command::Worktree { action } => match action {
             WorktreeCommand::Diff { task_id, json } => {
@@ -3329,5 +3369,63 @@ mod graph_task_parsing_tests {
         assert_eq!(nodes.len(), 2);
         assert_eq!(nodes[0].id, "a");
         assert_eq!(nodes[1].depends_on, vec!["a"]);
+    }
+
+    // --- E28 Part A: `single provider list-free`/`add-free`/`sync-pool`/`key-status` parse.
+
+    #[test]
+    fn list_free_parses() {
+        let cli = Cli::try_parse_from(["single", "provider", "list-free"]).unwrap();
+        match cli.command {
+            Some(Command::Provider { action: ProviderCommand::ListFree { json } }) => assert!(!json),
+            _ => panic!("expected Command::Provider(ListFree)"),
+        }
+    }
+
+    #[test]
+    fn add_free_parses_with_key_flag() {
+        let cli = Cli::try_parse_from(["single", "provider", "add-free", "groq", "--key", "gsk-abc"]).unwrap();
+        match cli.command {
+            Some(Command::Provider { action: ProviderCommand::AddFree { id, key } }) => {
+                assert_eq!(id, "groq");
+                assert_eq!(key.as_deref(), Some("gsk-abc"));
+            }
+            _ => panic!("expected Command::Provider(AddFree)"),
+        }
+    }
+
+    #[test]
+    fn add_free_parses_without_key_flag() {
+        let cli = Cli::try_parse_from(["single", "provider", "add-free", "groq"]).unwrap();
+        match cli.command {
+            Some(Command::Provider { action: ProviderCommand::AddFree { id, key } }) => {
+                assert_eq!(id, "groq");
+                assert!(key.is_none());
+            }
+            _ => panic!("expected Command::Provider(AddFree)"),
+        }
+    }
+
+    #[test]
+    fn sync_pool_parses() {
+        let cli = Cli::try_parse_from(["single", "provider", "sync-pool"]).unwrap();
+        assert!(matches!(cli.command, Some(Command::Provider { action: ProviderCommand::SyncPool })));
+    }
+
+    #[test]
+    fn key_status_parses_optional_platform() {
+        let cli = Cli::try_parse_from(["single", "provider", "key-status"]).unwrap();
+        match cli.command {
+            Some(Command::Provider { action: ProviderCommand::KeyStatus { platform, .. } }) => assert!(platform.is_none()),
+            _ => panic!("expected Command::Provider(KeyStatus)"),
+        }
+
+        let cli = Cli::try_parse_from(["single", "provider", "key-status", "--platform", "groq"]).unwrap();
+        match cli.command {
+            Some(Command::Provider { action: ProviderCommand::KeyStatus { platform, .. } }) => {
+                assert_eq!(platform.as_deref(), Some("groq"));
+            }
+            _ => panic!("expected Command::Provider(KeyStatus)"),
+        }
     }
 }

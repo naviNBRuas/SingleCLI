@@ -6,6 +6,9 @@
 //! Phase 2+). This module only answers "what free providers exist and
 //! how do you talk to them," never "is this one currently usable."
 
+use anyhow::{Context, Result};
+use std::collections::BTreeMap;
+use std::path::Path;
 use std::time::Duration;
 
 /// One provider's dial-in metadata: how to reach it, how to authenticate,
@@ -748,6 +751,69 @@ pub static FREE_PROVIDERS: &[FreeProvider] = &[
     },
 ];
 
+/// One provider's `enabled`/`disabled_reason` state in `free-pool.toml`
+/// (`single provider sync-pool`'s output, E28 spec §5.3/§17).
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct FreePoolEntry {
+    pub enabled: bool,
+    pub disabled_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+struct FreePoolFile {
+    #[serde(default)]
+    providers: BTreeMap<String, FreePoolEntry>,
+}
+
+pub fn load_pool_file(path: &Path) -> Result<BTreeMap<String, FreePoolEntry>> {
+    if !path.exists() {
+        return Ok(BTreeMap::new());
+    }
+    let text = std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    let file: FreePoolFile = toml::from_str(&text).with_context(|| format!("parsing {} as TOML", path.display()))?;
+    Ok(file.providers)
+}
+
+pub fn save_pool_file(path: &Path, providers: &BTreeMap<String, FreePoolEntry>) -> Result<()> {
+    let file = FreePoolFile { providers: providers.clone() };
+    let rendered = toml::to_string_pretty(&file).context("serializing free-pool registry")?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(path, rendered).with_context(|| format!("writing {}", path.display()))
+}
+
+/// Reconciles `existing` (whatever's already in `free-pool.toml`) against
+/// `FREE_PROVIDERS`, per E28 §17's resolution:
+/// - The 5 default-disabled ids (`sail`/`modelscope`/`qianfan`/
+///   `volcengine`/`xfyun`) are *always* written `enabled = false` with
+///   their reason string, every run — an operator who wants one on has to
+///   flip it by hand afterward (re-running `sync-pool` resets it, which
+///   is the point: it's a deliberate, visible override, not a config the
+///   sync silently respects).
+/// - Every other provider already present in `existing` is left alone
+///   (its `enabled` flag is an operator override once set) — only a
+///   provider with no existing entry gets a fresh one, defaulted from
+///   `is_keyed_and_valid`.
+pub fn reconcile_pool_state(
+    existing: &BTreeMap<String, FreePoolEntry>,
+    is_keyed_and_valid: impl Fn(&str) -> bool,
+) -> BTreeMap<String, FreePoolEntry> {
+    let mut out = BTreeMap::new();
+    for provider in FREE_PROVIDERS {
+        if let Some(reason) = default_disabled_reason(provider.id) {
+            out.insert(provider.id.to_string(), FreePoolEntry { enabled: false, disabled_reason: Some(reason.to_string()) });
+            continue;
+        }
+        let entry = existing.get(provider.id).cloned().unwrap_or(FreePoolEntry {
+            enabled: is_keyed_and_valid(provider.id),
+            disabled_reason: None,
+        });
+        out.insert(provider.id.to_string(), entry);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -799,5 +865,43 @@ mod tests {
     fn by_id_finds_a_known_provider_and_none_for_unknown() {
         assert!(by_id("groq").is_some());
         assert!(by_id("does-not-exist").is_none());
+    }
+
+    #[test]
+    fn pool_file_round_trips() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("free-pool.toml");
+        let mut providers = BTreeMap::new();
+        providers.insert("groq".to_string(), FreePoolEntry { enabled: true, disabled_reason: None });
+        save_pool_file(&path, &providers).unwrap();
+        let loaded = load_pool_file(&path).unwrap();
+        assert_eq!(loaded.get("groq"), Some(&FreePoolEntry { enabled: true, disabled_reason: None }));
+    }
+
+    #[test]
+    fn reconcile_always_forces_the_five_default_disabled_ids_off() {
+        let mut existing = BTreeMap::new();
+        existing.insert("sail".to_string(), FreePoolEntry { enabled: true, disabled_reason: None });
+        let out = reconcile_pool_state(&existing, |_| true);
+        let sail = out.get("sail").unwrap();
+        assert!(!sail.enabled);
+        assert!(sail.disabled_reason.is_some());
+    }
+
+    #[test]
+    fn reconcile_preserves_an_existing_operator_override() {
+        let mut existing = BTreeMap::new();
+        existing.insert("groq".to_string(), FreePoolEntry { enabled: false, disabled_reason: None });
+        // is_keyed_and_valid says true, but the existing row already has
+        // enabled=false — must not be clobbered.
+        let out = reconcile_pool_state(&existing, |_| true);
+        assert!(!out.get("groq").unwrap().enabled);
+    }
+
+    #[test]
+    fn reconcile_defaults_a_new_entry_from_keyed_and_valid() {
+        let out = reconcile_pool_state(&BTreeMap::new(), |id| id == "groq");
+        assert!(out.get("groq").unwrap().enabled);
+        assert!(!out.get("cerebras").unwrap().enabled);
     }
 }

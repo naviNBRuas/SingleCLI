@@ -1221,6 +1221,112 @@ fn dispatch(
                 .collect();
             Ok(ResponseData::BillingProviders(infos))
         }
+        Request::ProviderListFree => {
+            let infos = single_core::free_pool::FREE_PROVIDERS
+                .iter()
+                .map(|p| single_protocol::FreeProviderInfo {
+                    id: p.id.to_string(),
+                    display: p.display.to_string(),
+                    signup_url: p.signup_url.to_string(),
+                    rpm: p.limits.rpm,
+                    rpd: p.limits.rpd,
+                    tpm: p.limits.tpm,
+                    tpd: p.limits.tpd,
+                    free_note: p.free_note.to_string(),
+                    disabled_reason: single_core::free_pool::default_disabled_reason(p.id).map(str::to_string),
+                })
+                .collect();
+            Ok(ResponseData::FreeProviders(infos))
+        }
+        Request::ProviderAddFree { id, key } => {
+            let provider = single_core::free_pool::by_id(&id).ok_or_else(|| {
+                anyhow::anyhow!("no such free provider: {id} (see `single provider list-free`)")
+            })?;
+            let store = single_core::secrets::SecretTool;
+            let secret_name = single_core::pool_keys::secret_name(&id, "default");
+            single_core::secrets::SecretStore::set(&store, &secret_name, &key)?;
+            let conn = crate::state::open(&ctx.dirs.db_path())?;
+            single_core::pool_keys::ensure_schema(&conn)?;
+            single_core::pool_keys::add(&conn, &id, "default")?;
+
+            // Best-effort key validation — a failed/absent probe just
+            // leaves the key unvalidated, it never fails the command
+            // (spec §5.3: validation is advisory, not a gate).
+            if let Some(path) = provider.quirks.validate_url {
+                if !provider.base_url.is_empty() {
+                    let url = format!("{}{}", provider.base_url, path);
+                    let client = reqwest::blocking::Client::new();
+                    let ok = client
+                        .get(&url)
+                        .bearer_auth(&key)
+                        .timeout(provider.timeout)
+                        .send()
+                        .map(|resp| resp.status().is_success())
+                        .unwrap_or(false);
+                    single_core::pool_keys::mark_validated(&conn, &id, "default", ok)?;
+                }
+            }
+            Ok(ResponseData::Empty)
+        }
+        Request::ProviderSyncPool => {
+            let conn = crate::state::open(&ctx.dirs.db_path())?;
+            single_core::pool_keys::ensure_schema(&conn)?;
+            let existing = single_core::free_pool::load_pool_file(&ctx.dirs.free_pool_registry_file())?;
+            let reconciled = single_core::free_pool::reconcile_pool_state(&existing, |id| {
+                single_core::pool_keys::list(&conn, Some(id))
+                    .map(|keys| keys.iter().any(|k| k.valid && !k.disabled))
+                    .unwrap_or(false)
+            });
+            single_core::free_pool::save_pool_file(&ctx.dirs.free_pool_registry_file(), &reconciled)?;
+
+            let providers_path = ctx.dirs.providers_registry_file();
+            let mut synced = 0usize;
+            for provider in single_core::free_pool::FREE_PROVIDERS {
+                let name = format!("single-{}", provider.id);
+                let env_var_name = format!("SINGLE_POOL_{}_API_KEY", provider.id.to_uppercase().replace('-', "_"));
+                single_core::providers::add(
+                    &providers_path,
+                    single_protocol::ProviderSpec {
+                        name: name.clone(),
+                        env_var_name,
+                        secret_name: format!("provider:{name}"),
+                        base_url: if provider.base_url.is_empty() { None } else { Some(provider.base_url.to_string()) },
+                        models: Vec::new(),
+                    },
+                )?;
+                synced += 1;
+            }
+            Ok(ResponseData::PoolSyncResult { synced })
+        }
+        Request::ProviderKeyStatus { platform } => {
+            let conn = crate::state::open(&ctx.dirs.db_path())?;
+            single_core::pool_keys::ensure_schema(&conn)?;
+            let pool_state = single_core::free_pool::load_pool_file(&ctx.dirs.free_pool_registry_file())?;
+            let providers: Vec<_> = single_core::free_pool::FREE_PROVIDERS
+                .iter()
+                .filter(|p| platform.as_deref().is_none_or(|want| want == p.id))
+                .collect();
+            let mut statuses = Vec::new();
+            for provider in providers {
+                let keys = single_core::pool_keys::list(&conn, Some(provider.id))?;
+                let key = keys.first();
+                let disabled_reason = single_core::free_pool::default_disabled_reason(provider.id)
+                    .map(str::to_string)
+                    .or_else(|| pool_state.get(provider.id).and_then(|e| e.disabled_reason.clone()));
+                statuses.push(single_protocol::PoolKeyStatusInfo {
+                    platform: provider.id.to_string(),
+                    keyed: key.is_some(),
+                    valid: key.map(|k| k.valid).unwrap_or(false),
+                    last_validated_at: key.and_then(|k| k.last_validated_at.clone()),
+                    disabled_reason,
+                    // TODO(Phase 2): wire real cooldown/headroom once
+                    // `single-runtime::pool::{ledger,cooldown}` exist.
+                    cooldown: "n/a".to_string(),
+                    headroom: "n/a".to_string(),
+                });
+            }
+            Ok(ResponseData::PoolKeyStatuses(statuses))
+        }
         Request::UsageShow { provider } => usage_summary(ctx, provider),
         Request::UsageRefresh => usage_summary(ctx, None),
         Request::PluginAdd { plugin } => {

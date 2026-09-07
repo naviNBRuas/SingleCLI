@@ -519,6 +519,38 @@ fn print_data(data: ResponseData) {
                 );
             }
         }
+        ResponseData::FreeProviders(providers) => {
+            for p in providers {
+                let limits = format!(
+                    "rpm={} rpd={} tpm={} tpd={}",
+                    p.rpm.map(|v| v.to_string()).unwrap_or_else(|| "-".into()),
+                    p.rpd.map(|v| v.to_string()).unwrap_or_else(|| "-".into()),
+                    p.tpm.map(|v| v.to_string()).unwrap_or_else(|| "-".into()),
+                    p.tpd.map(|v| v.to_string()).unwrap_or_else(|| "-".into()),
+                );
+                println!("{:<14} {:<24} {}", p.id, p.display, limits);
+                println!("               signup: {}", p.signup_url);
+                println!("               note:   {}", p.free_note);
+                if let Some(reason) = p.disabled_reason {
+                    println!("               disabled by default: {reason}");
+                }
+            }
+        }
+        ResponseData::PoolSyncResult { synced } => {
+            println!("synced {synced} free-pool providers into providers.toml and free-pool.toml");
+        }
+        ResponseData::PoolKeyStatuses(statuses) => {
+            for s in statuses {
+                let keyed = if s.keyed { if s.valid { "keyed, valid" } else { "keyed, unvalidated" } } else { "no key" };
+                println!("{:<14} {:<20} cooldown={} headroom={}", s.platform, keyed, s.cooldown, s.headroom);
+                if let Some(at) = s.last_validated_at {
+                    println!("               last validated: {at}");
+                }
+                if let Some(reason) = s.disabled_reason {
+                    println!("               disabled by default: {reason}");
+                }
+            }
+        }
         ResponseData::BillingProviders(providers) => {
             for p in providers {
                 let status = if !p.verified { "unverified" } else { "" };
