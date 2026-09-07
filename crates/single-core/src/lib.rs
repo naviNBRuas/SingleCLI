@@ -6,6 +6,7 @@ pub mod config;
 pub mod custom_agents;
 pub mod docker;
 pub mod fallback;
+pub mod free_pool;
 pub mod hooks;
 pub mod lsp;
 pub mod mcp;
