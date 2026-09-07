@@ -1633,11 +1633,7 @@ fn dispatch(
                 all.iter().filter(|g| g.status == want).map(goal_summary).collect::<Vec<_>>()
             };
             let cfg = crate::coordinator::routing::CoordinatorConfig::load(&ctx.dirs);
-            let health = crate::coordinator::routing::PoolHealth::probe(
-                &ctx.registry,
-                &ctx.dirs.agents_dir(),
-                &conn,
-            );
+            let health = crate::coordinator::routing::PoolHealth::probe(&ctx.registry, &conn);
             let mut running_per_agent: std::collections::BTreeMap<String, usize> = Default::default();
             {
                 let mut stmt = conn.prepare(

@@ -185,24 +185,21 @@ impl PoolHealth {
         self.detected_authed.contains(agent) && !self.rate_limited.contains(agent)
     }
 
-    /// builds a live snapshot: `detected_authed` from registry adapter
-    /// discovery (an installed agent — an auth probe here would reintroduce
-    /// the E27.01 `agent list` hang, so detection is the bar and a genuine
-    /// auth failure surfaces as a dispatch failure the scheduler retries);
-    /// `rate_limited` from any `tasks` row flagged `rate_limited` in the
-    /// last 15 minutes.
+    /// builds a live snapshot cheaply — this is called on every scheduler
+    /// tick and every `CoordinatorStatus`, so it must not shell out.
+    /// `detected_authed` = the agent's command is on `$PATH` (an in-process
+    /// check, microseconds for the whole registry); a real `--version` /
+    /// auth probe here would reintroduce the E27.01 `agent list` stall
+    /// (~24 s for 30 agents) and a genuine auth failure already surfaces as
+    /// a dispatch failure the scheduler retries past. `rate_limited` = any
+    /// `tasks` row flagged `rate_limited` in the last 15 minutes.
     pub fn probe(
         registry: &[single_core::registry::AgentDefinition],
-        agents_dir: &std::path::Path,
         conn: &rusqlite::Connection,
     ) -> Self {
         let detected_authed = registry
             .iter()
-            .filter(|a| {
-                single_agent_sdk::adapters::for_agent_with_custom(&a.name, agents_dir, registry)
-                    .map(|ad| ad.discover().detected)
-                    .unwrap_or(false)
-            })
+            .filter(|a| command_on_path(&a.command))
             .map(|a| a.name.clone())
             .collect();
 
@@ -217,6 +214,23 @@ impl PoolHealth {
 
         Self { detected_authed, rate_limited }
     }
+}
+
+/// true if `cmd` (a bare binary name, or an absolute path) resolves on the
+/// current `$PATH`. no subprocess — just stat calls.
+fn command_on_path(cmd: &str) -> bool {
+    let p = std::path::Path::new(cmd);
+    if p.is_absolute() {
+        return p.is_file();
+    }
+    std::env::var_os("PATH")
+        .map(|paths| {
+            std::env::split_paths(&paths).any(|dir| {
+                let cand = dir.join(cmd);
+                cand.is_file()
+            })
+        })
+        .unwrap_or(false)
 }
 
 /// walks the `(kind, effort)` candidate list and returns the first agent

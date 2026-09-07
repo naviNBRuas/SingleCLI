@@ -241,6 +241,7 @@ impl Acp {
     // ---- one prompt turn -----------------------------------------------
 
     fn run_turn(&self, acp_sid: &str, rid: Option<Value>, text: &str) {
+        log(&format!("turn start sid={acp_sid} text={:?}", &text[..text.len().min(60)]));
         let trimmed = text.trim_start();
         if let Some(rest) = trimmed.strip_prefix('/') {
             let mut parts = rest.splitn(2, char::is_whitespace);

@@ -40,7 +40,7 @@ pub fn ensure_coordinator_schema(conn: &Connection) -> anyhow::Result<()> {
 fn load_env(ctx: &Context, conn: &Connection) -> (CoordinatorConfig, RoutingTable, PoolHealth) {
     let cfg = CoordinatorConfig::load(&ctx.dirs);
     let table = RoutingTable::load(&ctx.dirs);
-    let health = PoolHealth::probe(&ctx.registry, &ctx.dirs.agents_dir(), conn);
+    let health = PoolHealth::probe(&ctx.registry, conn);
     (cfg, table, health)
 }
 
