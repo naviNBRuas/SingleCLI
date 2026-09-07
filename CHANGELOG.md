@@ -40,6 +40,10 @@ plan, supervise on failure, and integrate. `single task run` and
   `single coordinator status`.
 - Added: a scheduler tick-timer thread in `single-runtimed` that drives
   every active goal on `coordinator.toml`'s interval (default 5s).
+- Fixed: the coordinator pool-health probe shelled out `<cmd> --version`
+  for every registered agent on every scheduler tick and every
+  `CoordinatorStatus` (~24s). It is now an in-process `$PATH` check;
+  `single coordinator status` returns in ~10ms.
 - Added: `single acp` — a native Agent Client Protocol stdio bridge
   (newline-delimited JSON-RPC 2.0, protocol v1) for Zed's agent panel.
   It burns no agent itself: `/`-commands and status-y prompts answer
