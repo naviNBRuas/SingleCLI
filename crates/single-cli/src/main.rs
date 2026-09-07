@@ -343,6 +343,14 @@ enum Command {
         agent: Option<String>,
         #[arg(long, default_value = "180")]
         timeout_secs: u64,
+        /// Bearer token required on every request. Omit and one is
+        /// generated and printed at startup.
+        #[arg(long)]
+        api_key: Option<String>,
+        /// Permit binding a non-loopback address (requires --api-key).
+        /// Off by default: the proxy runs agent CLIs.
+        #[arg(long)]
+        allow_remote: bool,
     },
     /// Undocumented: internal helpers other SingleCLI-owned tooling shells out to.
     #[command(hide = true, subcommand)]
@@ -1433,11 +1441,18 @@ fn main() -> anyhow::Result<()> {
         return acp::run(socket_path);
     }
     // Likewise the OpenAI proxy — a long-running HTTP server.
-    if let Command::Serve { openai, addr, agent, timeout_secs } = command {
+    if let Command::Serve { openai, addr, agent, timeout_secs, api_key, allow_remote } = command {
         if !openai {
             anyhow::bail!("`single serve` currently supports only --openai");
         }
-        return serve_openai::run(serve_openai::Config { socket_path, addr, agent, timeout_secs });
+        return serve_openai::run(serve_openai::Config {
+            socket_path,
+            addr,
+            agent,
+            timeout_secs,
+            api_key,
+            allow_remote,
+        });
     }
 
     // Interactive login needs the user's real terminal (browser OAuth

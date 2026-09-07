@@ -12,7 +12,7 @@
 //! runtime. `task::run` is one-shot, so `stream: true` is honoured as a
 //! single content chunk followed by `[DONE]`, not real per-token SSE.
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
 use single_protocol::{Request, Response, ResponseData, TaskRecord, TaskStatus};
 use single_runtime::coordinator::graph::{Effort, NodeKind};
@@ -20,7 +20,14 @@ use single_runtime::coordinator::routing::{self, PoolHealth, RoutingTable};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+/// Caps so a slow or hostile client can't tie up a worker thread or make
+/// the server allocate unbounded memory.
+const READ_TIMEOUT: Duration = Duration::from_secs(15);
+const MAX_HEADER_BYTES: usize = 16 * 1024;
+const MAX_HEADER_LINES: usize = 100;
+const MAX_BODY_BYTES: usize = 1024 * 1024;
 
 pub struct Config {
     pub socket_path: PathBuf,
@@ -29,21 +36,67 @@ pub struct Config {
     /// per request when the model name isn't itself an agent.
     pub agent: Option<String>,
     pub timeout_secs: u64,
+    /// Bearer token required on every request. `None` → generate one at
+    /// startup and print it.
+    pub api_key: Option<String>,
+    /// Permit binding a non-loopback address. Off by default: the server
+    /// runs arbitrary agent CLIs, so exposing it to the network is a
+    /// deliberate choice and still requires `--api-key`.
+    pub allow_remote: bool,
+}
+
+/// Shared, immutable per-run state handed to every connection thread.
+struct Server {
+    cfg: Config,
+    ctx: single_runtime::Context,
+    api_key: String,
+    /// Acceptable `Host` header values (host[:port]) — a request whose
+    /// `Host` isn't one of these is refused, which defeats DNS-rebinding
+    /// attacks from a browser even though it can reach the socket.
+    allowed_hosts: Vec<String>,
 }
 
 pub fn run(cfg: Config) -> Result<()> {
     let ctx = single_runtime::Context::load().context("loading SingleCLI context")?;
+
+    let (host, port) = split_host_port(&cfg.addr);
+    let is_loopback = matches!(host.as_str(), "127.0.0.1" | "::1" | "localhost")
+        || host.starts_with("127.");
+    if !is_loopback && !cfg.allow_remote {
+        bail!(
+            "refusing to bind non-loopback address {} — this server runs agent CLIs. \
+             Pass --allow-remote AND --api-key to expose it deliberately.",
+            cfg.addr
+        );
+    }
+    if !is_loopback && cfg.api_key.is_none() {
+        bail!("--allow-remote requires an explicit --api-key");
+    }
+
+    let api_key = cfg.api_key.clone().unwrap_or_else(random_token);
+    let allowed_hosts = vec![
+        format!("{host}:{port}"),
+        format!("localhost:{port}"),
+        format!("127.0.0.1:{port}"),
+        host.clone(),
+        "localhost".to_string(),
+        "127.0.0.1".to_string(),
+    ];
+
     let listener = TcpListener::bind(&cfg.addr).with_context(|| format!("binding {}", cfg.addr))?;
     eprintln!("single serve --openai listening on http://{}/v1  (Ctrl-C to stop)", cfg.addr);
+    if cfg.api_key.is_none() {
+        eprintln!("api key (send as `Authorization: Bearer <key>`): {api_key}");
+    }
 
-    let cfg = std::sync::Arc::new(cfg);
-    let ctx = std::sync::Arc::new(ctx);
+    let server = std::sync::Arc::new(Server { cfg, ctx, api_key, allowed_hosts });
     for stream in listener.incoming() {
         let Ok(stream) = stream else { continue };
-        let cfg = std::sync::Arc::clone(&cfg);
-        let ctx = std::sync::Arc::clone(&ctx);
+        let server = std::sync::Arc::clone(&server);
         std::thread::spawn(move || {
-            if let Err(e) = handle_conn(stream, &cfg, &ctx) {
+            let _ = stream.set_read_timeout(Some(READ_TIMEOUT));
+            let _ = stream.set_write_timeout(Some(READ_TIMEOUT));
+            if let Err(e) = handle_conn(stream, &server) {
                 eprintln!("[serve] connection error: {e:#}");
             }
         });
@@ -51,9 +104,35 @@ pub fn run(cfg: Config) -> Result<()> {
     Ok(())
 }
 
+fn split_host_port(addr: &str) -> (String, String) {
+    match addr.rsplit_once(':') {
+        Some((h, p)) => (h.trim_matches(['[', ']']).to_string(), p.to_string()),
+        None => (addr.to_string(), "80".to_string()),
+    }
+}
+
+/// 32 hex chars from `/dev/urandom`, or a time+pid mix if that fails.
+fn random_token() -> String {
+    let mut buf = [0u8; 16];
+    if std::fs::File::open("/dev/urandom").and_then(|mut f| f.read_exact(&mut buf)).is_ok() {
+        return buf.iter().map(|b| format!("{b:02x}")).collect();
+    }
+    let n = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+    format!("{n:032x}{:x}", std::process::id())
+}
+
+/// Length-then-byte comparison; not fully constant-time, but the token is
+/// 128-bit random so a timing oracle is not a realistic path here.
+fn token_matches(expected: &str, got: &str) -> bool {
+    expected.len() == got.len()
+        && expected.bytes().zip(got.bytes()).fold(0u8, |acc, (a, b)| acc | (a ^ b)) == 0
+}
+
 struct HttpRequest {
     method: String,
     path: String,
+    host: String,
+    authorization: String,
     body: String,
 }
 
@@ -66,36 +145,97 @@ fn read_request(stream: &TcpStream) -> Result<HttpRequest> {
     let path = parts.next().unwrap_or_default().to_string();
 
     let mut content_length = 0usize;
+    let mut host = String::new();
+    let mut authorization = String::new();
+    let mut header_bytes = 0usize;
+    let mut header_lines = 0usize;
     loop {
         let mut line = String::new();
-        reader.read_line(&mut line)?;
+        let n = reader.read_line(&mut line)?;
+        if n == 0 {
+            break; // connection closed before headers ended
+        }
+        header_bytes += n;
+        header_lines += 1;
+        if header_bytes > MAX_HEADER_BYTES || header_lines > MAX_HEADER_LINES {
+            bail!("request headers too large");
+        }
         let line = line.trim_end();
         if line.is_empty() {
             break;
         }
-        if let Some(v) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+        let lower = line.to_ascii_lowercase();
+        if let Some(v) = lower.strip_prefix("content-length:") {
             content_length = v.trim().parse().unwrap_or(0);
+        } else if let Some(v) = lower.strip_prefix("host:") {
+            host = v.trim().to_string();
+        } else if lower.starts_with("authorization:") {
+            authorization = line["authorization:".len()..].trim().to_string();
         }
+    }
+    if content_length > MAX_BODY_BYTES {
+        bail!("request body exceeds {MAX_BODY_BYTES} bytes");
     }
     let mut body = vec![0u8; content_length];
     if content_length > 0 {
         reader.read_exact(&mut body)?;
     }
-    Ok(HttpRequest { method, path, body: String::from_utf8_lossy(&body).into_owned() })
+    Ok(HttpRequest {
+        method,
+        path,
+        host,
+        authorization,
+        body: String::from_utf8_lossy(&body).into_owned(),
+    })
 }
 
-fn handle_conn(mut stream: TcpStream, cfg: &Config, ctx: &single_runtime::Context) -> Result<()> {
-    let req = read_request(&stream)?;
+fn handle_conn(mut stream: TcpStream, srv: &Server) -> Result<()> {
+    let req = match read_request(&stream) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("[serve] bad request: {e:#}");
+            return write_json(
+                &mut stream,
+                400,
+                &json!({ "error": { "message": "malformed or oversized request", "type": "invalid_request_error" } }),
+            );
+        }
+    };
     let path = req.path.split('?').next().unwrap_or(&req.path);
 
+    // /health is the one unauthenticated, host-agnostic route (liveness only).
+    if req.method == "GET" && path == "/health" {
+        return write_json(&mut stream, 200, &json!({ "ok": true }));
+    }
+
+    // DNS-rebinding guard: a browser tricked into hitting this socket still
+    // sends the attacker's hostname in `Host`.
+    if !srv.allowed_hosts.iter().any(|h| h.eq_ignore_ascii_case(&req.host)) {
+        return write_json(
+            &mut stream,
+            421,
+            &json!({ "error": { "message": "unrecognized Host header", "type": "invalid_request_error" } }),
+        );
+    }
+
+    // Bearer auth on every real route (including /v1/models — it lists the
+    // agent inventory).
+    let presented = req.authorization.strip_prefix("Bearer ").or_else(|| req.authorization.strip_prefix("bearer ")).unwrap_or("");
+    if !token_matches(&srv.api_key, presented) {
+        return write_json(
+            &mut stream,
+            401,
+            &json!({ "error": { "message": "missing or invalid Authorization bearer token", "type": "invalid_request_error" } }),
+        );
+    }
+
     match (req.method.as_str(), path) {
-        ("GET", "/health") => write_json(&mut stream, 200, &json!({ "ok": true })),
-        ("GET", "/v1/models") => write_json(&mut stream, 200, &models_body(ctx)),
-        ("POST", "/v1/chat/completions") => chat_completions(&mut stream, &req.body, cfg, ctx),
+        ("GET", "/v1/models") => write_json(&mut stream, 200, &models_body(&srv.ctx)),
+        ("POST", "/v1/chat/completions") => chat_completions(&mut stream, &req.body, &srv.cfg, &srv.ctx),
         _ => write_json(
             &mut stream,
             404,
-            &json!({ "error": { "message": format!("no route for {} {}", req.method, path), "type": "invalid_request_error" } }),
+            &json!({ "error": { "message": "no such route", "type": "invalid_request_error" } }),
         ),
     }
 }
@@ -153,21 +293,28 @@ fn chat_completions(stream: &mut TcpStream, body: &str, cfg: &Config, ctx: &sing
     let rec = match response {
         Ok(Response::Ok { data: ResponseData::Task(rec) }) => rec,
         Ok(Response::Ok { data }) => {
+            eprintln!("[serve] unexpected daemon response: {data:?}");
             return write_json(
                 stream,
                 502,
-                &json!({ "error": { "message": format!("unexpected daemon response: {data:?}"), "type": "api_error" } }),
-            )
+                &json!({ "error": { "message": "unexpected response from the runtime", "type": "api_error" } }),
+            );
         }
         Ok(Response::Error { message }) => {
-            return write_json(stream, 502, &json!({ "error": { "message": message, "type": "api_error" } }))
-        }
-        Err(e) => {
+            eprintln!("[serve] runtime error: {message}");
             return write_json(
                 stream,
                 502,
-                &json!({ "error": { "message": format!("daemon unreachable: {e:#}"), "type": "api_error" } }),
-            )
+                &json!({ "error": { "message": "the runtime rejected the request", "type": "api_error" } }),
+            );
+        }
+        Err(e) => {
+            eprintln!("[serve] daemon unreachable: {e:#}");
+            return write_json(
+                stream,
+                502,
+                &json!({ "error": { "message": "the SingleCLI daemon is unreachable", "type": "api_error" } }),
+            );
         }
     };
 
@@ -341,6 +488,30 @@ mod tests {
             json!({ "role": "assistant", "content": "" }),
         ];
         assert_eq!(flatten_messages(&msgs), "user: part one\npart two");
+    }
+
+    #[test]
+    fn token_matches_only_on_exact_equal_length() {
+        assert!(token_matches("abc123", "abc123"));
+        assert!(!token_matches("abc123", "abc124"));
+        assert!(!token_matches("abc123", "abc12")); // shorter
+        assert!(!token_matches("abc123", "abc1234")); // longer
+        assert!(!token_matches("secret", ""));
+    }
+
+    #[test]
+    fn split_host_port_handles_ipv4_ipv6_and_bare() {
+        assert_eq!(split_host_port("127.0.0.1:8765"), ("127.0.0.1".into(), "8765".into()));
+        assert_eq!(split_host_port("[::1]:9000"), ("::1".into(), "9000".into()));
+        assert_eq!(split_host_port("localhost"), ("localhost".into(), "80".into()));
+    }
+
+    #[test]
+    fn random_token_is_32_hex_chars() {
+        let t = random_token();
+        assert_eq!(t.len(), 32);
+        assert!(t.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_ne!(random_token(), t);
     }
 
     #[test]
