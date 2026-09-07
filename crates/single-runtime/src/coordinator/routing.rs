@@ -37,6 +37,13 @@ pub struct CoordinatorConfig {
     /// are parse-or-estimated.
     #[serde(default)]
     pub usage_json_agents: Vec<String>,
+    /// E28 spec §7: when true, `single-pool` is tried first for every
+    /// kind unless that kind's own list already names it explicitly
+    /// (that explicit placement always wins — this only supplies a
+    /// default when the kind is silent on the pool). Off by default so
+    /// upgrading to 0.11.0 doesn't change any existing goal's routing.
+    #[serde(default)]
+    pub prefer_pool: bool,
 }
 
 impl Default for CoordinatorConfig {
@@ -48,6 +55,7 @@ impl Default for CoordinatorConfig {
             max_goal_minutes: 60,
             max_supervisor_patches: 5,
             usage_json_agents: Vec::new(),
+            prefer_pool: false,
         }
     }
 }
@@ -188,8 +196,12 @@ pub struct PoolHealth {
 }
 
 impl PoolHealth {
+    /// `single-pool` (E28) is never filtered here: it isn't a shelled
+    /// binary, so "on $PATH" is meaningless, and it has its own admission
+    /// engine (the ledger) instead of the `rate_limited` task-row signal
+    /// this struct tracks for CLI agents.
     fn usable(&self, agent: &str) -> bool {
-        self.detected_authed.contains(agent) && !self.rate_limited.contains(agent)
+        agent == "single-pool" || (self.detected_authed.contains(agent) && !self.rate_limited.contains(agent))
     }
 
     /// builds a live snapshot cheaply — this is called on every scheduler
@@ -261,6 +273,24 @@ pub fn select_agent(
     None
 }
 
+/// `select_agent`, but honors `CoordinatorConfig::prefer_pool` (E28 spec
+/// §7): when set, `single-pool` is tried before everything else for
+/// every kind — *unless* that kind's own exact `(kind, effort)` list
+/// already names it explicitly, in which case that placement wins and
+/// this is a no-op. `select_agent`'s own signature stays untouched so
+/// every existing caller/test keeps working unchanged; this is strictly
+/// additive.
+pub fn select_agent_with_prefer_pool(table: &RoutingTable, kind: NodeKind, effort: Effort, health: &PoolHealth, prefer_pool: bool) -> Option<String> {
+    if !prefer_pool {
+        return select_agent(table, kind, effort, health);
+    }
+    let explicit_override = table.kinds.get(kind.as_str()).and_then(|m| m.get(effort.as_str())).is_some_and(|list| list.iter().any(|a| a == "single-pool"));
+    if explicit_override {
+        return select_agent(table, kind, effort, health);
+    }
+    Some("single-pool".to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -270,6 +300,53 @@ mod tests {
             detected_authed: authed.iter().map(|s| s.to_string()).collect(),
             rate_limited: limited.iter().map(|s| s.to_string()).collect(),
         }
+    }
+
+    #[test]
+    fn select_agent_returns_single_pool_when_named_in_kind_list() {
+        let mut t = RoutingTable::default();
+        t.kinds.get_mut("code").unwrap().insert("standard".to_string(), vec!["single-pool".to_string(), "opencode".to_string()]);
+        let h = health(&[], &[]); // single-pool needs no detected_authed entry
+        assert_eq!(select_agent(&t, NodeKind::Code, Effort::Standard, &h), Some("single-pool".to_string()));
+    }
+
+    #[test]
+    fn prefer_pool_true_tries_single_pool_first_unless_kind_overrides() {
+        let t = RoutingTable::default();
+        let h = health(&["opencode", "grok"], &[]);
+        // code/standard doesn't name single-pool -> prefer_pool wins.
+        assert_eq!(select_agent_with_prefer_pool(&t, NodeKind::Code, Effort::Standard, &h, true), Some("single-pool".to_string()));
+        // Without prefer_pool, ordinary routing applies.
+        assert_eq!(select_agent_with_prefer_pool(&t, NodeKind::Code, Effort::Standard, &h, false), Some("opencode".to_string()));
+    }
+
+    #[test]
+    fn prefer_pool_true_defers_to_kinds_own_explicit_single_pool_placement() {
+        let mut t = RoutingTable::default();
+        // code/standard explicitly puts single-pool second, after opencode.
+        t.kinds.get_mut("code").unwrap().insert("standard".to_string(), vec!["opencode".to_string(), "single-pool".to_string()]);
+        let h = health(&["opencode"], &[]);
+        // Explicit placement wins: ordinary select_agent logic still
+        // picks opencode first since it's usable and comes first in the
+        // kind's own list.
+        assert_eq!(select_agent_with_prefer_pool(&t, NodeKind::Code, Effort::Standard, &h, true), Some("opencode".to_string()));
+    }
+
+    #[test]
+    fn single_pool_is_never_filtered_as_undetected() {
+        let t = RoutingTable::default();
+        let mut kinds = t.kinds.clone();
+        kinds.get_mut("code").unwrap().insert("standard".to_string(), vec!["single-pool".to_string()]);
+        let t = RoutingTable { kinds, ..t };
+        // Empty health -- no agent detected_authed at all -- would
+        // normally fall through to "pool health map is empty -> try the
+        // first candidate anyway"; confirm single-pool is picked via the
+        // *usable* path, not that degrade fallback, by also marking a
+        // different agent authed (so detected_authed is non-empty and the
+        // fallback branch does NOT apply) -- only `usable()`'s explicit
+        // single-pool carve-out can explain the result then.
+        let h = health(&["some-other-agent"], &[]);
+        assert_eq!(select_agent(&t, NodeKind::Code, Effort::Standard, &h), Some("single-pool".to_string()));
     }
 
     #[test]
