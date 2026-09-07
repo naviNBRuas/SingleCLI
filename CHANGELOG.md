@@ -44,6 +44,13 @@ plan, supervise on failure, and integrate. `single task run` and
   for every registered agent on every scheduler tick and every
   `CoordinatorStatus` (~24s). It is now an in-process `$PATH` check;
   `single coordinator status` returns in ~10ms.
+- Added: `single loop <goal> [--agent X] [--max-iters N]` — keep one
+  agent iterating until it replies with a line containing only `DONE`,
+  or the cap is hit. Sugar over the coordinator's new `careful` goal
+  mode: a single-node goal, no LLM planner, re-dispatched with its
+  previous output appended each iteration (`GoalSubmit.mode = "careful"`,
+  `GoalSubmit.agent` pins the node). Progress shows in `single goal
+  status` / the ACP panel like any goal.
 - Added: per-task token accounting. Every finished task records
   `prompt_tokens` / `completion_tokens` (`tokens_estimated` flags a
   parse-of-output or chars/4 fallback vs. a real agent-reported count).

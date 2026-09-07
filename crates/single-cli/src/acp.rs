@@ -283,6 +283,7 @@ impl Acp {
             mode: Some(mode),
             max_dispatches: None,
             max_minutes: None,
+            agent: None,
         }) {
             Ok(ResponseData::GoalId(g)) => g,
             Ok(other) => {

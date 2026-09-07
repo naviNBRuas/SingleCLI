@@ -620,6 +620,11 @@ pub enum Request {
         max_dispatches: Option<u32>,
         #[serde(default)]
         max_minutes: Option<u32>,
+        /// Pin every node to this agent instead of routing. `careful`
+        /// (`single loop`) uses it for the single iterating node; `auto`
+        /// applies it to every planned node after decomposition.
+        #[serde(default)]
+        agent: Option<String>,
     },
     GoalStatus {
         goal_id: String,
@@ -1858,6 +1863,15 @@ mod tests {
                 mode: Some("auto".into()),
                 max_dispatches: Some(10),
                 max_minutes: None,
+                agent: None,
+            },
+            Request::GoalSubmit {
+                session_id: "sess_1".into(),
+                text: "loop on it".into(),
+                mode: Some("careful".into()),
+                max_dispatches: Some(6),
+                max_minutes: None,
+                agent: Some("grok".into()),
             },
             Request::GoalStatus { goal_id: "goal_1".into() },
             Request::GoalList { session_id: None },

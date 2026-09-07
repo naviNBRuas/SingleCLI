@@ -303,6 +303,26 @@ enum Command {
         #[command(subcommand)]
         action: CoordinatorCommand,
     },
+    /// Keep one agent iterating on a goal until it reports done. Sugar
+    /// over `single goal submit --mode careful`: the coordinator
+    /// re-dispatches the agent with its previous output appended until it
+    /// replies with a line containing only DONE, or `--max-iters` is hit.
+    Loop {
+        /// The goal (all trailing words are joined).
+        text: Vec<String>,
+        /// Pin the loop to this agent (otherwise routed).
+        #[arg(long)]
+        agent: Option<String>,
+        /// Iteration cap.
+        #[arg(long, default_value = "6")]
+        max_iters: u32,
+        #[arg(long)]
+        session: Option<String>,
+        #[arg(long)]
+        cwd: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
     /// Run the Agent Client Protocol bridge on stdio (for Zed's agent
     /// panel). Speaks newline-delimited JSON-RPC 2.0; every prompt becomes
     /// a coordinator goal, progress streams back. Not a one-shot command —
@@ -2627,7 +2647,7 @@ fn main() -> anyhow::Result<()> {
                 };
                 let response = client::send(
                     &socket_path,
-                    Request::GoalSubmit { session_id, text, mode, max_dispatches, max_minutes },
+                    Request::GoalSubmit { session_id, text, mode, max_dispatches, max_minutes, agent: None },
                 )?;
                 render::print(response, json);
             }
@@ -2655,6 +2675,36 @@ fn main() -> anyhow::Result<()> {
                 render::print(response, json);
             }
         },
+        Command::Loop { text, agent, max_iters, session, cwd, json } => {
+            let text = text.join(" ");
+            if text.trim().is_empty() {
+                anyhow::bail!("loop goal is empty");
+            }
+            let session_id = match session {
+                Some(s) => s,
+                None => {
+                    let cwd = resolve_cwd(cwd);
+                    match client::send(&socket_path, Request::SessionNew { cwd })? {
+                        Response::Ok { data: ResponseData::Session(s) } => s.id,
+                        Response::Ok { data } => anyhow::bail!("unexpected response creating session: {data:?}"),
+                        Response::Error { message } => anyhow::bail!(message),
+                    }
+                }
+            };
+            let response = client::send(
+                &socket_path,
+                Request::GoalSubmit {
+                    session_id,
+                    text,
+                    mode: Some("careful".to_string()),
+                    max_dispatches: Some(max_iters),
+                    max_minutes: None,
+                    agent,
+                },
+            )?;
+            render::print(response, json);
+            eprintln!("watch it iterate:  single goal status <goal_id>");
+        }
         Command::Acp => unreachable!("handled before the socket-based dispatch above"),
         Command::Update { .. } => unreachable!("handled before the socket-based dispatch above"),
         Command::Internal(_) => unreachable!("handled before the socket-based dispatch above"),
@@ -3133,5 +3183,34 @@ mod graph_task_parsing_tests {
     fn split_top_level_commas_ignores_commas_inside_quotes() {
         let parts = split_top_level_commas(r#"a="x,y",b=z"#);
         assert_eq!(parts, vec![r#"a="x,y""#, "b=z"]);
+    }
+
+    #[test]
+    fn loop_subcommand_parses_flags_and_joins_the_goal() {
+        let cli = Cli::try_parse_from([
+            "single", "loop", "make", "the", "tests", "pass",
+            "--agent", "grok", "--max-iters", "10",
+        ])
+        .unwrap();
+        match cli.command {
+            Some(Command::Loop { text, agent, max_iters, .. }) => {
+                assert_eq!(text.join(" "), "make the tests pass");
+                assert_eq!(agent.as_deref(), Some("grok"));
+                assert_eq!(max_iters, 10);
+            }
+            _ => panic!("expected Command::Loop"),
+        }
+    }
+
+    #[test]
+    fn loop_subcommand_defaults_max_iters_to_six() {
+        let cli = Cli::try_parse_from(["single", "loop", "do a thing"]).unwrap();
+        match cli.command {
+            Some(Command::Loop { max_iters, agent, .. }) => {
+                assert_eq!(max_iters, 6);
+                assert!(agent.is_none());
+            }
+            _ => panic!("expected Command::Loop"),
+        }
     }
 }

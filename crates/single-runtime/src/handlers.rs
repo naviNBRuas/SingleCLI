@@ -1529,24 +1529,31 @@ fn dispatch(
             crate::coordinator::session::close(&conn, &session_id)?;
             Ok(ResponseData::Empty)
         }
-        Request::GoalSubmit { session_id, text, mode, max_dispatches, max_minutes } => {
+        Request::GoalSubmit { session_id, text, mode, max_dispatches, max_minutes, agent } => {
             let mut conn = coordinator_db(ctx)?;
             let gmode = mode
                 .as_deref()
                 .and_then(|m| crate::coordinator::graph::GoalMode::parse(m).ok())
                 .unwrap_or(crate::coordinator::graph::GoalMode::Auto);
             let cfg = crate::coordinator::routing::CoordinatorConfig::load(&ctx.dirs);
+            // `careful` (single loop) defaults to a small iteration cap
+            // (the prototype's 6) rather than the 25-dispatch goal budget.
+            let default_dispatches = if gmode == crate::coordinator::graph::GoalMode::Careful {
+                6
+            } else {
+                cfg.max_dispatches_per_goal
+            };
             let g = crate::coordinator::goal::create(
                 &conn,
                 &session_id,
                 &text,
                 gmode,
-                max_dispatches.unwrap_or(cfg.max_dispatches_per_goal),
+                max_dispatches.unwrap_or(default_dispatches),
                 max_minutes.unwrap_or(cfg.max_goal_minutes),
             )?;
             // plan + first tick, best-effort: a planning failure leaves the
             // goal recoverable (blocked / re-amendable) rather than losing it.
-            if let Err(e) = crate::coordinator::plan_goal(ctx, &mut conn, &g.id) {
+            if let Err(e) = crate::coordinator::plan_goal(ctx, &mut conn, &g.id, agent.as_deref()) {
                 let _ = crate::coordinator::goal::set_blocked(&conn, &g.id, &format!("planning failed: {e:#}"));
             } else if let Err(e) = crate::coordinator::drive(ctx, &mut conn, registry) {
                 tracing::warn!(goal = %g.id, error = %e, "initial coordinator drive failed");

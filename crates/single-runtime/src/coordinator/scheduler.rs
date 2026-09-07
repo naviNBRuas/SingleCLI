@@ -464,6 +464,14 @@ fn settle_finished_node(
     };
     let goal = goal::get(conn, &goal_id)?.context("goal vanished mid-run")?;
 
+    // `careful` mode (`single loop`): re-dispatch the single node with the
+    // previous output appended until the agent emits a lone `DONE` line or
+    // the iteration cap (`max_dispatches`) is spent. Runs before the normal
+    // success/failure handling.
+    if goal.mode == crate::coordinator::graph::GoalMode::Careful {
+        return settle_careful_node(conn, &goal, &node_id, artifact.as_deref());
+    }
+
     if completed {
         goal::update_node(conn, &goal_id, &node_id, NodeStatus::Done, None, artifact.as_deref(), None)?;
         events::append(conn, &goal.session_id, Some(&goal_id), EventKind::NodeDone, &node_id)?;
@@ -506,6 +514,77 @@ fn settle_finished_node(
         }
     }
 
+    Ok(())
+}
+
+/// One iteration step for a `careful` (`single loop`) goal. `prev_artifact`
+/// is the just-finished task's artifact path.
+fn settle_careful_node(
+    conn: &mut Connection,
+    goal: &Goal,
+    node_id: &str,
+    prev_artifact: Option<&str>,
+) -> Result<()> {
+    let output = prev_artifact
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .unwrap_or_default();
+    let done = output
+        .lines()
+        .any(|l| l.trim() == crate::coordinator::CAREFUL_DONE_LINE);
+    let iter = goal.dispatches; // one dispatch per iteration
+
+    if done {
+        goal::update_node(conn, &goal.id, node_id, NodeStatus::Done, None, prev_artifact, None)?;
+        goal::set_summary(conn, &goal.id, &crate::orchestrate::truncate(&output, 2000))?;
+        goal::set_status(conn, &goal.id, GoalStatus::Done)?;
+        events::append(
+            conn,
+            &goal.session_id,
+            Some(&goal.id),
+            EventKind::Integrated,
+            &format!("loop finished (DONE) after {iter} iteration(s)"),
+        )?;
+        return Ok(());
+    }
+
+    if iter >= goal.max_dispatches {
+        goal::update_node(conn, &goal.id, node_id, NodeStatus::Done, None, prev_artifact, None)?;
+        goal::set_summary(
+            conn,
+            &goal.id,
+            &format!(
+                "stopped after {iter} iteration(s) without a DONE. last output:\n{}",
+                crate::orchestrate::truncate(&output, 2000)
+            ),
+        )?;
+        goal::set_status(conn, &goal.id, GoalStatus::Done)?;
+        events::append(
+            conn,
+            &goal.session_id,
+            Some(&goal.id),
+            EventKind::Integrated,
+            &format!("loop stopped at the {iter}-iteration cap (no DONE)"),
+        )?;
+        return Ok(());
+    }
+
+    // next iteration: feed this step's output back in, reset the node.
+    let next_prompt = format!(
+        "{}\n\n--- previous step output ---\n{}\n\n--- continue ---\n\
+         Do the next concrete piece of work toward the goal. When the goal is fully \
+         complete, reply with a line containing only DONE.",
+        goal.text,
+        crate::orchestrate::truncate(&output, 4000),
+    );
+    goal::set_node_desc(conn, &goal.id, node_id, &next_prompt)?;
+    goal::update_node(conn, &goal.id, node_id, NodeStatus::Pending, None, None, Some(iter + 1))?;
+    events::append(
+        conn,
+        &goal.session_id,
+        Some(&goal.id),
+        EventKind::Message,
+        &format!("iteration {}", iter + 1),
+    )?;
     Ok(())
 }
 
@@ -845,5 +924,81 @@ mod tests {
         // no output_ref on s1 -> prompt is just the bare desc
         let p = build_node_prompt(&g, g.find("s2").unwrap());
         assert_eq!(p, "s2");
+    }
+
+    // ---- careful mode (`single loop`) ----
+
+    fn careful_goal(conn: &mut rusqlite::Connection, max_iters: u32) -> crate::coordinator::goal::Goal {
+        use crate::coordinator::{goal, graph::GoalMode, session};
+        let s = session::new_session(conn, std::path::Path::new("/tmp/loop")).unwrap();
+        let g = goal::create(conn, &s.id, "make the tests pass", GoalMode::Careful, max_iters, 60).unwrap();
+        let graph = TaskGraph { nodes: vec![node("s1", &[], Effort::Standard, "grok")] };
+        goal::save_graph(conn, &g.id, &graph).unwrap();
+        goal::set_status(conn, &g.id, crate::coordinator::graph::GoalStatus::Running).unwrap();
+        g
+    }
+
+    fn artifact_with(text: &str) -> (tempfile::TempDir, String) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("out.txt");
+        std::fs::write(&path, text).unwrap();
+        (dir, path.display().to_string())
+    }
+
+    #[test]
+    fn careful_done_line_finishes_the_goal() {
+        use crate::coordinator::{goal, graph::GoalStatus};
+        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::coordinator::ensure_coordinator_schema(&conn).unwrap();
+        let g = careful_goal(&mut conn, 6);
+        goal::bump_dispatches(&conn, &g.id).unwrap(); // iteration 1 ran
+        let g = goal::get(&conn, &g.id).unwrap().unwrap();
+
+        let (_d, path) = artifact_with("did the work.\nDONE\n");
+        settle_careful_node(&mut conn, &g, "s1", Some(&path)).unwrap();
+
+        let after = goal::get(&conn, &g.id).unwrap().unwrap();
+        assert_eq!(after.status, GoalStatus::Done);
+        assert!(after.result_summary.unwrap().contains("did the work"));
+        assert_eq!(goal::load_graph(&conn, &g.id).unwrap().find("s1").unwrap().status, NodeStatus::Done);
+    }
+
+    #[test]
+    fn careful_without_done_redispatches_with_prior_output() {
+        use crate::coordinator::goal;
+        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::coordinator::ensure_coordinator_schema(&conn).unwrap();
+        let g = careful_goal(&mut conn, 6);
+        goal::bump_dispatches(&conn, &g.id).unwrap(); // iteration 1
+        let g = goal::get(&conn, &g.id).unwrap().unwrap();
+
+        let (_d, path) = artifact_with("progress, not finished yet");
+        settle_careful_node(&mut conn, &g, "s1", Some(&path)).unwrap();
+
+        let node = goal::load_graph(&conn, &g.id).unwrap().find("s1").unwrap().clone();
+        assert_eq!(node.status, NodeStatus::Pending); // ready for the next tick
+        assert_eq!(node.attempts, 2);
+        assert!(node.desc.contains("previous step output"));
+        assert!(node.desc.contains("progress, not finished yet"));
+        assert_eq!(goal::get(&conn, &g.id).unwrap().unwrap().status.as_str(), "running");
+    }
+
+    #[test]
+    fn careful_stops_at_the_iteration_cap_without_done() {
+        use crate::coordinator::{goal, graph::GoalStatus};
+        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::coordinator::ensure_coordinator_schema(&conn).unwrap();
+        let g = careful_goal(&mut conn, 2);
+        for _ in 0..2 {
+            goal::bump_dispatches(&conn, &g.id).unwrap();
+        }
+        let g = goal::get(&conn, &g.id).unwrap().unwrap();
+
+        let (_d, path) = artifact_with("still going");
+        settle_careful_node(&mut conn, &g, "s1", Some(&path)).unwrap();
+
+        let after = goal::get(&conn, &g.id).unwrap().unwrap();
+        assert_eq!(after.status, GoalStatus::Done);
+        assert!(after.result_summary.unwrap().contains("without a DONE"));
     }
 }

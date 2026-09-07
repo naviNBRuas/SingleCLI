@@ -290,6 +290,16 @@ pub fn update_node(
     Ok(())
 }
 
+/// Rewrites a node's prompt and clears its `task_id`. Used by `careful`
+/// mode (`single loop`) to feed each iteration the previous output.
+pub fn set_node_desc(conn: &Connection, goal_id: &str, node_id: &str, desc: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE graph_nodes SET desc = ?3, task_id = NULL WHERE goal_id = ?1 AND id = ?2",
+        params![goal_id, node_id, desc],
+    )?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

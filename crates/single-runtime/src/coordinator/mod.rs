@@ -44,10 +44,23 @@ fn load_env(ctx: &Context, conn: &Connection) -> (CoordinatorConfig, RoutingTabl
     (cfg, table, health)
 }
 
-/// plans a goal still in `planning` with no graph: runs the planner brain
-/// role, persists the graph, and moves the goal to `running`. safe to call
-/// repeatedly — a no-op once a graph exists.
-pub fn plan_goal(ctx: &Context, conn: &mut Connection, goal_id: &str) -> Result<()> {
+/// The DONE sentinel a `careful`-mode agent emits to end its loop, and the
+/// instruction appended to every iteration's prompt.
+pub(crate) const CAREFUL_DONE_LINE: &str = "DONE";
+const CAREFUL_INSTRUCTION: &str =
+    "\n\nWork toward this goal. When it is fully complete, reply with a line containing only DONE.";
+
+/// plans a goal still in `planning` with no graph and moves it to
+/// `running`. `careful` mode (`single loop`) skips the LLM planner and
+/// builds a single iterating node; every other mode runs the planner.
+/// `agent`, when set, pins every node to that agent instead of routing.
+/// Safe to call repeatedly — a no-op once a graph exists.
+pub fn plan_goal(
+    ctx: &Context,
+    conn: &mut Connection,
+    goal_id: &str,
+    agent: Option<&str>,
+) -> Result<()> {
     let goal = goal::get(conn, goal_id)?.context("no such goal")?;
     if !goal::load_graph(conn, goal_id)?.nodes.is_empty() {
         return Ok(());
@@ -56,14 +69,44 @@ pub fn plan_goal(ctx: &Context, conn: &mut Connection, goal_id: &str) -> Result<
     let cwd = session::get(conn, &goal.session_id)?
         .map(|s| s.cwd)
         .unwrap_or_else(|| ".".into());
-    let graph = brain::plan(conn, ctx, &goal.text, std::path::Path::new(&cwd), &table, &health)?;
-    events::append(
-        conn,
-        &goal.session_id,
-        Some(goal_id),
-        events::EventKind::Plan,
-        &format!("planned {} node(s)", graph.nodes.len()),
-    )?;
+
+    let graph = if goal.mode == graph::GoalMode::Careful {
+        let pinned = agent
+            .map(str::to_string)
+            .or_else(|| routing::select_agent(&table, graph::NodeKind::Code, graph::Effort::Standard, &health))
+            .unwrap_or_default();
+        let node = graph::Node {
+            id: "s1".into(),
+            desc: format!("{}{CAREFUL_INSTRUCTION}", goal.text),
+            kind: graph::NodeKind::Code,
+            effort: graph::Effort::Standard,
+            agent: pinned,
+            depends_on: vec![],
+            status: graph::NodeStatus::Pending,
+            task_id: None,
+            attempts: 0,
+            worktree: false, // loop iterates in the goal cwd, like the prototype
+            output_ref: None,
+        };
+        events::append(conn, &goal.session_id, Some(goal_id), events::EventKind::Plan, "careful mode: 1 iterating node")?;
+        graph::TaskGraph { nodes: vec![node] }
+    } else {
+        let mut g = brain::plan(conn, ctx, &goal.text, std::path::Path::new(&cwd), &table, &health)?;
+        if let Some(a) = agent {
+            for n in &mut g.nodes {
+                n.agent = a.to_string();
+            }
+        }
+        events::append(
+            conn,
+            &goal.session_id,
+            Some(goal_id),
+            events::EventKind::Plan,
+            &format!("planned {} node(s)", g.nodes.len()),
+        )?;
+        g
+    };
+
     goal::save_graph(conn, goal_id, &graph)?;
     goal::set_status(conn, goal_id, graph::GoalStatus::Running)?;
     Ok(())
