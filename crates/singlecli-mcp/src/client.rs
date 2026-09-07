@@ -43,12 +43,11 @@ mod tests {
 
     #[test]
     fn falls_back_to_in_process_when_no_daemon_is_listening() {
-        let dir = tempfile::tempdir().unwrap();
-        std::env::set_var("SINGLE_CONFIG_DIR", dir.path());
+        let _env = crate::testutil::isolated_env();
         // No daemon socket exists at this path — connect() must fail, and
         // send() must fall back to single_runtime::handle rather than
         // erroring out.
-        let socket_path = dir.path().join("nonexistent.sock");
+        let socket_path = _env.path().join("nonexistent.sock");
         let response = send(&socket_path, Request::Status).unwrap();
         assert!(matches!(response, Response::Ok { .. }));
     }

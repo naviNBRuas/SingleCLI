@@ -600,7 +600,7 @@ mod tests {
     // `permission_gate`) reads the process-global `SINGLE_CONFIG_DIR` env
     // var fresh every call, same real constraint `gateway.rs`'s own test
     // module documents — this lock serializes just the tests that touch it.
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    use crate::testutil::isolated_env;
 
     fn deny_rule(resource: &str) -> single_core::permissions::PermissionSet {
         let mut rules = single_core::permissions::PermissionSet::default();
@@ -616,9 +616,7 @@ mod tests {
 
     #[test]
     fn task_run_denied_by_permission_never_reaches_self_send() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        let dir = tempfile::tempdir().unwrap();
-        std::env::set_var("SINGLE_CONFIG_DIR", dir.path());
+        let _env = isolated_env();
         let dirs = single_core::SingleDirs::discover().unwrap();
         single_core::permissions::save(&dirs.permissions_file(), &deny_rule("singlecli:task_run")).unwrap();
 
@@ -632,8 +630,6 @@ mod tests {
         let result = server.task_run(&Map::new()).unwrap();
         assert_eq!(result["denied"], true);
         assert_eq!(result["tool"], "task_run");
-
-        std::env::remove_var("SINGLE_CONFIG_DIR");
     }
 
     #[test]
@@ -642,23 +638,17 @@ mod tests {
         // preference yet that resolves to PendingApproval, not Allow — same
         // short-circuit proof as the deny case, via the same empty-args
         // signal.
-        let _guard = ENV_LOCK.lock().unwrap();
-        let dir = tempfile::tempdir().unwrap();
-        std::env::set_var("SINGLE_CONFIG_DIR", dir.path());
+        let _env = isolated_env();
 
         let server = SingleCliServer::new().unwrap();
         let result = server.task_run(&Map::new()).unwrap();
         assert!(result["pending_approval"].as_i64().is_some(), "expected a pending_approval id, got {result:?}");
         assert_eq!(result["tool"], "task_run");
-
-        std::env::remove_var("SINGLE_CONFIG_DIR");
     }
 
     #[test]
     fn task_run_allowed_by_permission_proceeds_to_self_send() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        let dir = tempfile::tempdir().unwrap();
-        std::env::set_var("SINGLE_CONFIG_DIR", dir.path());
+        let _env = isolated_env();
         let dirs = single_core::SingleDirs::discover().unwrap();
         single_core::permissions::save(&dirs.permissions_file(), &allow_rule("singlecli:task_run")).unwrap();
 
@@ -673,60 +663,44 @@ mod tests {
         // actually reached self.send instead of being blocked by the gate.
         let result = server.task_run(&args);
         assert!(result.is_err(), "expected an error from an actually-attempted run against an unknown agent, got {result:?}");
-
-        std::env::remove_var("SINGLE_CONFIG_DIR");
     }
 
     #[test]
     fn orchestrate_run_denied_by_permission_never_reaches_self_send() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        let dir = tempfile::tempdir().unwrap();
-        std::env::set_var("SINGLE_CONFIG_DIR", dir.path());
+        let _env = isolated_env();
         let dirs = single_core::SingleDirs::discover().unwrap();
         single_core::permissions::save(&dirs.permissions_file(), &deny_rule("singlecli:orchestrate_run")).unwrap();
 
         let server = SingleCliServer::new().unwrap();
         let result = server.orchestrate_run(&Map::new()).unwrap();
         assert_eq!(result["denied"], true);
-
-        std::env::remove_var("SINGLE_CONFIG_DIR");
     }
 
     #[test]
     fn orchestrate_parallel_run_denied_by_permission_never_reaches_self_send() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        let dir = tempfile::tempdir().unwrap();
-        std::env::set_var("SINGLE_CONFIG_DIR", dir.path());
+        let _env = isolated_env();
         let dirs = single_core::SingleDirs::discover().unwrap();
         single_core::permissions::save(&dirs.permissions_file(), &deny_rule("singlecli:orchestrate_parallel_run")).unwrap();
 
         let server = SingleCliServer::new().unwrap();
         let result = server.orchestrate_parallel_run(&Map::new()).unwrap();
         assert_eq!(result["denied"], true);
-
-        std::env::remove_var("SINGLE_CONFIG_DIR");
     }
 
     #[test]
     fn orchestrate_graph_run_denied_by_permission_never_reaches_self_send() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        let dir = tempfile::tempdir().unwrap();
-        std::env::set_var("SINGLE_CONFIG_DIR", dir.path());
+        let _env = isolated_env();
         let dirs = single_core::SingleDirs::discover().unwrap();
         single_core::permissions::save(&dirs.permissions_file(), &deny_rule("singlecli:orchestrate_graph_run")).unwrap();
 
         let server = SingleCliServer::new().unwrap();
         let result = server.orchestrate_graph_run(&Map::new()).unwrap();
         assert_eq!(result["denied"], true);
-
-        std::env::remove_var("SINGLE_CONFIG_DIR");
     }
 
     #[test]
     fn worktree_merge_apply_denied_by_permission_never_reaches_self_send() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        let dir = tempfile::tempdir().unwrap();
-        std::env::set_var("SINGLE_CONFIG_DIR", dir.path());
+        let _env = isolated_env();
         let dirs = single_core::SingleDirs::discover().unwrap();
         single_core::permissions::save(&dirs.permissions_file(), &deny_rule("singlecli:worktree_merge_apply")).unwrap();
 
@@ -739,7 +713,5 @@ mod tests {
         let result = server.worktree_merge_apply(&Map::new()).unwrap();
         assert_eq!(result["denied"], true);
         assert_eq!(result["tool"], "worktree_merge_apply");
-
-        std::env::remove_var("SINGLE_CONFIG_DIR");
     }
 }
