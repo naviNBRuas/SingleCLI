@@ -176,34 +176,33 @@ impl Acp {
                 return;
             }
         };
-        let acp_sid = format!("acp-{}", self.seq.fetch_add(1, Ordering::Relaxed));
+        // The ACP session id IS the coordinator session id — so a fresh
+        // `single acp` process can resume a thread on `session/load`
+        // (E27.03). Zed persists this string.
+        let acp_sid = coord_id.clone();
         self.sessions.lock().unwrap().insert(
             acp_sid.clone(),
             AcpSession { coord_id, mode: "auto".into(), last_event_id: 0, cancel: Arc::new(AtomicBool::new(false)) },
         );
-        self.respond(
-            id,
-            json!({ "sessionId": acp_sid, "modes": modes_block("auto") }),
-        );
+        self.respond(id, json!({ "sessionId": acp_sid, "modes": modes_block("auto") }));
         self.session_update(&acp_sid, json!({ "sessionUpdate": "available_commands_update", "availableCommands": commands() }));
     }
 
     fn session_load(&self, id: Option<Value>, p: &Value) {
-        let acp_sid = p["sessionId"].as_str().map(str::to_string).unwrap_or_else(|| format!("acp-{}", self.seq.fetch_add(1, Ordering::Relaxed)));
         let cwd = p["cwd"].as_str().map(str::to_string).unwrap_or_else(default_cwd);
+        let given = p["sessionId"].as_str().map(str::to_string).unwrap_or_default();
 
-        // rebind: if we don't know this ACP session (fresh process), make a
-        // coordinator session for it so the thread keeps working.
-        let coord_id = {
-            let known = self.sessions.lock().unwrap().get(&acp_sid).map(|s| s.coord_id.clone());
-            match known {
-                Some(c) => c,
-                None => match self.socket(Request::SessionNew { cwd: cwd.clone() }) {
-                    Ok(ResponseData::Session(s)) => s.id,
-                    _ => String::new(),
-                },
+        // The id is a coordinator session id. If the daemon knows it, bind
+        // to it and replay; if not (GC'd, wrong machine), start fresh.
+        let (acp_sid, replay): (String, Vec<single_protocol::CoordinatorEvent>) = if given.starts_with("sess_") {
+            match self.socket(Request::SessionEvents { session_id: given.clone(), since_event_id: 0 }) {
+                Ok(ResponseData::CoordinatorEvents(events)) => (given.clone(), events),
+                _ => (self.fresh_session(&cwd), Vec::new()),
             }
+        } else {
+            (self.fresh_session(&cwd), Vec::new())
         };
+
         let mode = self
             .sessions
             .lock()
@@ -212,7 +211,7 @@ impl Acp {
             .map(|s| s.mode.clone())
             .unwrap_or_else(|| "auto".into());
         self.sessions.lock().unwrap().entry(acp_sid.clone()).or_insert_with(|| AcpSession {
-            coord_id: coord_id.clone(),
+            coord_id: acp_sid.clone(),
             mode: mode.clone(),
             last_event_id: 0,
             cancel: Arc::new(AtomicBool::new(false)),
@@ -221,21 +220,30 @@ impl Acp {
         self.respond(id, json!({ "modes": modes_block(&mode) }));
         self.session_update(&acp_sid, json!({ "sessionUpdate": "available_commands_update", "availableCommands": commands() }));
 
-        // replay recent events so the thread has context.
-        if !coord_id.is_empty() {
-            if let Ok(ResponseData::CoordinatorEvents(events)) =
-                self.socket(Request::SessionEvents { session_id: coord_id, since_event_id: 0 })
-            {
-                let mut max_id = 0;
-                for e in &events {
-                    max_id = max_id.max(e.id);
-                    self.chunk(&acp_sid, &format!("[{}] {}\n", e.kind, e.body), "agent_message_chunk");
-                }
-                if let Some(s) = self.sessions.lock().unwrap().get_mut(&acp_sid) {
-                    s.last_event_id = max_id;
-                }
+        let mut max_id = 0;
+        for e in &replay {
+            max_id = max_id.max(e.id);
+            self.chunk(&acp_sid, &format!("[{}] {}\n", e.kind, e.body), "agent_message_chunk");
+        }
+        if max_id > 0 {
+            if let Some(s) = self.sessions.lock().unwrap().get_mut(&acp_sid) {
+                s.last_event_id = max_id;
             }
         }
+    }
+
+    /// makes a brand-new coordinator session and registers it, returning
+    /// its id — the fallback when `session/load` can't resolve the given id.
+    fn fresh_session(&self, cwd: &str) -> String {
+        let coord_id = match self.socket(Request::SessionNew { cwd: cwd.to_string() }) {
+            Ok(ResponseData::Session(s)) => s.id,
+            _ => format!("sess_local_{}", self.seq.fetch_add(1, Ordering::Relaxed)),
+        };
+        self.sessions.lock().unwrap().insert(
+            coord_id.clone(),
+            AcpSession { coord_id: coord_id.clone(), mode: "auto".into(), last_event_id: 0, cancel: Arc::new(AtomicBool::new(false)) },
+        );
+        coord_id
     }
 
     // ---- one prompt turn -----------------------------------------------
@@ -343,6 +351,7 @@ impl Acp {
                             if let Some(sum) = &v.result_summary {
                                 self.chunk(acp_sid, &format!("\n{sum}\n"), "agent_message_chunk");
                             }
+                            self.chunk(acp_sid, &usage_line(&v), "agent_thought_chunk");
                             return "end_turn";
                         }
                         "failed" => {
@@ -730,10 +739,23 @@ fn format_goal_view(v: &single_protocol::GoalView) -> String {
     if let Some(r) = &v.result_summary {
         out.push_str(&format!("result: {r}\n"));
     }
+    if v.total_prompt_tokens > 0 || v.total_completion_tokens > 0 {
+        out.push_str(&usage_line(v));
+    }
     for n in &v.nodes {
         out.push_str(&format!("  {:<4} {:<9} {:<8} {}\n", n.id, n.status, n.agent, n.desc));
     }
     out
+}
+
+/// one-line token summary for a goal (E27.03).
+fn usage_line(v: &single_protocol::GoalView) -> String {
+    format!(
+        "tokens ~{} in / ~{} out{}\n",
+        v.total_prompt_tokens,
+        v.total_completion_tokens,
+        if v.any_tokens_estimated { " (estimated)" } else { "" }
+    )
 }
 
 fn log(msg: &str) {

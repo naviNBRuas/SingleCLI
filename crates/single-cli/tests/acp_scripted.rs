@@ -93,6 +93,54 @@ fn initialize_new_session_and_status_slash() {
 }
 
 #[test]
+#[ignore = "drives the real binary; needs a running daemon"]
+fn session_load_rebinds_and_replays_a_prior_thread() {
+    // process 1: open a session, note its id.
+    let sid = {
+        let mut acp = AcpProc::spawn();
+        acp.send(serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {} }));
+        acp.wait_response(1);
+        acp.send(serde_json::json!({
+            "jsonrpc": "2.0", "id": 2, "method": "session/new",
+            "params": { "cwd": std::env::temp_dir().to_str().unwrap() }
+        }));
+        let id = acp.wait_response(2)["result"]["sessionId"].as_str().unwrap().to_string();
+        assert!(id.starts_with("sess_"), "ACP session id should be the coordinator id, got {id}");
+        // a slash prompt writes a message event into the session.
+        acp.send(serde_json::json!({
+            "jsonrpc": "2.0", "id": 3, "method": "session/prompt",
+            "params": { "sessionId": id, "prompt": [ { "type": "text", "text": "/status" } ] }
+        }));
+        acp.wait_response(3);
+        id
+    };
+
+    // process 2 (fresh): session/load with that id must resolve it and
+    // replay at least one event.
+    let mut acp = AcpProc::spawn();
+    acp.send(serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {} }));
+    acp.wait_response(1);
+    acp.send(serde_json::json!({
+        "jsonrpc": "2.0", "id": 2, "method": "session/load",
+        "params": { "sessionId": sid, "cwd": std::env::temp_dir().to_str().unwrap() }
+    }));
+    // load's response, then a burst of replay session/update notifications —
+    // the loop breaks on the first replayed message chunk, or asserts out.
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        assert!(std::time::Instant::now() < deadline, "no replay chunk after session/load");
+        let mut line = String::new();
+        acp.stdout.read_line(&mut line).unwrap();
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line.trim()) else { continue };
+        if v.get("method").and_then(|m| m.as_str()) == Some("session/update")
+            && v["params"]["update"]["sessionUpdate"] == "agent_message_chunk"
+        {
+            break;
+        }
+    }
+}
+
+#[test]
 #[ignore = "needs a running daemon with a usable planning agent"]
 fn goal_prompt_streams_plan_and_terminal_status() {
     let mut acp = AcpProc::spawn();
