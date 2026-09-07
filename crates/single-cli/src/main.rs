@@ -1,3 +1,4 @@
+mod acp;
 mod client;
 mod daemon;
 mod internal_lsp_manifest;
@@ -302,6 +303,11 @@ enum Command {
         #[command(subcommand)]
         action: CoordinatorCommand,
     },
+    /// Run the Agent Client Protocol bridge on stdio (for Zed's agent
+    /// panel). Speaks newline-delimited JSON-RPC 2.0; every prompt becomes
+    /// a coordinator goal, progress streams back. Not a one-shot command —
+    /// it runs until stdin closes.
+    Acp,
     /// Undocumented: internal helpers other SingleCLI-owned tooling shells out to.
     #[command(hide = true, subcommand)]
     Internal(InternalCommand),
@@ -1377,6 +1383,12 @@ fn main() -> anyhow::Result<()> {
         internal_lsp_manifest::write_to(std::path::Path::new(&output_dir), &specs)?;
         println!("wrote single-lsp plugin manifest to {output_dir}");
         return Ok(());
+    }
+
+    // The ACP bridge is a long-running stdio server, not a one-shot socket
+    // request — it manages its own socket calls per ACP method.
+    if let Command::Acp = command {
+        return acp::run(socket_path);
     }
 
     // Interactive login needs the user's real terminal (browser OAuth
@@ -2635,6 +2647,7 @@ fn main() -> anyhow::Result<()> {
                 render::print(response, json);
             }
         },
+        Command::Acp => unreachable!("handled before the socket-based dispatch above"),
         Command::Update { .. } => unreachable!("handled before the socket-based dispatch above"),
         Command::Internal(_) => unreachable!("handled before the socket-based dispatch above"),
     }

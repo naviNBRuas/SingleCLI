@@ -1,0 +1,795 @@
+//! Native `single acp` — an Agent Client Protocol (ACP) stdio server that
+//! fronts the SingleCLI coordinator (spec E27.02 §7). Newline-delimited
+//! JSON-RPC 2.0 over stdin/stdout, protocol version 1.
+//!
+//! This is a **bridge, not an agent**: it consumes no development agent
+//! itself. `/`-commands run against the socket; status-y prompts answer
+//! from `CoordinatorStatus` / `GoalStatus`; everything else becomes a
+//! `GoalSubmit` and the coordinator's `coordinator_events` are long-polled
+//! and translated into ACP `session/update` notifications. The coordinator
+//! does all planning / dispatch / integration.
+//!
+//! Replaces the Python prototype `nbr-workspace/tools/single-acp`; its
+//! routing/streaming shape is the reference.
+
+use anyhow::Result;
+use serde_json::{json, Value};
+use single_protocol::{Request, Response, ResponseData};
+use std::collections::HashMap;
+use std::io::{BufRead, Write};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{mpsc, Arc, Mutex};
+use std::time::{Duration, Instant};
+
+const PROTOCOL_VERSION: u64 = 1;
+const POLL_INTERVAL: Duration = Duration::from_millis(1200);
+/// how long to wait for the client's answer to a `session/request_permission`
+/// before falling back to a plain message + `end_turn`.
+const PERMISSION_TIMEOUT: Duration = Duration::from_secs(180);
+
+struct AcpSession {
+    /// coordinator `sess_…` id this ACP session is bound to.
+    coord_id: String,
+    mode: String,
+    /// highest `coordinator_events` id already translated for this session.
+    last_event_id: i64,
+    cancel: Arc<AtomicBool>,
+}
+
+pub struct Acp {
+    socket_path: PathBuf,
+    sessions: Mutex<HashMap<String, AcpSession>>,
+    /// server→client request id → a channel the stdin loop forwards the
+    /// matching response onto (used by `session/request_permission`).
+    pending: Mutex<HashMap<String, mpsc::Sender<Value>>>,
+    out: Mutex<std::io::Stdout>,
+    seq: AtomicU64,
+    srv_seq: AtomicU64,
+}
+
+/// Entry point for `single acp`. Blocks reading stdin until it closes.
+pub fn run(socket_path: PathBuf) -> Result<()> {
+    let acp = Arc::new(Acp {
+        socket_path,
+        sessions: Mutex::new(HashMap::new()),
+        pending: Mutex::new(HashMap::new()),
+        out: Mutex::new(std::io::stdout()),
+        seq: AtomicU64::new(0),
+        srv_seq: AtomicU64::new(0),
+    });
+    log("=== single acp start ===");
+
+    let stdin = std::io::stdin();
+    for line in stdin.lock().lines() {
+        let line = line?;
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        log(&format!("IN  {}", &line[..line.len().min(300)]));
+        let Ok(msg) = serde_json::from_str::<Value>(line) else {
+            log("bad json");
+            continue;
+        };
+
+        // A response to one of our own outbound requests (has `id`, no
+        // `method`) → route it to whoever is waiting.
+        if msg.get("method").is_none() && msg.get("id").is_some() {
+            let id = id_key(&msg["id"]);
+            if let Some(tx) = acp.pending.lock().unwrap().remove(&id) {
+                let _ = tx.send(msg);
+            }
+            continue;
+        }
+
+        let acp2 = Arc::clone(&acp);
+        acp.dispatch(acp2, msg);
+    }
+    log("=== stdin closed ===");
+    Ok(())
+}
+
+impl Acp {
+    fn dispatch(&self, acp: Arc<Acp>, msg: Value) {
+        let method = msg.get("method").and_then(|m| m.as_str()).unwrap_or("").to_string();
+        let id = msg.get("id").cloned();
+        let p = msg.get("params").cloned().unwrap_or(json!({}));
+
+        match method.as_str() {
+            "initialize" => self.respond(
+                id,
+                json!({
+                    "protocolVersion": PROTOCOL_VERSION,
+                    "agentInfo": { "name": "single-acp", "version": env!("CARGO_PKG_VERSION") },
+                    "agentCapabilities": {
+                        "loadSession": true,
+                        "promptCapabilities": { "image": false, "audio": false, "embeddedContext": true },
+                        "mcpCapabilities": { "http": false, "sse": false }
+                    },
+                    "authMethods": []
+                }),
+            ),
+            "authenticate" => self.respond(id, json!({})),
+            "session/new" => self.session_new(id, &p),
+            "session/load" => self.session_load(id, &p),
+            "session/set_mode" => {
+                let sid = p["sessionId"].as_str().unwrap_or_default().to_string();
+                let mode = p["modeId"].as_str().unwrap_or("auto").to_string();
+                if let Some(s) = self.sessions.lock().unwrap().get_mut(&sid) {
+                    s.mode = mode.clone();
+                }
+                self.session_update(&sid, json!({ "sessionUpdate": "current_mode_update", "currentModeId": mode }));
+                self.respond(id, json!({}));
+            }
+            "session/prompt" => {
+                let sid = p["sessionId"].as_str().unwrap_or_default().to_string();
+                let text = prompt_text(&p);
+                if !self.sessions.lock().unwrap().contains_key(&sid) {
+                    self.rpc_error(id, -32602, &format!("unknown session {sid}"));
+                    return;
+                }
+                if text.trim().is_empty() {
+                    self.respond(id, json!({ "stopReason": "end_turn" }));
+                    return;
+                }
+                if let Some(s) = self.sessions.lock().unwrap().get(&sid) {
+                    s.cancel.store(false, Ordering::SeqCst);
+                }
+                std::thread::spawn(move || {
+                    acp.run_turn(&sid, id, &text);
+                });
+            }
+            "session/cancel" => {
+                let sid = p["sessionId"].as_str().unwrap_or_default().to_string();
+                if let Some(s) = self.sessions.lock().unwrap().get(&sid) {
+                    s.cancel.store(true, Ordering::SeqCst);
+                }
+                // best-effort: also cancel the coordinator goal in flight.
+                if let Ok(gid) = self.active_goal(&sid) {
+                    if let Some(gid) = gid {
+                        let _ = self.socket(Request::GoalCancel { goal_id: gid });
+                    }
+                }
+            }
+            "$/cancel_request" => {}
+            _ => {
+                if id.is_some() {
+                    self.rpc_error(id, -32601, &format!("method not found: {method}"));
+                }
+            }
+        }
+    }
+
+    // ---- session lifecycle ------------------------------------------------
+
+    fn session_new(&self, id: Option<Value>, p: &Value) {
+        let cwd = p["cwd"].as_str().map(str::to_string).unwrap_or_else(default_cwd);
+        let coord_id = match self.socket(Request::SessionNew { cwd: cwd.clone() }) {
+            Ok(ResponseData::Session(s)) => s.id,
+            Ok(other) => {
+                self.rpc_error(id, -32603, &format!("unexpected SessionNew response: {other:?}"));
+                return;
+            }
+            Err(e) => {
+                self.rpc_error(id, -32603, &format!("SessionNew failed: {e}"));
+                return;
+            }
+        };
+        let acp_sid = format!("acp-{}", self.seq.fetch_add(1, Ordering::Relaxed));
+        self.sessions.lock().unwrap().insert(
+            acp_sid.clone(),
+            AcpSession { coord_id, mode: "auto".into(), last_event_id: 0, cancel: Arc::new(AtomicBool::new(false)) },
+        );
+        self.respond(
+            id,
+            json!({ "sessionId": acp_sid, "modes": modes_block("auto") }),
+        );
+        self.session_update(&acp_sid, json!({ "sessionUpdate": "available_commands_update", "availableCommands": commands() }));
+    }
+
+    fn session_load(&self, id: Option<Value>, p: &Value) {
+        let acp_sid = p["sessionId"].as_str().map(str::to_string).unwrap_or_else(|| format!("acp-{}", self.seq.fetch_add(1, Ordering::Relaxed)));
+        let cwd = p["cwd"].as_str().map(str::to_string).unwrap_or_else(default_cwd);
+
+        // rebind: if we don't know this ACP session (fresh process), make a
+        // coordinator session for it so the thread keeps working.
+        let coord_id = {
+            let known = self.sessions.lock().unwrap().get(&acp_sid).map(|s| s.coord_id.clone());
+            match known {
+                Some(c) => c,
+                None => match self.socket(Request::SessionNew { cwd: cwd.clone() }) {
+                    Ok(ResponseData::Session(s)) => s.id,
+                    _ => String::new(),
+                },
+            }
+        };
+        let mode = self
+            .sessions
+            .lock()
+            .unwrap()
+            .get(&acp_sid)
+            .map(|s| s.mode.clone())
+            .unwrap_or_else(|| "auto".into());
+        self.sessions.lock().unwrap().entry(acp_sid.clone()).or_insert_with(|| AcpSession {
+            coord_id: coord_id.clone(),
+            mode: mode.clone(),
+            last_event_id: 0,
+            cancel: Arc::new(AtomicBool::new(false)),
+        });
+
+        self.respond(id, json!({ "modes": modes_block(&mode) }));
+        self.session_update(&acp_sid, json!({ "sessionUpdate": "available_commands_update", "availableCommands": commands() }));
+
+        // replay recent events so the thread has context.
+        if !coord_id.is_empty() {
+            if let Ok(ResponseData::CoordinatorEvents(events)) =
+                self.socket(Request::SessionEvents { session_id: coord_id, since_event_id: 0 })
+            {
+                let mut max_id = 0;
+                for e in &events {
+                    max_id = max_id.max(e.id);
+                    self.chunk(&acp_sid, &format!("[{}] {}\n", e.kind, e.body), "agent_message_chunk");
+                }
+                if let Some(s) = self.sessions.lock().unwrap().get_mut(&acp_sid) {
+                    s.last_event_id = max_id;
+                }
+            }
+        }
+    }
+
+    // ---- one prompt turn -----------------------------------------------
+
+    fn run_turn(&self, acp_sid: &str, rid: Option<Value>, text: &str) {
+        let trimmed = text.trim_start();
+        if let Some(rest) = trimmed.strip_prefix('/') {
+            let mut parts = rest.splitn(2, char::is_whitespace);
+            let name = parts.next().unwrap_or("help").to_lowercase();
+            let arg = parts.next().unwrap_or("").trim();
+            let body = self.run_slash(acp_sid, &name, arg);
+            self.chunk(acp_sid, &body, "agent_message_chunk");
+            self.respond(rid, json!({ "stopReason": "end_turn" }));
+            return;
+        }
+
+        if let Some(reply) = self.answer_status_query(acp_sid, text) {
+            self.chunk(acp_sid, &reply, "agent_message_chunk");
+            self.respond(rid, json!({ "stopReason": "end_turn" }));
+            return;
+        }
+
+        // otherwise: submit a goal and stream the coordinator's progress.
+        let (coord_id, mode) = {
+            let map = self.sessions.lock().unwrap();
+            let Some(s) = map.get(acp_sid) else {
+                self.rpc_error(rid, -32602, "unknown session");
+                return;
+            };
+            (s.coord_id.clone(), s.mode.clone())
+        };
+        self.chunk(acp_sid, "planning…\n", "agent_thought_chunk");
+        let goal_id = match self.socket(Request::GoalSubmit {
+            session_id: coord_id.clone(),
+            text: text.to_string(),
+            mode: Some(mode),
+            max_dispatches: None,
+            max_minutes: None,
+        }) {
+            Ok(ResponseData::GoalId(g)) => g,
+            Ok(other) => {
+                self.chunk(acp_sid, &format!("[submit failed: {other:?}]\n"), "agent_message_chunk");
+                self.respond(rid, json!({ "stopReason": "end_turn" }));
+                return;
+            }
+            Err(e) => {
+                self.chunk(acp_sid, &format!("[submit failed: {e}]\n"), "agent_message_chunk");
+                self.respond(rid, json!({ "stopReason": "end_turn" }));
+                return;
+            }
+        };
+
+        let stop = self.stream_goal(acp_sid, &coord_id, &goal_id);
+        self.respond(rid, json!({ "stopReason": stop }));
+    }
+
+    /// long-polls `SessionEvents` and a terminal `GoalStatus`, translating
+    /// each new event into an ACP `session/update`. Returns the ACP
+    /// `stopReason`.
+    fn stream_goal(&self, acp_sid: &str, coord_id: &str, goal_id: &str) -> &'static str {
+        let cancel = self
+            .sessions
+            .lock()
+            .unwrap()
+            .get(acp_sid)
+            .map(|s| Arc::clone(&s.cancel))
+            .unwrap_or_default();
+        let deadline = Instant::now() + Duration::from_secs(60 * 60);
+
+        loop {
+            if cancel.load(Ordering::SeqCst) {
+                let _ = self.socket(Request::GoalCancel { goal_id: goal_id.to_string() });
+                return "cancelled";
+            }
+            if Instant::now() > deadline {
+                self.chunk(acp_sid, "[single acp] stopped tailing after 1h\n", "agent_message_chunk");
+                return "max_turn_requests";
+            }
+
+            let since = self.sessions.lock().unwrap().get(acp_sid).map(|s| s.last_event_id).unwrap_or(0);
+            if let Ok(ResponseData::CoordinatorEvents(events)) = self.socket(Request::SessionEvents {
+                session_id: coord_id.to_string(),
+                since_event_id: since,
+            }) {
+                for e in &events {
+                    if e.goal_id.as_deref() != Some(goal_id) && e.goal_id.is_some() {
+                        // a different goal in the same session — skip, but
+                        // still advance the cursor.
+                    } else {
+                        self.translate_event(acp_sid, goal_id, &e.kind, &e.body);
+                    }
+                    if let Some(s) = self.sessions.lock().unwrap().get_mut(acp_sid) {
+                        s.last_event_id = s.last_event_id.max(e.id);
+                    }
+                }
+            }
+
+            match self.goal_view(goal_id) {
+                Some(v) => {
+                    // refresh the ACP plan from the live node list.
+                    self.emit_plan(acp_sid, &v);
+                    match v.goal.status.as_str() {
+                        "done" => {
+                            if let Some(sum) = &v.result_summary {
+                                self.chunk(acp_sid, &format!("\n{sum}\n"), "agent_message_chunk");
+                            }
+                            return "end_turn";
+                        }
+                        "failed" => {
+                            self.chunk(acp_sid, "\n[goal failed]\n", "agent_message_chunk");
+                            return "end_turn";
+                        }
+                        "cancelled" => return "cancelled",
+                        "blocked" => {
+                            let reason = v.blocked_reason.clone().unwrap_or_else(|| "goal blocked".into());
+                            return self.handle_blocked(acp_sid, goal_id, &reason);
+                        }
+                        _ => {}
+                    }
+                }
+                None => return "end_turn",
+            }
+
+            std::thread::sleep(POLL_INTERVAL);
+        }
+    }
+
+    fn translate_event(&self, acp_sid: &str, _goal_id: &str, kind: &str, body: &str) {
+        match kind {
+            "node_started" => self.chunk(acp_sid, &format!("→ {body}\n"), "agent_thought_chunk"),
+            "node_output" => self.chunk(acp_sid, body, "agent_message_chunk"),
+            "node_done" => self.chunk(acp_sid, &format!("✓ node {body}\n"), "agent_thought_chunk"),
+            "node_failed" => self.chunk(acp_sid, &format!("✗ {body}\n"), "agent_message_chunk"),
+            "supervisor" => self.chunk(acp_sid, &format!("[supervisor] {body}\n"), "agent_thought_chunk"),
+            "budget" => self.chunk(acp_sid, &format!("[budget] {body}\n"), "agent_thought_chunk"),
+            "integrated" => {} // the summary is emitted from the terminal GoalStatus
+            "plan" => {}       // the plan is emitted from GoalStatus node list
+            _ => {}
+        }
+    }
+
+    fn emit_plan(&self, acp_sid: &str, v: &single_protocol::GoalView) {
+        if v.nodes.is_empty() {
+            return;
+        }
+        let entries: Vec<Value> = v
+            .nodes
+            .iter()
+            .map(|n| {
+                let status = match n.status.as_str() {
+                    "running" => "in_progress",
+                    "done" | "skipped" | "failed" | "blocked" => "completed",
+                    _ => "pending",
+                };
+                json!({ "content": format!("{}: {}", n.id, n.desc), "priority": "medium", "status": status })
+            })
+            .collect();
+        self.session_update(acp_sid, json!({ "sessionUpdate": "plan", "entries": entries }));
+    }
+
+    /// spec §7: a `blocked` goal asks the human. Sent as an ACP
+    /// `session/request_permission`; the answer routes back through
+    /// `GoalAmend` (raise the budget) or `GoalCancel`. Falls back to a
+    /// plain message + `end_turn` if the client doesn't answer.
+    fn handle_blocked(&self, acp_sid: &str, goal_id: &str, reason: &str) -> &'static str {
+        let req_id = format!("srv-{}", self.srv_seq.fetch_add(1, Ordering::Relaxed));
+        let (tx, rx) = mpsc::channel();
+        self.pending.lock().unwrap().insert(req_id.clone(), tx);
+
+        self.send_raw(json!({
+            "jsonrpc": "2.0",
+            "id": req_id,
+            "method": "session/request_permission",
+            "params": {
+                "sessionId": acp_sid,
+                "toolCall": { "title": format!("Goal blocked: {reason}") },
+                "options": [
+                    { "optionId": "raise", "name": "Raise budget and continue", "kind": "allow_once" },
+                    { "optionId": "cancel", "name": "Cancel the goal", "kind": "reject_once" }
+                ]
+            }
+        }));
+
+        let choice = rx
+            .recv_timeout(PERMISSION_TIMEOUT)
+            .ok()
+            .and_then(|m| {
+                m.get("result")
+                    .and_then(|r| r.get("outcome"))
+                    .and_then(|o| o.get("optionId").or_else(|| o.get("option")))
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string)
+            });
+        self.pending.lock().unwrap().remove(&req_id);
+
+        match choice.as_deref() {
+            Some("raise") => {
+                let bump = self
+                    .goal_view(goal_id)
+                    .map(|v| v.goal.max_dispatches.saturating_mul(2).max(v.goal.max_dispatches + 10))
+                    .unwrap_or(50);
+                let _ = self.socket(Request::GoalAmend { goal_id: goal_id.to_string(), text: format!("budget={bump}") });
+                self.chunk(acp_sid, &format!("[budget raised to {bump}, continuing]\n"), "agent_thought_chunk");
+                let coord_id = self.sessions.lock().unwrap().get(acp_sid).map(|s| s.coord_id.clone()).unwrap_or_default();
+                self.stream_goal(acp_sid, &coord_id, goal_id)
+            }
+            Some("cancel") => {
+                let _ = self.socket(Request::GoalCancel { goal_id: goal_id.to_string() });
+                "cancelled"
+            }
+            _ => {
+                self.chunk(
+                    acp_sid,
+                    &format!("\n**Goal blocked:** {reason}\nRun `single goal amend {goal_id} budget=N` to raise the cap.\n"),
+                    "agent_message_chunk",
+                );
+                "end_turn"
+            }
+        }
+    }
+
+    // ---- slash commands ------------------------------------------------
+
+    fn run_slash(&self, acp_sid: &str, name: &str, _arg: &str) -> String {
+        match name {
+            "status" | "queue" => {
+                match self.socket(Request::CoordinatorStatus) {
+                    Ok(ResponseData::CoordinatorSnapshot(s)) => format_snapshot(&s),
+                    Ok(other) => format!("unexpected: {other:?}"),
+                    Err(e) => format!("[error: {e}]"),
+                }
+            }
+            "goals" => match self.socket(Request::GoalList { session_id: None }) {
+                Ok(ResponseData::Goals(gs)) => {
+                    if gs.is_empty() {
+                        "(no goals)".into()
+                    } else {
+                        gs.iter().map(|g| format!("{}  [{}]  {}", g.id, g.status, g.text)).collect::<Vec<_>>().join("\n")
+                    }
+                }
+                Ok(other) => format!("unexpected: {other:?}"),
+                Err(e) => format!("[error: {e}]"),
+            },
+            "agents" => shell_out(&["doctor"]),
+            "usage" => shell_out(&["usage", "show"]),
+            "mcp" => shell_out(&["mcp", "list"]),
+            "lsp" => shell_out(&["lsp", "list"]),
+            "providers" => shell_out(&["provider", "list"]),
+            "dashboard" => "Open the SingleCLI control panel: run `single` in a terminal, or the Zed task \"SingleCLI: control panel\".".into(),
+            "cancel" => {
+                if let Ok(Some(gid)) = self.active_goal(acp_sid) {
+                    let _ = self.socket(Request::GoalCancel { goal_id: gid.clone() });
+                    format!("cancelled {gid}")
+                } else {
+                    "(no active goal to cancel)".into()
+                }
+            }
+            _ => "single acp — bridge to the SingleCLI coordinator.\n\
+                  Commands: /status /goals /agents /usage /mcp /lsp /providers /dashboard /cancel\n\
+                  Modes: auto · plan · careful · dry\n\
+                  Any other prompt becomes a coordinator goal; progress streams back here."
+                .into(),
+        }
+        .trim_end()
+        .to_string()
+            + "\n"
+    }
+
+    // ---- helpers -----------------------------------------------------
+
+    fn answer_status_query(&self, acp_sid: &str, text: &str) -> Option<String> {
+        if let Some(gid) = extract_goal_id(text) {
+            return match self.socket(Request::GoalStatus { goal_id: gid }) {
+                Ok(ResponseData::GoalView(v)) => Some(format_goal_view(&v)),
+                _ => None,
+            };
+        }
+        if looks_like_status_query(text) {
+            let _ = acp_sid;
+            return match self.socket(Request::CoordinatorStatus) {
+                Ok(ResponseData::CoordinatorSnapshot(s)) => Some(format_snapshot(&s)),
+                _ => None,
+            };
+        }
+        None
+    }
+
+    fn active_goal(&self, acp_sid: &str) -> Result<Option<String>> {
+        let coord_id = match self.sessions.lock().unwrap().get(acp_sid) {
+            Some(s) => s.coord_id.clone(),
+            None => return Ok(None),
+        };
+        match self.socket(Request::GoalList { session_id: Some(coord_id) })? {
+            ResponseData::Goals(gs) => Ok(gs
+                .iter()
+                .find(|g| matches!(g.status.as_str(), "running" | "planning" | "queued" | "blocked"))
+                .map(|g| g.id.clone())),
+            _ => Ok(None),
+        }
+    }
+
+    fn goal_view(&self, goal_id: &str) -> Option<single_protocol::GoalView> {
+        match self.socket(Request::GoalStatus { goal_id: goal_id.to_string() }) {
+            Ok(ResponseData::GoalView(v)) => Some(v),
+            _ => None,
+        }
+    }
+
+    fn socket(&self, req: Request) -> Result<ResponseData> {
+        match crate::client::send(&self.socket_path, req)? {
+            Response::Ok { data } => Ok(data),
+            Response::Error { message } => Err(anyhow::anyhow!(message)),
+        }
+    }
+
+    // ---- transport -------------------------------------------------
+
+    fn respond(&self, id: Option<Value>, result: Value) {
+        let Some(id) = id else { return };
+        self.send_raw(json!({ "jsonrpc": "2.0", "id": id, "result": result }));
+    }
+
+    fn rpc_error(&self, id: Option<Value>, code: i64, message: &str) {
+        let Some(id) = id else { return };
+        self.send_raw(json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } }));
+    }
+
+    fn session_update(&self, session_id: &str, update: Value) {
+        self.send_raw(json!({
+            "jsonrpc": "2.0",
+            "method": "session/update",
+            "params": { "sessionId": session_id, "update": update }
+        }));
+    }
+
+    fn chunk(&self, session_id: &str, text: &str, kind: &str) {
+        if text.is_empty() {
+            return;
+        }
+        self.session_update(
+            session_id,
+            json!({ "sessionUpdate": kind, "content": { "type": "text", "text": text } }),
+        );
+    }
+
+    fn send_raw(&self, v: Value) {
+        let s = v.to_string();
+        log(&format!("OUT {}", &s[..s.len().min(300)]));
+        let mut out = self.out.lock().unwrap();
+        let _ = writeln!(out, "{s}");
+        let _ = out.flush();
+    }
+}
+
+// -------------------------------------------------------------- pure helpers
+
+fn default_cwd() -> String {
+    std::env::current_dir().map(|p| p.display().to_string()).unwrap_or_else(|_| ".".into())
+}
+
+fn id_key(v: &Value) -> String {
+    match v {
+        Value::String(s) => s.clone(),
+        other => other.to_string(),
+    }
+}
+
+fn prompt_text(p: &Value) -> String {
+    p.get("prompt")
+        .and_then(|b| b.as_array())
+        .map(|blocks| {
+            blocks
+                .iter()
+                .filter(|b| b.get("type").and_then(|t| t.as_str()) == Some("text"))
+                .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
+                .collect::<Vec<_>>()
+                .join("")
+        })
+        .unwrap_or_default()
+}
+
+/// spec §7: a prompt that is asking about state, not requesting work — it
+/// is answered from `CoordinatorStatus` with no agent burned.
+pub fn looks_like_status_query(text: &str) -> bool {
+    let t = text.trim().to_lowercase();
+    if t.split_whitespace().count() > 16 {
+        return false; // too long to be a quick "how's it going"
+    }
+    // phrases that are a status ask on their own, no question mark needed.
+    const STRONG: &[&str] = &[
+        "how's it going", "how is it going", "hows it going", "what's running",
+        "whats running", "what is running", "where are we", "done yet", "how far along",
+        "still running", "what's the status", "whats the status", "status of the",
+        "coordinator status", "goal status", "any progress",
+    ];
+    if STRONG.iter().any(|c| t.contains(c)) {
+        return true;
+    }
+    // otherwise it must read as a question AND mention progress/state — so a
+    // work request like "add a status bar and wire it up" doesn't match.
+    let is_question = t.ends_with('?') || t.starts_with("how ") || t.starts_with("what ") || t.starts_with("is it ");
+    let state_word = ["status", "progress", "running", "going", "queue", "blocked"]
+        .iter()
+        .any(|w| t.contains(w));
+    is_question && state_word
+}
+
+/// pulls a `goal_…` id out of a prompt, if it names one.
+pub fn extract_goal_id(text: &str) -> Option<String> {
+    text.split(|c: char| c.is_whitespace() || "\"'(),".contains(c))
+        .find(|w| w.starts_with("goal_") && w.len() > 5)
+        .map(str::to_string)
+}
+
+fn modes_block(current: &str) -> Value {
+    // spec §7 + E27 decision: the four GoalMode values only. forced-agent
+    // shortcuts wait for routing-pin (Phase 4).
+    let modes = [
+        ("auto", "Auto · plan, run, self-correct, integrate"),
+        ("plan", "Plan · produce the task graph, don't dispatch"),
+        ("careful", "Careful · iterate a node until it reports done"),
+        ("dry", "Dry · plan and cost it, run nothing"),
+    ];
+    json!({
+        "currentModeId": current,
+        "availableModes": modes.iter().map(|(id, d)| json!({ "id": id, "name": d, "description": d })).collect::<Vec<_>>()
+    })
+}
+
+fn commands() -> Value {
+    json!([
+        { "name": "status", "description": "coordinator: running / queued / blocked goals + pool" },
+        { "name": "goals", "description": "list all goals" },
+        { "name": "agents", "description": "detected agents / auth (single doctor)" },
+        { "name": "usage", "description": "per-agent run counts / latency" },
+        { "name": "mcp", "description": "MCP servers in single-mcp" },
+        { "name": "lsp", "description": "LSP servers single-lsp can route to" },
+        { "name": "providers", "description": "configured LLM providers" },
+        { "name": "dashboard", "description": "how to open the SingleCLI control panel" },
+        { "name": "cancel", "description": "cancel this session's active goal" }
+    ])
+}
+
+fn shell_out(args: &[&str]) -> String {
+    match std::process::Command::new("single").args(args).output() {
+        Ok(o) => {
+            let mut s = String::from_utf8_lossy(&o.stdout).into_owned();
+            if !o.stderr.is_empty() {
+                s.push_str(&String::from_utf8_lossy(&o.stderr));
+            }
+            if s.trim().is_empty() {
+                "(no output)".into()
+            } else {
+                s
+            }
+        }
+        Err(e) => format!("[could not run `single {}`: {e}]", args.join(" ")),
+    }
+}
+
+fn format_snapshot(s: &single_protocol::CoordinatorSnapshot) -> String {
+    let mut out = format!("coordinator — max_parallel {}\n", s.max_parallel);
+    let mut section = |label: &str, goals: &[single_protocol::GoalSummary]| {
+        if !goals.is_empty() {
+            out.push_str(&format!("{label}:\n"));
+            for g in goals {
+                out.push_str(&format!("  {}  {}\n", g.id, g.text));
+            }
+        }
+    };
+    section("running", &s.running_goals);
+    section("queued", &s.queued_goals);
+    section("blocked", &s.blocked_goals);
+    let busy: Vec<_> = s.pool.iter().filter(|p| p.running > 0 || p.rate_limited).collect();
+    if !busy.is_empty() {
+        out.push_str("pool:\n");
+        for p in busy {
+            let rl = if p.rate_limited { " (rate-limited)" } else { "" };
+            out.push_str(&format!("  {} {}{}\n", p.agent, p.running, rl));
+        }
+    }
+    out
+}
+
+fn format_goal_view(v: &single_protocol::GoalView) -> String {
+    let mut out = format!("{}  [{}]  {}\n", v.goal.id, v.goal.status, v.goal.text);
+    out.push_str(&format!("dispatches {}/{}\n", v.goal.dispatches, v.goal.max_dispatches));
+    if let Some(r) = &v.blocked_reason {
+        out.push_str(&format!("blocked: {r}\n"));
+    }
+    if let Some(r) = &v.result_summary {
+        out.push_str(&format!("result: {r}\n"));
+    }
+    for n in &v.nodes {
+        out.push_str(&format!("  {:<4} {:<9} {:<8} {}\n", n.id, n.status, n.agent, n.desc));
+    }
+    out
+}
+
+fn log(msg: &str) {
+    if let Ok(path) = std::env::var("SINGLE_ACP_LOG").or_else(|_| {
+        std::env::var("HOME").map(|h| format!("{h}/.cache/single-acp.log"))
+    }) {
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+            let _ = writeln!(f, "{} {msg}", chrono_now());
+        }
+    }
+}
+
+fn chrono_now() -> String {
+    // avoid pulling chrono into single-cli just for a log timestamp.
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs().to_string())
+        .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn status_query_heuristic() {
+        assert!(looks_like_status_query("what's the status?"));
+        assert!(looks_like_status_query("how's it going"));
+        assert!(looks_like_status_query("any progress on the auth work?"));
+        assert!(looks_like_status_query("is it done yet"));
+        assert!(!looks_like_status_query("add a status bar to the settings page and wire it to the store"));
+        assert!(!looks_like_status_query("implement the login flow"));
+    }
+
+    #[test]
+    fn goal_id_extraction() {
+        assert_eq!(extract_goal_id("how is goal_abc123 going?").as_deref(), Some("goal_abc123"));
+        assert_eq!(extract_goal_id("status of (goal_x9y)").as_deref(), Some("goal_x9y"));
+        assert_eq!(extract_goal_id("no id here"), None);
+        assert_eq!(extract_goal_id("goal_"), None);
+    }
+
+    #[test]
+    fn prompt_text_joins_text_blocks_only() {
+        let p = json!({ "prompt": [
+            { "type": "text", "text": "hello " },
+            { "type": "image", "data": "…" },
+            { "type": "text", "text": "world" }
+        ]});
+        assert_eq!(prompt_text(&p), "hello world");
+    }
+
+    #[test]
+    fn modes_block_lists_the_four_goal_modes() {
+        let m = modes_block("plan");
+        assert_eq!(m["currentModeId"], "plan");
+        let ids: Vec<_> = m["availableModes"].as_array().unwrap().iter().map(|x| x["id"].as_str().unwrap().to_string()).collect();
+        assert_eq!(ids, vec!["auto", "plan", "careful", "dry"]);
+    }
+}

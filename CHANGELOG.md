@@ -40,6 +40,13 @@ plan, supervise on failure, and integrate. `single task run` and
   `single coordinator status`.
 - Added: a scheduler tick-timer thread in `single-runtimed` that drives
   every active goal on `coordinator.toml`'s interval (default 5s).
+- Added: `single acp` — a native Agent Client Protocol stdio bridge
+  (newline-delimited JSON-RPC 2.0, protocol v1) for Zed's agent panel.
+  It burns no agent itself: `/`-commands and status-y prompts answer
+  from the socket, every other prompt becomes a `GoalSubmit` and the
+  coordinator's events stream back as ACP `session/update`s. A blocked
+  goal asks the human via `session/request_permission`. Replaces the
+  Python prototype `nbr-workspace/tools/single-acp`.
 
 ## [0.9.6]
 
