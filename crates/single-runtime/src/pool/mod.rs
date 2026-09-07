@@ -6,6 +6,7 @@
 
 pub mod backoff;
 pub mod bandit;
+pub mod client;
 pub mod cooldown;
 pub mod degrade;
 pub mod handoff;
