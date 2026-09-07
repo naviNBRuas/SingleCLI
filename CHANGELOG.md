@@ -51,7 +51,10 @@ plan, supervise on failure, and integrate. `single task run` and
   like `code/quick`, or `--agent`), and runs one `task run --allow-fallback`
   — so a 429 hops the fallback chain. Point Zed's
   `language_models.openai_compatible` at `http://127.0.0.1:8765/v1`. No
-  new dependency (hand-rolled HTTP/1.1 on `std::net`).
+  new dependency (hand-rolled HTTP/1.1 on `std::net`). Requires a bearer
+  token (generated and printed unless `--api-key` is given), validates the
+  `Host` header, refuses non-loopback binds without `--allow-remote`, and
+  caps request size and connection time.
 - Added: `single loop <goal> [--agent X] [--max-iters N]` — keep one
   agent iterating until it replies with a line containing only `DONE`,
   or the cap is hit. Sugar over the coordinator's new `careful` goal
