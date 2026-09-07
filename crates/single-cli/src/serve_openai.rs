@@ -14,7 +14,7 @@
 
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
-use single_protocol::{Request, Response, ResponseData, TaskRecord, TaskStatus};
+use single_protocol::{Request, Response, ResponseData, TaskRecord};
 use single_runtime::coordinator::graph::{Effort, NodeKind};
 use single_runtime::coordinator::routing::{self, PoolHealth, RoutingTable};
 use std::io::{BufRead, BufReader, Read, Write};
@@ -319,13 +319,9 @@ fn chat_completions(stream: &mut TcpStream, body: &str, cfg: &Config, ctx: &sing
     };
 
     let content = task_content(&rec);
-    let finish = if rec.timed_out {
-        "length"
-    } else if rec.status == TaskStatus::Completed {
-        "stop"
-    } else {
-        "stop" // a failed agent still returns text; surface it rather than erroring
-    };
+    // "length" only when the run was cut off; a failed agent still returns
+    // text, so surface it with "stop" rather than erroring the request.
+    let finish = if rec.timed_out { "length" } else { "stop" };
     let (pt, ct) = (rec.prompt_tokens.unwrap_or(0).max(0), rec.completion_tokens.unwrap_or(0).max(0));
     let id = format!("chatcmpl-{}", rec.id);
 

@@ -146,10 +146,8 @@ impl Acp {
                     s.cancel.store(true, Ordering::SeqCst);
                 }
                 // best-effort: also cancel the coordinator goal in flight.
-                if let Ok(gid) = self.active_goal(&sid) {
-                    if let Some(gid) = gid {
-                        let _ = self.socket(Request::GoalCancel { goal_id: gid });
-                    }
+                if let Ok(Some(gid)) = self.active_goal(&sid) {
+                    let _ = self.socket(Request::GoalCancel { goal_id: gid });
                 }
             }
             "$/cancel_request" => {}

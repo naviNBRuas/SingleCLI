@@ -223,6 +223,7 @@ pub fn plan(
 /// supervisor: current graph + a failing node's output → a list of patch
 /// ops. the caller (scheduler) enforces the per-goal patch cap and turns
 /// an over-cap trigger into a `Block`.
+#[allow(clippy::too_many_arguments)]
 pub fn supervise(
     conn: &Connection,
     ctx: &Context,

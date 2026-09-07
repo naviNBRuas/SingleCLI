@@ -4,6 +4,15 @@
 mod client;
 mod server;
 
+use rmcp::ServiceExt;
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let service = server::SingleCliServer::new()?.serve(rmcp::transport::io::stdio()).await?;
+    service.waiting().await?;
+    Ok(())
+}
+
 /// Shared test-only helpers. `SingleDirs::discover()` reads the
 /// process-global `SINGLE_CONFIG_DIR`, so every test that points it at a
 /// tempdir must serialize on one lock — spanning both `client` and
@@ -38,13 +47,4 @@ pub(crate) mod testutil {
         std::env::set_var("SINGLE_CONFIG_DIR", dir.path());
         EnvGuard { _lock: lock, dir }
     }
-}
-
-use rmcp::ServiceExt;
-
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    let service = server::SingleCliServer::new()?.serve(rmcp::transport::io::stdio()).await?;
-    service.waiting().await?;
-    Ok(())
 }
