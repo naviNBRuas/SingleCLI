@@ -13,6 +13,7 @@ pub mod memory;
 pub mod orchestrate;
 pub mod orchestrate_graph;
 pub mod pool;
+pub mod pool_agent;
 pub mod qdrant_backend;
 pub mod redis_backend;
 pub mod registry;

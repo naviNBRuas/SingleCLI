@@ -50,13 +50,11 @@ pub fn session_key(explicit: Option<&str>, first_user_message: &str) -> String {
     }
 }
 
-/// One compact chat message — deliberately minimal (role + content) so
-/// this module doesn't need to depend on whatever richer message type
-/// `pool::client` (Phase 4) ends up defining; the client adapts.
-pub struct ChatMessage {
-    pub role: &'static str,
-    pub content: String,
-}
+/// Reuses `pool::client::ChatMessage` (Phase 4) now that it exists — this
+/// module predates `client.rs` and originally defined its own minimal
+/// stand-in, but there's no reason to keep two structurally-identical
+/// message types once the real one landed.
+pub use crate::pool::client::ChatMessage;
 
 const HANDOFF_MARKER: &str = "SingleCLI context handoff:";
 
@@ -92,7 +90,7 @@ pub fn inject(store: &HandoffStore, key: &str, new_provider: &str, new_model: &s
                  Recent summary: {}",
                 entry.messages_summary
             );
-            messages.insert(0, ChatMessage { role: "system", content: body });
+            messages.insert(0, ChatMessage { role: "system".to_string(), content: body });
         }
     }
 
@@ -178,7 +176,7 @@ mod tests {
         let key = "sess1";
         record_summary(&store, key, "did X and Y".to_string(), "groq", "llama-3");
 
-        let mut messages = vec![ChatMessage { role: "user", content: "continue".to_string() }];
+        let mut messages = vec![ChatMessage { role: "user".to_string(), content: "continue".to_string() }];
         let injected = inject(&store, key, "cerebras", "llama-3", &mut messages);
         assert!(injected);
         assert!(messages[0].content.starts_with(HANDOFF_MARKER));
@@ -189,7 +187,7 @@ mod tests {
     #[test]
     fn does_not_inject_on_first_request() {
         let store = HandoffStore::default();
-        let mut messages = vec![ChatMessage { role: "user", content: "hello".to_string() }];
+        let mut messages = vec![ChatMessage { role: "user".to_string(), content: "hello".to_string() }];
         let injected = inject(&store, "new-session", "groq", "llama-3", &mut messages);
         assert!(!injected);
         assert_eq!(messages.len(), 1);
@@ -200,7 +198,7 @@ mod tests {
         let store = HandoffStore::default();
         let key = "sess2";
         record_summary(&store, key, "summary".to_string(), "groq", "llama-3");
-        let mut messages = vec![ChatMessage { role: "user", content: "continue".to_string() }];
+        let mut messages = vec![ChatMessage { role: "user".to_string(), content: "continue".to_string() }];
         let injected = inject(&store, key, "groq", "llama-3", &mut messages);
         assert!(!injected);
     }
@@ -211,7 +209,7 @@ mod tests {
         let key = "sess3";
         record_summary(&store, key, "summary".to_string(), "groq", "llama-3");
         let mut messages =
-            vec![ChatMessage { role: "system", content: format!("{HANDOFF_MARKER} already here") }, ChatMessage { role: "user", content: "hi".to_string() }];
+            vec![ChatMessage { role: "system".to_string(), content: format!("{HANDOFF_MARKER} already here") }, ChatMessage { role: "user".to_string(), content: "hi".to_string() }];
         let injected = inject(&store, key, "cerebras", "llama-3", &mut messages);
         assert!(!injected);
         assert_eq!(messages.len(), 2);
@@ -234,7 +232,7 @@ mod tests {
         let stale_time = Instant::now() - TTL - Duration::from_secs(1);
         store.put(key, SessionEntry { messages_summary: "old".to_string(), last_provider_model: ("groq".to_string(), "llama-3".to_string()) }, stale_time);
 
-        let mut messages = vec![ChatMessage { role: "user", content: "continue".to_string() }];
+        let mut messages = vec![ChatMessage { role: "user".to_string(), content: "continue".to_string() }];
         let injected = inject(&store, key, "cerebras", "llama-3", &mut messages);
         assert!(!injected, "expired entry should be treated as absent");
     }
