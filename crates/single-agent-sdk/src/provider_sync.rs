@@ -50,7 +50,16 @@ fn sync_opencode(home: &Path, provider: &ProviderSpec, dry_run: bool) -> Result<
     let path = home.join(".config").join("opencode").join("opencode.jsonc");
     let updated = formats::opencode::apply_provider(&path, provider)?;
     let rendered = serde_json::to_string_pretty(&updated)?;
-    write_result(&provider.name, "opencode", &path, &rendered, dry_run)
+    let mut result = write_result(&provider.name, "opencode", &path, &rendered, dry_run)?;
+    let key = formats::opencode::opencode_provider_key(&path, &provider.name);
+    if key != provider.name {
+        result.detail = format!(
+            "{} — written as `{key}` (not `{}`) so opencode doesn't merge that provider's \
+             full models.dev catalog; use `opencode -m {key}/<id>`",
+            result.detail, provider.name
+        );
+    }
+    Ok(result)
 }
 
 fn sync_claude(home: &Path, env_var_name: &str, value: &str, dry_run: bool) -> Result<ProviderSyncResult> {

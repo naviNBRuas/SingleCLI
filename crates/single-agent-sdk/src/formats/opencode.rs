@@ -184,6 +184,56 @@ pub fn apply_lsp(path: &Path, servers: &[LspServerSpec]) -> Result<Value> {
 /// environment at runtime, which SingleCLI populates separately via
 /// `single_core::provider_keys::resolve_env_for_agent`. This function
 /// never sees or needs the actual secret value.
+/// Well-known models.dev registry providers that back an OpenAI-compatible
+/// API — used only when opencode's own registry cache isn't on disk yet.
+/// Not exhaustive (models.dev has 200+ entries); the cache read below is
+/// the real check.
+const KNOWN_REGISTRY_PROVIDERS: &[&str] = &[
+    "nvidia", "openrouter", "mistral", "cerebras", "groq", "deepinfra", "togetherai",
+    "fireworks-ai", "nebius", "chutes", "perplexity", "xai", "openai", "anthropic",
+    "google", "cohere", "baseten", "novita-ai", "hyperbolic", "siliconflow", "venice",
+    "requesty", "nano-gpt", "huggingface", "azure",
+];
+
+/// The key to write a custom provider under in `opencode.jsonc`.
+///
+/// opencode merges every configured provider's models with **models.dev's
+/// registry catalog** (cached at `~/.cache/opencode/models.json`). So a
+/// provider written under a key that *is* a models.dev provider — `nvidia`,
+/// `openrouter`, … — gets that provider's entire registry catalog (100+
+/// entries, including EOL'd models) merged on top of the one or two models
+/// SingleCLI actually curated, and opencode's "auto" selection can then
+/// pick a dead model. Writing it under `single-<name>` instead (SingleCLI's
+/// existing pool namespace, which isn't in models.dev) leaves only the
+/// declared models. `--output-format`/`autoload` do not prevent the merge —
+/// verified against opencode 1.18.29.
+pub fn opencode_provider_key(config_path: &Path, provider_name: &str) -> String {
+    if provider_name.starts_with("single-") {
+        return provider_name.to_string(); // already namespaced
+    }
+    let collides = registry_provider_names(config_path)
+        .map(|names| names.iter().any(|n| n == provider_name))
+        .unwrap_or_else(|| KNOWN_REGISTRY_PROVIDERS.contains(&provider_name));
+    if collides {
+        format!("single-{provider_name}")
+    } else {
+        provider_name.to_string()
+    }
+}
+
+/// Top-level keys of opencode's models.dev registry cache
+/// (`<home>/.cache/opencode/models.json`), derived from the
+/// `.../.config/opencode/opencode.jsonc` path. `None` if the cache isn't
+/// present or can't be parsed.
+fn registry_provider_names(config_path: &Path) -> Option<Vec<String>> {
+    // opencode.jsonc -> opencode -> .config -> <home>
+    let home = config_path.parent()?.parent()?.parent()?;
+    let cache = home.join(".cache").join("opencode").join("models.json");
+    let text = std::fs::read_to_string(cache).ok()?;
+    let value: Value = serde_json::from_str(&text).ok()?;
+    Some(value.as_object()?.keys().cloned().collect())
+}
+
 pub fn apply_provider(path: &Path, provider: &ProviderSpec) -> Result<Value> {
     let mut root: Value = if path.exists() {
         let text = std::fs::read_to_string(path)
@@ -220,7 +270,14 @@ pub fn apply_provider(path: &Path, provider: &ProviderSpec) -> Result<Value> {
     entry.insert("name".into(), Value::String(provider.name.clone()));
     entry.insert("options".into(), Value::Object(options));
     entry.insert("models".into(), Value::Object(models));
-    provider_obj.insert(provider.name.clone(), Value::Object(entry));
+
+    let key = opencode_provider_key(path, &provider.name);
+    if key != provider.name {
+        // clear a stale bare-name block a previous sync wrote — it was
+        // pulling the whole models.dev catalog for this provider.
+        provider_obj.remove(&provider.name);
+    }
+    provider_obj.insert(key, Value::Object(entry));
 
     Ok(root)
 }
@@ -401,5 +458,52 @@ mod tests {
         };
         let result = apply_provider(&path, &provider).unwrap();
         assert!(result["provider"]["testprov"]["options"].get("baseURL").is_none());
+    }
+
+    #[test]
+    fn opencode_provider_key_aliases_registry_collisions_via_the_denylist() {
+        let p = Path::new("/nonexistent/.config/opencode/opencode.jsonc");
+        assert_eq!(opencode_provider_key(p, "nvidia"), "single-nvidia");
+        assert_eq!(opencode_provider_key(p, "openrouter"), "single-openrouter");
+        assert_eq!(opencode_provider_key(p, "my-private-llm"), "my-private-llm");
+        assert_eq!(opencode_provider_key(p, "single-nvidia"), "single-nvidia"); // already namespaced
+    }
+
+    #[test]
+    fn opencode_provider_key_reads_opencodes_registry_cache_when_present() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join(".config").join("opencode").join("opencode.jsonc");
+        std::fs::create_dir_all(cfg.parent().unwrap()).unwrap();
+        let cache = dir.path().join(".cache").join("opencode").join("models.json");
+        std::fs::create_dir_all(cache.parent().unwrap()).unwrap();
+        std::fs::write(&cache, r#"{ "acmecloud": { "models": {} }, "widgetsai": {} }"#).unwrap();
+
+        // in the cache -> aliased; not in the cache and not in the
+        // denylist -> left alone (even though the denylist would catch it).
+        assert_eq!(opencode_provider_key(&cfg, "acmecloud"), "single-acmecloud");
+        assert_eq!(opencode_provider_key(&cfg, "widgetsai"), "single-widgetsai");
+        assert_eq!(opencode_provider_key(&cfg, "nvidia"), "nvidia"); // cache is authoritative here
+    }
+
+    #[test]
+    fn apply_provider_writes_under_the_alias_and_removes_a_stale_bare_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("opencode.jsonc");
+        // a prior sync left a polluting bare `nvidia` block.
+        std::fs::write(&path, r#"{ "provider": { "nvidia": { "npm": "@ai-sdk/openai-compatible", "models": { "stale/model": {} } } } }"#).unwrap();
+        let provider = ProviderSpec {
+            name: "nvidia".into(),
+            env_var_name: "NVIDIA_API_KEY".into(),
+            secret_name: "provider:nvidia".into(),
+            base_url: Some("https://integrate.api.nvidia.com/v1".into()),
+            models: vec![single_protocol::ModelSpec { id: "deepseek-ai/deepseek-v4-flash-0731".into(), name: "DeepSeek V4 Flash".into() }],
+        };
+        let result = apply_provider(&path, &provider).unwrap();
+        assert!(result["provider"].get("nvidia").is_none(), "stale bare key must be removed");
+        let block = &result["provider"]["single-nvidia"];
+        assert_eq!(block["name"], "nvidia");
+        assert_eq!(block["options"]["baseURL"], "https://integrate.api.nvidia.com/v1");
+        assert!(block["models"].get("deepseek-ai/deepseek-v4-flash-0731").is_some());
+        assert!(block["models"].get("stale/model").is_none());
     }
 }
