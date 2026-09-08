@@ -1732,9 +1732,13 @@ fn dispatch(
             let g = crate::coordinator::goal::get(&conn, &goal_id)?
                 .ok_or_else(|| anyhow::anyhow!("no such goal: {goal_id}"))?;
             // `budget=N` raises the dispatch cap and re-opens a blocked goal;
-            // anything else is recorded as an amendment note.
+            // `capacity-budget=N` (E28 spec §8) raises this goal's
+            // `max_capacity_waits_per_goal` override; anything else is
+            // recorded as an amendment note.
             if let Some(n) = text.strip_prefix("budget=").and_then(|s| s.trim().parse::<u32>().ok()) {
                 crate::coordinator::goal::raise_dispatch_cap(&conn, &goal_id, n)?;
+            } else if let Some(n) = text.strip_prefix("capacity-budget=").and_then(|s| s.trim().parse::<u32>().ok()) {
+                crate::coordinator::goal::raise_capacity_budget(&conn, &goal_id, n)?;
             } else {
                 crate::coordinator::events::append(
                     &conn,
@@ -1797,6 +1801,7 @@ fn dispatch(
                 running_goals: pick(crate::coordinator::graph::GoalStatus::Running),
                 queued_goals: pick(crate::coordinator::graph::GoalStatus::Queued),
                 blocked_goals: pick(crate::coordinator::graph::GoalStatus::Blocked),
+                waiting_goals: pick(crate::coordinator::graph::GoalStatus::WaitingOnCapacity),
                 pool,
                 max_parallel: cfg.max_parallel,
             }))
@@ -1943,6 +1948,8 @@ fn goal_summary(g: &crate::coordinator::goal::Goal) -> single_protocol::GoalSumm
         dispatches: g.dispatches,
         max_dispatches: g.max_dispatches,
         created_at: g.created_at.clone(),
+        capacity_reason: g.capacity_reason.clone(),
+        capacity_eta: g.earliest_retry_at_ms.and_then(chrono::DateTime::from_timestamp_millis).map(|d| d.to_rfc3339()),
     }
 }
 

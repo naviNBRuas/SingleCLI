@@ -806,6 +806,14 @@ pub struct GoalSummary {
     pub dispatches: u32,
     pub max_dispatches: u32,
     pub created_at: String,
+    /// E28 spec §8: set only when `status == "waiting_on_capacity"` —
+    /// which providers/pools are spent, for the `coordinator status` line.
+    #[serde(default)]
+    pub capacity_reason: Option<String>,
+    /// E28 spec §8: RFC3339 ETA for when the earliest-recovering
+    /// candidate's cooldown lifts, set alongside `capacity_reason`.
+    #[serde(default)]
+    pub capacity_eta: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -869,6 +877,10 @@ pub struct CoordinatorSnapshot {
     pub running_goals: Vec<GoalSummary>,
     pub queued_goals: Vec<GoalSummary>,
     pub blocked_goals: Vec<GoalSummary>,
+    /// E28 spec §8: goals in `waiting_on_capacity` — every routable
+    /// candidate exhausted/benched, holding until a stamped retry time.
+    #[serde(default)]
+    pub waiting_goals: Vec<GoalSummary>,
     pub pool: Vec<PoolAgentStatus>,
     pub max_parallel: usize,
 }

@@ -850,6 +850,13 @@ fn print_data(data: ResponseData) {
             show("running", &s.running_goals);
             show("queued", &s.queued_goals);
             show("blocked", &s.blocked_goals);
+            // E28 spec §8: "waiting: goal_x — nvidia+groq pools spent, resumes ~14:03Z"
+            // `capacity_reason` already includes the "resumes ~<eta>" tail
+            // (goal::set_waiting_on_capacity's caller composes it once).
+            for g in &s.waiting_goals {
+                let reason = g.capacity_reason.as_deref().unwrap_or("capacity exhausted, ETA unknown");
+                println!("  waiting: {} — {reason}", g.id);
+            }
             println!("  pool:");
             for p in s.pool {
                 let cap = p.cap.map(|c| c.to_string()).unwrap_or_else(|| "-".into());

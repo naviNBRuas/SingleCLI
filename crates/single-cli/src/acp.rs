@@ -380,6 +380,10 @@ impl Acp {
             "node_failed" => self.chunk(acp_sid, &format!("✗ {body}\n"), "agent_message_chunk"),
             "supervisor" => self.chunk(acp_sid, &format!("[supervisor] {body}\n"), "agent_thought_chunk"),
             "budget" => self.chunk(acp_sid, &format!("[budget] {body}\n"), "agent_thought_chunk"),
+            // E28 spec §8: a live hold instead of a stall — "all providers
+            // rate-limited; holding, resumes ~14:03Z".
+            "capacity_wait" => self.chunk(acp_sid, &format!("all providers rate-limited; holding — {body}\n"), "agent_thought_chunk"),
+            "capacity_resumed" => self.chunk(acp_sid, &format!("capacity freed, resuming — {body}\n"), "agent_thought_chunk"),
             "integrated" => {} // the summary is emitted from the terminal GoalStatus
             "plan" => {}       // the plan is emitted from GoalStatus node list
             _ => {}
