@@ -519,11 +519,11 @@ Landing before Part E (self-heal) per spec §16's stated order — resume logic 
 - **infra** sub-steps: stale-socket removal (`runtime.sock` exists, no live PID → remove); zombie-row reconcile (extends `reconcile_orphaned_tasks` + `coordinator::scheduler::reconcile` — call both from the pass, not just startup); corrupt-config repair (every `*.toml` under `~/.config/single/` parse-checked; restore from newest `*.bak-*` sibling, else move-aside + regenerate defaults); DB integrity (`PRAGMA integrity_check`; on failure restore from newest `single.db.bak-*`, add the periodic backup writer here too, or last-resort schema rebuild + re-seed, logged loudly); dead-agent-binary re-detection (re-run `augmented_path` + `cached_discover`; missing-but-previously-detected → mark + queue reinstall if `agent` category enabled); cooldown probe job lives here too (§6.2, started from `single-runtimed`).
 - `single self-heal log` / `single self-heal disable <category>` CLI.
 
-- [ ] **Step 1:** failing tests (tempdir): `stale_socket_removed_when_no_live_pid`, `corrupt_toml_restored_from_newest_backup`, `corrupt_toml_with_no_backup_moved_aside_and_regenerated`, `db_integrity_check_failure_restores_from_backup`, `every_action_writes_a_self_heal_events_row`, `disabled_category_is_a_noop`, `one_substep_panic_does_not_wedge_the_rest` (inject a panicking sub-step, assert others still ran).
-- [ ] **Step 2:** FAIL.
-- [ ] **Step 3:** implement.
-- [ ] **Step 4:** PASS; `cargo build -p single-runtime -j2`.
-- [ ] **Step 5: Commit:** `feat: self-heal pass — infra category (sockets, zombies, config, db integrity, agent binaries)`
+- [x] **Step 1:** failing tests (tempdir): `stale_socket_removed_when_no_live_pid`, `corrupt_toml_restored_from_newest_backup`, `corrupt_toml_with_no_backup_moved_aside_and_regenerated`, `db_integrity_check_failure_restores_from_backup`, `every_action_writes_a_self_heal_events_row`, `disabled_category_is_a_noop`, `one_substep_panic_does_not_wedge_the_rest` (inject a panicking sub-step, assert others still ran).
+- [x] **Step 2:** FAIL.
+- [x] **Step 3:** implement.
+- [x] **Step 4:** PASS; `cargo build -p single-runtime -j2`.
+- [x] **Step 5: Commit:** `feat: self-heal pass — infra category (sockets, zombies, config, db integrity, agent binaries)`
 
 ---
 
@@ -538,11 +538,11 @@ Landing before Part E (self-heal) per spec §16's stated order — resume logic 
 - `coordinator.toml` sanity: absurd values (`max_parallel = 0`, `max_goal_minutes < 1`) reset to defaults, logged.
 - Hard rule enforced in code, not just docs: the pass never deletes a goal, never force-kills a running node, never edits a config a human touched in the last hour (needs a `last_human_edit_at` marker — CHECK if `amend`/config-write paths already stamp one; if not, add it as part of this task, called out in the commit).
 
-- [ ] **Step 1:** failing tests: `long_blocked_capacity_goal_is_reevaluated_and_reticked_when_cleared`, `reeval_bounded_by_max_auto_reevals`, `repeated_same_node_same_agent_failure_reroutes_to_next_agent`, `routing_toml_drift_comments_out_undetected_agent_after_24h`, `coordinator_toml_absurd_values_reset_to_defaults`, `human_edited_config_in_last_hour_is_never_touched`, `pass_never_deletes_a_goal_or_force_kills_a_running_node`.
-- [ ] **Step 2:** FAIL.
-- [ ] **Step 3:** implement (add the `last_human_edit_at` marker if missing).
-- [ ] **Step 4:** PASS; `cargo build -p single-runtime -j2`.
-- [ ] **Step 5: Commit:** `feat: self-heal pass — coordinator self-correction category`
+- [x] **Step 1:** failing tests: `long_blocked_capacity_goal_is_reevaluated_and_reticked_when_cleared`, `reeval_bounded_by_max_auto_reevals`, `repeated_same_node_same_agent_failure_reroutes_to_next_agent`, `routing_toml_drift_comments_out_undetected_agent_after_24h`, `coordinator_toml_absurd_values_reset_to_defaults`, `human_edited_config_in_last_hour_is_never_touched`, `pass_never_deletes_a_goal_or_force_kills_a_running_node`.
+- [x] **Step 2:** FAIL.
+- [x] **Step 3:** implement (add the `last_human_edit_at` marker if missing).
+- [x] **Step 4:** PASS; `cargo build -p single-runtime -j2`.
+- [x] **Step 5: Commit:** `feat: self-heal pass — coordinator self-correction category`
 
 ---
 
@@ -557,11 +557,11 @@ Landing before Part E (self-heal) per spec §16's stated order — resume logic 
 - every install timeout-bounded, `-j` respectful, one-agent-at-a-time (reuse the E27 doctor 4-permit gate — CHECK its exact name, likely `DoctorGuard`/a semaphore in `doctor.rs`). `SINGLE_SELF_HEAL_AGENT_INSTALL=0` disables the whole category via env (in addition to the toml toggle).
 - `single doctor` prints whether this category is on (safety note per spec: agent installs shell package managers, most likely category to want off on a shared box).
 
-- [ ] **Step 1:** failing tests: `missing_agent_triggers_reinstall_when_enabled`, `auth_repair_never_attempts_interactive_login_only_blocks_and_routes_away`, `stale_pool_key_auto_disabled_after_grace_period`, `env_var_disables_agent_install_category`, `installs_are_serialized_one_at_a_time` (reuse/extend the doctor-guard test pattern), `doctor_reports_agent_category_on_off_state`.
-- [ ] **Step 2:** FAIL.
-- [ ] **Step 3:** implement.
-- [ ] **Step 4:** PASS; `cargo build -p single-runtime -p single-cli -j2`.
-- [ ] **Step 5: Commit:** `feat: self-heal pass — agent self-install/repair category`
+- [x] **Step 1:** failing tests: `missing_agent_triggers_reinstall_when_enabled`, `auth_repair_never_attempts_interactive_login_only_blocks_and_routes_away`, `stale_pool_key_auto_disabled_after_grace_period`, `env_var_disables_agent_install_category`, `installs_are_serialized_one_at_a_time` (reuse/extend the doctor-guard test pattern), `doctor_reports_agent_category_on_off_state`.
+- [x] **Step 2:** FAIL.
+- [x] **Step 3:** implement.
+- [x] **Step 4:** PASS; `cargo build -p single-runtime -p single-cli -j2`.
+- [x] **Step 5: Commit:** `feat: self-heal pass — agent self-install/repair category`
 
 ---
 
@@ -571,11 +571,11 @@ Landing before Part E (self-heal) per spec §16's stated order — resume logic 
 
 **Interfaces:** on daemon start (after `resume_interrupted`), every `self_heal_interval_secs` (own thread/timer, same "one pass at a time" guard pattern as the E27 tick timer), and on `single doctor --fix`.
 
-- [ ] **Step 1:** failing test: a fake-clock/tempdir integration test asserting `run_pass` fires on the interval and is a no-op re-entrant call while one is in flight.
-- [ ] **Step 2:** FAIL.
-- [ ] **Step 3:** implement.
-- [ ] **Step 4:** PASS; `cargo build -p single-runtime -p single-cli -j2`.
-- [ ] **Step 5: Commit:** `feat: run self-heal pass on daemon start, timer, and doctor --fix`
+- [x] **Step 1:** failing test: a fake-clock/tempdir integration test asserting `run_pass` fires on the interval and is a no-op re-entrant call while one is in flight.
+- [x] **Step 2:** FAIL.
+- [x] **Step 3:** implement.
+- [x] **Step 4:** PASS; `cargo build -p single-runtime -p single-cli -j2`.
+- [x] **Step 5: Commit:** `feat: run self-heal pass on daemon start, timer, and doctor --fix`
 
 ---
 
