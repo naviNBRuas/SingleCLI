@@ -125,8 +125,13 @@ pub fn parse_integration(v: &Value) -> Result<IntegrationOutcome> {
 
 /// turns validated planner specs into a persisted-shape `TaskGraph`,
 /// assigning each node an agent via routing and the worktree default for
-/// its kind.
-pub fn specs_to_graph(specs: &[PlanNodeSpec], table: &RoutingTable, health: &PoolHealth) -> TaskGraph {
+/// its kind. `prefer_pool` only affects work-node routing here (spec §7:
+/// `single-pool` slots in as "any coordinator node's agent") — it never
+/// touches which agent runs the planner/supervisor/integrator role
+/// itself (`plan`/`supervise`/`integrate` below keep their own
+/// `select_agent` call unchanged; those need reliable structured JSON
+/// output a free-tier pool model isn't confirmed to deliver).
+pub fn specs_to_graph(specs: &[PlanNodeSpec], table: &RoutingTable, health: &PoolHealth, prefer_pool: bool) -> TaskGraph {
     let nodes = specs
         .iter()
         .map(|s| Node {
@@ -134,7 +139,7 @@ pub fn specs_to_graph(specs: &[PlanNodeSpec], table: &RoutingTable, health: &Poo
             desc: s.desc.clone(),
             kind: s.kind,
             effort: s.effort,
-            agent: routing::select_agent(table, s.kind, s.effort, health).unwrap_or_default(),
+            agent: routing::select_agent_with_prefer_pool(table, s.kind, s.effort, health, prefer_pool).unwrap_or_default(),
             depends_on: s.depends_on.clone(),
             status: NodeStatus::Pending,
             task_id: None,
@@ -196,6 +201,7 @@ depends_on lists the ids that must finish first ([] = independent).\n\
 Give code subtasks non-overlapping file scopes so they can run in parallel.\n";
 
 /// planner: goal text (+ cwd context) → validated `TaskGraph`.
+#[allow(clippy::too_many_arguments)]
 pub fn plan(
     conn: &Connection,
     ctx: &Context,
@@ -203,6 +209,7 @@ pub fn plan(
     cwd: &std::path::Path,
     table: &RoutingTable,
     health: &PoolHealth,
+    prefer_pool: bool,
 ) -> Result<TaskGraph> {
     let agent = routing::select_agent(table, NodeKind::Plan, Effort::Standard, health)
         .context("no agent available for planning")?;
@@ -218,7 +225,7 @@ pub fn plan(
     let prompt = format!("{PLAN_INSTRUCTION}{ctx_blurb}\n\nGOAL:\n{goal_text}\n");
     let v = run_role(conn, ctx, &agent, cwd, &prompt)?;
     let specs = parse_plan(&v)?;
-    Ok(specs_to_graph(&specs, table, health))
+    Ok(specs_to_graph(&specs, table, health, prefer_pool))
 }
 
 /// supervisor: current graph + a failing node's output → a list of patch
@@ -372,7 +379,7 @@ mod tests {
             PlanNodeSpec { id: "s2".into(), desc: "y".into(), kind: NodeKind::Review, effort: Effort::Standard, depends_on: vec!["s1".into()] },
         ];
         let health = PoolHealth::default();
-        let g = specs_to_graph(&specs, &RoutingTable::default(), &health);
+        let g = specs_to_graph(&specs, &RoutingTable::default(), &health, false);
         assert!(g.find("s1").unwrap().worktree); // code -> worktree
         assert!(!g.find("s2").unwrap().worktree); // review -> no worktree
         assert!(!g.find("s1").unwrap().agent.is_empty());

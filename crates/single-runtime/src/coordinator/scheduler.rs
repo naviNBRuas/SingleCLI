@@ -183,7 +183,7 @@ pub fn tick_pure(
         }
         let agent = match node.agent.is_empty() {
             false => node.agent.clone(),
-            true => match routing::select_agent(table, node.kind, node.effort, health) {
+            true => match routing::select_agent_with_prefer_pool(table, node.kind, node.effort, health, cfg.prefer_pool) {
                 Some(a) => a,
                 None => continue, // no agent available for this kind right now
             },
@@ -829,6 +829,34 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    #[test]
+    fn tick_pure_honors_coordinator_config_prefer_pool() {
+        // Regression test: `select_agent_with_prefer_pool` existed but
+        // `tick_pure` (the actual per-tick admission path) called plain
+        // `select_agent` and silently ignored `cfg.prefer_pool` --
+        // confirmed live against the real daemon before this fix (a
+        // `prefer_pool = true` goal still routed to `opencode`).
+        let mut n = node("s1", &[], Effort::Standard, "");
+        n.kind = NodeKind::Code;
+        let g = TaskGraph { nodes: vec![n] };
+        // opencode detected+authed; single-pool needs no such entry (PoolHealth::usable's carve-out).
+        let health = PoolHealth { detected_authed: ["opencode".to_string()].into_iter().collect(), rate_limited: Default::default() };
+
+        let cfg_off = cfg(6);
+        let a = tick_pure(&g, &cfg_off, &caps(0, &[], &[]), &budget_ok(), &RoutingTable::default(), &health);
+        match &a[0] {
+            TickAction::Dispatch { agent, .. } => assert_eq!(agent, "opencode"),
+            other => panic!("expected Dispatch to opencode, got {other:?}"),
+        }
+
+        let cfg_on = CoordinatorConfig { prefer_pool: true, ..cfg(6) };
+        let a2 = tick_pure(&g, &cfg_on, &caps(0, &[], &[]), &budget_ok(), &RoutingTable::default(), &health);
+        match &a2[0] {
+            TickAction::Dispatch { agent, .. } => assert_eq!(agent, "single-pool"),
+            other => panic!("expected Dispatch to single-pool, got {other:?}"),
+        }
     }
 
     #[test]

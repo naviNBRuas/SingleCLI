@@ -65,7 +65,7 @@ pub fn plan_goal(
     if !goal::load_graph(conn, goal_id)?.nodes.is_empty() {
         return Ok(());
     }
-    let (_cfg, table, health) = load_env(ctx, conn);
+    let (cfg, table, health) = load_env(ctx, conn);
     let cwd = session::get(conn, &goal.session_id)?
         .map(|s| s.cwd)
         .unwrap_or_else(|| ".".into());
@@ -73,7 +73,7 @@ pub fn plan_goal(
     let graph = if goal.mode == graph::GoalMode::Careful {
         let pinned = agent
             .map(str::to_string)
-            .or_else(|| routing::select_agent(&table, graph::NodeKind::Code, graph::Effort::Standard, &health))
+            .or_else(|| routing::select_agent_with_prefer_pool(&table, graph::NodeKind::Code, graph::Effort::Standard, &health, cfg.prefer_pool))
             .unwrap_or_default();
         let node = graph::Node {
             id: "s1".into(),
@@ -92,7 +92,7 @@ pub fn plan_goal(
         events::append(conn, &goal.session_id, Some(goal_id), events::EventKind::Plan, "careful mode: 1 iterating node")?;
         graph::TaskGraph { nodes: vec![node] }
     } else {
-        let mut g = brain::plan(conn, ctx, &goal.text, std::path::Path::new(&cwd), &table, &health)?;
+        let mut g = brain::plan(conn, ctx, &goal.text, std::path::Path::new(&cwd), &table, &health, cfg.prefer_pool)?;
         if let Some(a) = agent {
             for n in &mut g.nodes {
                 n.agent = a.to_string();
