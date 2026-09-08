@@ -523,6 +523,19 @@ fn dispatch(
             allow_fallback,
             usage_json,
         } => {
+            // redaction scope matches `pool_agent::run_as_task`'s own
+            // `session_key` (= `account`), so `resolve()` at the dispatch
+            // boundary finds the same aliases this scan just wrote.
+            let description = {
+                let conn = task_db(ctx)?;
+                single_core::redact::ensure_schema(&conn)?;
+                let redact_store = single_core::redact::RedactStore { conn: &conn };
+                let secret_store = single_core::secrets::SecretTool;
+                let session_id = account.as_deref().unwrap_or("no-session");
+                let (redacted, _aliases) =
+                    single_core::redact::scan_and_replace(&redact_store, &secret_store, session_id, &description)?;
+                redacted
+            };
             if background {
                 let record = crate::task::run_background(
                     ctx,
@@ -1712,6 +1725,10 @@ fn dispatch(
         }
         Request::GoalSubmit { session_id, text, mode, max_dispatches, max_minutes, agent } => {
             let mut conn = coordinator_db(ctx)?;
+            single_core::redact::ensure_schema(&conn)?;
+            let redact_store = single_core::redact::RedactStore { conn: &conn };
+            let secret_store = single_core::secrets::SecretTool;
+            let (text, _aliases) = single_core::redact::scan_and_replace(&redact_store, &secret_store, &session_id, &text)?;
             let gmode = mode
                 .as_deref()
                 .and_then(|m| crate::coordinator::graph::GoalMode::parse(m).ok())
