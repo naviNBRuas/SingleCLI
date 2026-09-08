@@ -29,7 +29,13 @@ enum Command {
     /// Show runtime status.
     Status,
     /// Diagnose installed agent CLIs, config, and runtime health.
-    Doctor,
+    Doctor {
+        /// Also runs a self-heal pass (E28 spec §9) across every enabled
+        /// category before reporting — stale sockets, corrupt config, db
+        /// integrity, coordinator self-correction, agent install/repair.
+        #[arg(long)]
+        fix: bool,
+    },
     /// Install missing agent CLIs and sync SingleCLI's config into all of them.
     Setup {
         /// Actually run install commands and write config. Without this, only shows the plan.
@@ -1520,8 +1526,8 @@ fn main() -> anyhow::Result<()> {
                 println!("single-runtimed restarted");
             }
         },
-        Command::Doctor => {
-            let response = client::send(&socket_path, Request::Doctor)?;
+        Command::Doctor { fix } => {
+            let response = client::send(&socket_path, Request::Doctor { fix })?;
             render::print(response, false);
         }
         Command::Setup { yes, json } => {

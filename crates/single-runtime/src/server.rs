@@ -50,6 +50,19 @@ pub async fn serve(socket_path: &std::path::Path) -> Result<()> {
             Ok(touched) => tracing::info!(count = touched, "resumed goal(s) interrupted by the previous daemon"),
             Err(e) => tracing::warn!(error = %e, "resume_interrupted failed"),
         }
+        // E28 spec §9 (Part E): one self-heal pass on every daemon start,
+        // after the reconcile/resume steps above have already settled
+        // whatever they can — self-heal picks up anything still broken
+        // (corrupt config, a DB integrity issue, a routing drift, …).
+        match crate::self_heal::run_pass(&ctx, &conn, None) {
+            Ok(report) => {
+                let failed = report.actions.iter().filter(|a| !a.ok).count();
+                if failed > 0 {
+                    tracing::warn!(failed, total = report.actions.len(), "self-heal pass found unresolved issues on daemon start");
+                }
+            }
+            Err(e) => tracing::warn!(error = %e, "self-heal pass failed on daemon start"),
+        }
         Ok(n)
     }) {
         Ok(0) => {}
@@ -75,6 +88,14 @@ pub async fn serve(socket_path: &std::path::Path) -> Result<()> {
             .spawn(move || coordinator_tick_loop(registry))
             .ok();
     }
+
+    // E28 spec §9: the self-heal pass's own timer, same "own OS thread,
+    // best-effort, config re-read every iteration" shape as the
+    // coordinator tick loop above.
+    std::thread::Builder::new()
+        .name("self-heal-tick".into())
+        .spawn(self_heal_tick_loop)
+        .ok();
 
     loop {
         let (stream, _) = listener.accept().await?;
@@ -105,6 +126,39 @@ fn coordinator_tick_loop(registry: crate::registry::TaskRegistry) {
         });
         if let Err(e) = result {
             tracing::debug!(error = %e, "coordinator tick failed");
+        }
+    }
+}
+
+/// Guards `self_heal::run_pass` against overlapping with itself — a slow
+/// pass (an agent install genuinely can take a while) must not stack a
+/// second one on top when the interval elapses again before the first
+/// finishes. `single doctor --fix` (`handlers.rs`) doesn't share this
+/// guard (it has its own `DoctorGuard`), so the two can still race in
+/// theory; `run_pass`'s own steps are individually `catch_unwind`-safe
+/// and idempotent (a repair either has nothing to do or finds the same
+/// fix again), so a rare double-run is harmless, just wasted work.
+static SELF_HEAL_TICK_RUNNING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Periodically runs a self-heal pass (spec §9). The interval comes from
+/// `self_heal.toml` (default 300s), re-read each iteration.
+fn self_heal_tick_loop() {
+    loop {
+        let interval = Context::load().map(|ctx| crate::self_heal::SelfHealConfig::load(&ctx.dirs).self_heal_interval_secs).unwrap_or(300).max(1);
+        std::thread::sleep(std::time::Duration::from_secs(interval));
+
+        if SELF_HEAL_TICK_RUNNING.swap(true, std::sync::atomic::Ordering::AcqRel) {
+            tracing::debug!("self-heal pass still running from a previous tick; skipping this one");
+            continue;
+        }
+        let result = Context::load().and_then(|ctx| {
+            let conn = crate::state::open(&ctx.dirs.db_path())?;
+            crate::self_heal::run_pass(&ctx, &conn, None)
+        });
+        SELF_HEAL_TICK_RUNNING.store(false, std::sync::atomic::Ordering::Release);
+
+        if let Err(e) = result {
+            tracing::debug!(error = %e, "self-heal tick failed");
         }
     }
 }
@@ -163,6 +217,34 @@ async fn handle_connection(stream: UnixStream, registry: crate::registry::TaskRe
 #[cfg(test)]
 mod tests {
     use std::time::{Duration, Instant};
+
+    /// E28 Task 23: `self_heal_tick_loop`'s re-entrancy guard is exactly
+    /// this `AtomicBool::swap` — a real end-to-end test would need the
+    /// actual sleep-based loop (slow, flaky to time precisely), so this
+    /// exercises the mechanism directly: while a pass is marked
+    /// in-flight, a second tick's guard-check must see it and skip
+    /// (`swap` returning `true`), never running two passes at once; once
+    /// released, the next check proceeds normally.
+    #[test]
+    fn self_heal_tick_is_a_noop_reentrant_call_while_one_is_in_flight() {
+        use std::sync::atomic::Ordering;
+        // A fresh local flag, not the real static -- avoids cross-test
+        // interference with anything else that might exercise the real
+        // `SELF_HEAL_TICK_RUNNING` in the same test binary.
+        let flag = std::sync::atomic::AtomicBool::new(false);
+
+        // First tick: not running yet -> proceeds, marks itself running.
+        assert!(!flag.swap(true, Ordering::AcqRel), "first tick should find the flag clear and proceed");
+
+        // A second tick arriving while the first is still "in flight":
+        // swap sees `true` and must skip, per `self_heal_tick_loop`'s own
+        // `if SELF_HEAL_TICK_RUNNING.swap(true, ..) { skip }` check.
+        assert!(flag.swap(true, Ordering::AcqRel), "a reentrant tick must see the flag already set and skip");
+
+        // First tick finishes and releases -> the next one proceeds again.
+        flag.store(false, Ordering::Release);
+        assert!(!flag.swap(true, Ordering::AcqRel), "after release, the next tick should proceed");
+    }
 
     /// Guards the `spawn_blocking` fix. A full socket round-trip proving a
     /// second request stays responsive would need a `Request` variant

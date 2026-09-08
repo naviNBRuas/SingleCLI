@@ -14,7 +14,13 @@ use std::collections::BTreeMap;
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum Request {
     Status,
-    Doctor,
+    /// `fix: true` (`single doctor --fix`) also runs a self-heal pass
+    /// (E28 spec §9) across every enabled category before returning the
+    /// report, instead of only reporting findings.
+    Doctor {
+        #[serde(default)]
+        fix: bool,
+    },
     /// Asks a running `single-runtimed` to exit after acknowledging this
     /// request — see `single-cli::daemon::stop_running`. Exists because the
     /// daemon inherits its environment (notably `$PATH`) once at spawn

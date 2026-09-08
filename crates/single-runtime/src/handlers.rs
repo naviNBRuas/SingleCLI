@@ -68,12 +68,19 @@ fn dispatch(
 ) -> anyhow::Result<ResponseData> {
     match request {
         Request::Status => Ok(ResponseData::Status(status(ctx))),
-        Request::Doctor => {
+        Request::Doctor { fix } => {
             // `doctor` probes every registered agent; two runs at once
             // double the subprocess fan-out on the daemon for no benefit
             // (confirmed cause of a compounded RSS spike). Serve the first,
             // reject the rest until it finishes.
             let _guard = DoctorGuard::acquire()?;
+            if fix {
+                let conn = coordinator_db(ctx)?;
+                crate::pool::ensure_pool_schema(&conn)?;
+                if let Err(e) = crate::self_heal::run_pass(ctx, &conn, None) {
+                    tracing::warn!(error = %e, "doctor --fix: self-heal pass failed");
+                }
+            }
             Ok(ResponseData::Doctor(doctor::run(ctx)))
         }
         // Actual process exit happens in server.rs after this response is
