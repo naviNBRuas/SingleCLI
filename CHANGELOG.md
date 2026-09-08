@@ -9,6 +9,83 @@ patch version (`0.0.x`) carries fixes, per [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## [Unreleased]
 
+## [0.11.0]
+
+The free-provider pool (E28): SingleCLI absorbs the ~40-provider free-LLM
+landscape as a native, adaptive routing/quota engine sitting on top of the
+E27 Coordinator — plus the self-healing and self-resuming autonomy that
+makes long-running goals survive rate limits, daemon restarts, and its
+own broken state without a human babysitting them.
+
+- Added: `single_core::free_pool` — the vendored ~40-provider catalog
+  (base URLs, auth shapes, published limits, per-provider quirks), plus
+  `single provider list-free/add-free/sync-pool/key-status`. Five
+  region-walled/payment-gated providers (`sail`, `modelscope`, `qianfan`,
+  `volcengine`, `xfyun`) are registered but `enabled = false` by default
+  with a clear reason string.
+- Added: `single-runtime::pool` — the adaptive engine: a 4-D quota ledger
+  (RPM/RPD/TPM/TPD, UTC-midnight reset, in-flight leases), a cooldown
+  ladder with provenance (heuristic/authoritative/credit/tier) and an
+  operator ceiling, provider-wide shared-pool gating, a Thompson-sampled
+  bandit (reliability/speed/intelligence, 5 strategies), a degraded-mode
+  health state machine, and a memory-only context-handoff on model
+  switch.
+- Added: `pool::client` — OpenAI-compat dispatch (33 providers) plus 10
+  native wires (Gemini, Cohere, Cloudflare, Zhipu with domestic→global
+  host reprobe, AI Horde's queue submit/poll, Sail, and a shared
+  OpenAI-compat-subclass wire for ModelScope/Pollinations/ElectronHub/
+  Experiential), with a retry budget, hedge-abort (never a health
+  signal), and prose tool-call rescue.
+- Added: `single-pool` — a native pooled agent usable as
+  `single task run --agent single-pool` or as any coordinator node's
+  agent; never shells a binary, dispatches straight to a provider's HTTP
+  API via the ledger/bandit/cooldown engine.
+- Added: auto-continue — a new `waiting_on_capacity` goal state. When
+  every routable candidate is exhausted, a goal holds (with a reason and
+  ETA, shown in `coordinator status` and streamed live over `single acp`)
+  instead of failing, and resumes on its own once a cooldown lifts —
+  bounded by a resume budget (`single goal amend <id> capacity-budget=N`
+  raises it per goal).
+- Added: self-resuming sessions — `coordinator::resume_interrupted()` on
+  daemon start re-plans an interrupted `Planning` goal and un-pauses a
+  cleanly-stopped one (`single daemon stop` now marks active goals
+  `Paused` rather than leaving them `Running`, distinguishing a clean
+  stop from a crash); `single goal resume <id>` for a manual re-tick;
+  `single acp`'s `session/load` re-attaches its event stream for an
+  in-flight goal.
+- Added: self-heal (`single-runtime::self_heal`) — a three-category pass
+  (`infra`/`coordinator`/`agent`, independently toggleable in
+  `self_heal.toml`) on daemon start, its own timer, and `single doctor
+  --fix`: stale-socket/zombie-row cleanup, corrupt-`*.toml` repair from
+  backup, DB integrity check + periodic backup, undetected-agent pruning
+  from `routing.toml`, absurd-`coordinator.toml`-value reset, long-stalled
+  `Blocked`-goal re-evaluation, same-agent-repeated-failure rerouting,
+  missing-agent auto-install, headless auth-repair reporting, and
+  stale-pool-key auto-disable — every action logged to
+  `self_heal_events`, every human edit within the last hour left alone.
+- Added: 6 new agent config adapters (`cline`, `continue`, `roo`, `mimo`,
+  `atomcode`, `deepseek-harness`) — MCP config sync only this iteration;
+  not yet in the built-in agent registry (see Known limitations).
+- Version: 0.10.0 → 0.11.0 (new agent, new subsystem, new subcommands).
+
+**Known limitations / deferred to a follow-up:**
+- The 6 new Part G adapters' config-file formats are best-effort (no live
+  install of cline/continue/roo/mimo/atomcode/dsh was available to
+  confirm against a real installed instance) and they carry no
+  `AgentDefinition` registry entry yet — `single install-integrations`
+  won't auto-discover them until a verified bootstrap-install command is
+  added.
+- The native wires' endpoints for ModelScope/Pollinations/ElectronHub/
+  Experiential are likewise best-effort (Google/Cohere/Cloudflare
+  confirmed against public docs; Zhipu/AI Horde matched against
+  freellmapi's studied notes).
+- No live signed provider-catalog feed, no per-provider real model
+  lists (each provider is treated as one nominal model this iteration),
+  no bandit community-seeded priors (`Beta(1,1)` uniform prior), no
+  media-model routing (text-only `single-pool` this iteration).
+- The §6.2 cooldown probe job is a simplified first cut (no persisted
+  per-key next-probe scheduling / backoff-doubling yet).
+
 ## [0.10.0]
 
 The Coordinator subsystem (`docs/queue/E27-singlecli-followups/02-coordinator-redesign.md`).
