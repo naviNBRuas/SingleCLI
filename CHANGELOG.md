@@ -9,6 +9,16 @@ patch version (`0.0.x`) carries fixes, per [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## [Unreleased]
 
+## [0.13.1]
+
+- Fixed: `single_core::redact`'s generic high-entropy detector was
+  flagging ordinary filesystem paths and filenames (e.g.
+  `docs/queue/E03-vault-evolution/HANDOFF.md`) as secret-shaped,
+  corrupting real prompt text before any agent saw it — found live
+  submitting real orchestration work. Tokens containing `/` or ending in
+  a short common file extension are now excluded from that check; a real
+  secret sitting next to path-shaped text is still caught.
+
 ## [0.13.0]
 
 - Added: `single secret promote-alias <alias> <name>` — moves a live

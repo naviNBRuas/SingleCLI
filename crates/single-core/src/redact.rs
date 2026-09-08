@@ -418,6 +418,16 @@ fn find_high_entropy_tokens(text: &str) -> Vec<(usize, usize)> {
         if is_uuid(word) || is_pure_lowercase_hex(word) {
             continue;
         }
+        // Live-verification finding (E29 follow-up): a filesystem path or
+        // filename, tokenized whole by whitespace-splitting, easily clears
+        // the entropy bar on mixed letters/digits/hyphens alone — and
+        // paths are ubiquitous in real prompts ("docs/queue/E03-vault-
+        // evolution/HANDOFF.md"). A real secret essentially never appears
+        // as a path segment or bare filename, so excluding both is a
+        // large false-positive reduction for near-zero miss risk.
+        if word.contains('/') || looks_like_a_filename(word) {
+            continue;
+        }
         let has_digit = word.chars().any(|c| c.is_ascii_digit());
         let has_alpha = word.chars().any(|c| c.is_ascii_alphabetic());
         if !has_digit || !has_alpha {
@@ -428,6 +438,18 @@ fn find_high_entropy_tokens(text: &str) -> Vec<(usize, usize)> {
         }
     }
     out
+}
+
+/// True if `word` ends in a short, common file-extension shape
+/// (`.md`, `.rs`, `.toml`, `.yaml`, ...) — a `.` followed by 1-5 lowercase
+/// letters and nothing else.
+fn looks_like_a_filename(word: &str) -> bool {
+    match word.rsplit_once('.') {
+        Some((stem, ext)) => {
+            !stem.is_empty() && (1..=5).contains(&ext.len()) && ext.chars().all(|c| c.is_ascii_lowercase())
+        }
+        None => false,
+    }
 }
 
 fn whitespace_tokens(text: &str) -> Vec<(usize, &str)> {
@@ -560,6 +582,38 @@ mod tests {
         let (out, aliases) = scan_and_replace(&store, &keychain, "sess1", "DATABASE_PASSWORD=Xk9mQ2vL8pR4nT7wZ1cF6").unwrap();
         assert_eq!(aliases.len(), 1);
         assert!(!out.contains("Xk9mQ2vL8pR4nT7wZ1cF6"));
+    }
+
+    /// Live-verification regression (E29 follow-up): a real orchestration
+    /// prompt referencing repo paths and filenames must survive intact —
+    /// found live when submitting real work to the coordinator, where
+    /// `docs/queue/E03-vault-evolution/HANDOFF.md`-shaped text was
+    /// getting redacted, corrupting the goal text every downstream agent
+    /// (not just single-pool) relies on to find the right files.
+    #[test]
+    fn does_not_redact_repo_paths_or_filenames() {
+        let (conn, keychain) = setup();
+        let store = RedactStore { conn: &conn };
+        let text = "Read docs/queue/E00-platform-foundation/HANDOFF.md and \
+                     nbr-workspace/docs/queue/E03-vault-evolution/01-vault-core-ontology.md, \
+                     then update EXECUTION-PLAN.md when done.";
+        let (out, aliases) = scan_and_replace(&store, &keychain, "sess1", text).unwrap();
+        assert_eq!(aliases.len(), 0, "{out}");
+        assert_eq!(out, text);
+    }
+
+    /// A real secret sitting right next to path-shaped text must still be
+    /// caught — the path guard must not blanket-suppress detection.
+    #[test]
+    fn still_redacts_a_real_secret_next_to_repo_paths() {
+        let (conn, keychain) = setup();
+        let store = RedactStore { conn: &conn };
+        let text = "see docs/queue/E04-sterling-agent-platform/HANDOFF.md — \
+                     also use key sk-abcdEFGH1234567890abcdEFGH1234567890abcd for the API call";
+        let (out, aliases) = scan_and_replace(&store, &keychain, "sess1", text).unwrap();
+        assert_eq!(aliases.len(), 1);
+        assert!(out.contains("docs/queue/E04-sterling-agent-platform/HANDOFF.md"));
+        assert!(!out.contains("sk-abcdEFGH"));
     }
 
     #[test]
