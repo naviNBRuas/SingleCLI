@@ -1,7 +1,13 @@
+pub mod atomcode;
 pub mod claude;
 pub mod claude_settings;
+pub mod cline;
 pub mod codex;
+pub mod continue_cfg;
 pub mod copilot;
 pub mod cursor;
+pub mod dsh;
 pub mod goose;
+pub mod mimo;
 pub mod opencode;
+pub mod roo;

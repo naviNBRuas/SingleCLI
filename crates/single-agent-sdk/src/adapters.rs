@@ -1272,6 +1272,22 @@ fn unsupported_write(agent: &str, home: &Path, detail: &str) -> IntegrationWrite
     }
 }
 
+/// Same as `write_with_backup`, but also chmods the written file `0600`
+/// — E28 spec §11's explicit requirement for the six new Part G adapters
+/// (`cline`/`continue`/`roo`/`mimo`/`atomcode`/`dsh`), unlike the
+/// pre-existing adapters' plain `write_with_backup` (none of them chmod
+/// today — kept that way here rather than silently changing 15+
+/// established adapters' file permissions as a side effect of this task).
+#[cfg(unix)]
+fn write_with_backup_0600(agent: &str, path: &Path, rendered: &str, dry_run: bool) -> Result<IntegrationWrite> {
+    let result = write_with_backup(agent, path, rendered, dry_run)?;
+    if result.applied {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(result)
+}
+
 fn write_with_backup(agent: &str, path: &Path, rendered: &str, dry_run: bool) -> Result<IntegrationWrite> {
     if dry_run {
         return Ok(IntegrationWrite {
@@ -1324,6 +1340,129 @@ impl AgentAdapter for PoolAdapter {
     }
 }
 
+// -- E28 Part G additions: config-only adapters (spec §11). None of these
+// six were installed/probed live on the reference machine (unlike the
+// confirmed adapters above), so `run_prompt` is left at the trait's
+// default `unsupported` rather than guessing an invocation syntax that
+// could silently do the wrong thing — only `configure_mcp`/`remove_mcp`
+// are implemented, each backed by an `ASSUMED, not confirmed` format
+// module (see `formats::{cline,continue_cfg,roo,mimo,atomcode,dsh}`).
+pub struct ClineAdapter;
+pub struct RooAdapter;
+pub struct MimoAdapter;
+pub struct AtomcodeAdapter;
+pub struct DshAdapter;
+
+impl AgentAdapter for ClineAdapter {
+    fn command(&self) -> &str {
+        "cline"
+    }
+    fn configure_mcp(&self, home: &Path, servers: &[McpServerSpec], dry_run: bool) -> Result<IntegrationWrite> {
+        let path = home.join(".config").join("Code").join("User").join("settings.json");
+        let updated = formats::cline::apply(&path, servers)?;
+        write_with_backup_0600("cline", &path, &serde_json::to_string_pretty(&updated)?, dry_run)
+    }
+    fn remove_mcp(&self, home: &Path, names: &[String], dry_run: bool) -> Result<IntegrationWrite> {
+        let path = home.join(".config").join("Code").join("User").join("settings.json");
+        match formats::cline::remove(&path, names)? {
+            Some(updated) => write_with_backup_0600("cline", &path, &serde_json::to_string_pretty(&updated)?, dry_run),
+            None => Ok(unsupported_write("cline", home, "no VS Code settings.json present; nothing to remove")),
+        }
+    }
+}
+
+impl AgentAdapter for RooAdapter {
+    fn command(&self) -> &str {
+        "roo"
+    }
+    fn configure_mcp(&self, home: &Path, servers: &[McpServerSpec], dry_run: bool) -> Result<IntegrationWrite> {
+        let path = home.join(".config").join("roo").join("config.json");
+        let updated = formats::roo::apply(&path, servers)?;
+        write_with_backup_0600("roo", &path, &serde_json::to_string_pretty(&updated)?, dry_run)
+    }
+    fn remove_mcp(&self, home: &Path, names: &[String], dry_run: bool) -> Result<IntegrationWrite> {
+        let path = home.join(".config").join("roo").join("config.json");
+        match formats::roo::remove(&path, names)? {
+            Some(updated) => write_with_backup_0600("roo", &path, &serde_json::to_string_pretty(&updated)?, dry_run),
+            None => Ok(unsupported_write("roo", home, "no config.json present; nothing to remove")),
+        }
+    }
+}
+
+impl AgentAdapter for MimoAdapter {
+    fn command(&self) -> &str {
+        "mimo"
+    }
+    fn configure_mcp(&self, home: &Path, servers: &[McpServerSpec], dry_run: bool) -> Result<IntegrationWrite> {
+        let path = home.join(".config").join("mimocode").join("config.json");
+        let updated = formats::mimo::apply(&path, servers)?;
+        write_with_backup_0600("mimo", &path, &serde_json::to_string_pretty(&updated)?, dry_run)
+    }
+    fn remove_mcp(&self, home: &Path, names: &[String], dry_run: bool) -> Result<IntegrationWrite> {
+        let path = home.join(".config").join("mimocode").join("config.json");
+        match formats::mimo::remove(&path, names)? {
+            Some(updated) => write_with_backup_0600("mimo", &path, &serde_json::to_string_pretty(&updated)?, dry_run),
+            None => Ok(unsupported_write("mimo", home, "no config.json present; nothing to remove")),
+        }
+    }
+}
+
+impl AgentAdapter for AtomcodeAdapter {
+    fn command(&self) -> &str {
+        "atomcode"
+    }
+    fn configure_mcp(&self, home: &Path, servers: &[McpServerSpec], dry_run: bool) -> Result<IntegrationWrite> {
+        let path = home.join(".atomcode").join("config.toml");
+        let updated = formats::atomcode::apply(&path, servers)?;
+        write_with_backup_0600("atomcode", &path, &toml::to_string_pretty(&updated)?, dry_run)
+    }
+    fn remove_mcp(&self, home: &Path, names: &[String], dry_run: bool) -> Result<IntegrationWrite> {
+        let path = home.join(".atomcode").join("config.toml");
+        match formats::atomcode::remove(&path, names)? {
+            Some(updated) => write_with_backup_0600("atomcode", &path, &toml::to_string_pretty(&updated)?, dry_run),
+            None => Ok(unsupported_write("atomcode", home, "no config.toml present; nothing to remove")),
+        }
+    }
+}
+
+impl AgentAdapter for DshAdapter {
+    fn command(&self) -> &str {
+        "dsh"
+    }
+    fn configure_mcp(&self, home: &Path, servers: &[McpServerSpec], dry_run: bool) -> Result<IntegrationWrite> {
+        let path = home.join(".dsh").join("settings.yaml");
+        let updated = formats::dsh::apply(&path, servers)?;
+        write_with_backup_0600("dsh", &path, &serde_yaml::to_string(&updated)?, dry_run)
+    }
+    fn remove_mcp(&self, home: &Path, names: &[String], dry_run: bool) -> Result<IntegrationWrite> {
+        let path = home.join(".dsh").join("settings.yaml");
+        match formats::dsh::remove(&path, names)? {
+            Some(updated) => write_with_backup_0600("dsh", &path, &serde_yaml::to_string(&updated)?, dry_run),
+            None => Ok(unsupported_write("dsh", home, "no settings.yaml present; nothing to remove")),
+        }
+    }
+}
+
+pub struct ContinueAdapter;
+
+impl AgentAdapter for ContinueAdapter {
+    fn command(&self) -> &str {
+        "continue"
+    }
+    fn configure_mcp(&self, home: &Path, servers: &[McpServerSpec], dry_run: bool) -> Result<IntegrationWrite> {
+        let path = home.join(".continue").join("config.json");
+        let updated = formats::continue_cfg::apply(&path, servers)?;
+        write_with_backup_0600("continue", &path, &serde_json::to_string_pretty(&updated)?, dry_run)
+    }
+    fn remove_mcp(&self, home: &Path, names: &[String], dry_run: bool) -> Result<IntegrationWrite> {
+        let path = home.join(".continue").join("config.json");
+        match formats::continue_cfg::remove(&path, names)? {
+            Some(updated) => write_with_backup_0600("continue", &path, &serde_json::to_string_pretty(&updated)?, dry_run),
+            None => Ok(unsupported_write("continue", home, "no config.json present; nothing to remove")),
+        }
+    }
+}
+
 pub fn for_agent(name: &str) -> Option<Box<dyn AgentAdapter>> {
     match name {
         "claude" => Some(Box::new(ClaudeAdapter)),
@@ -1348,6 +1487,12 @@ pub fn for_agent(name: &str) -> Option<Box<dyn AgentAdapter>> {
         "mistral-vibe" => Some(Box::new(MistralVibeAdapter)),
         "single-agent" => Some(Box::new(SingleAgentAdapter)),
         "single-pool" => Some(Box::new(PoolAdapter)),
+        "cline" => Some(Box::new(ClineAdapter)),
+        "continue" => Some(Box::new(ContinueAdapter)),
+        "roo" => Some(Box::new(RooAdapter)),
+        "mimo" => Some(Box::new(MimoAdapter)),
+        "atomcode" => Some(Box::new(AtomcodeAdapter)),
+        "dsh" => Some(Box::new(DshAdapter)),
         _ => None,
     }
 }
@@ -1419,6 +1564,122 @@ mod tests {
         let result = adapter.configure_mcp(home, &sample_servers(), true).unwrap();
         assert!(!result.applied);
         assert!(!home.join(".claude.json").exists());
+    }
+
+    // -- E28 Part G: the six new config-only adapters. Each test seeds an
+    // existing config with an unrelated key, runs configure_mcp, and
+    // checks the unrelated key survived, a timestamped backup was
+    // written, and the file landed at 0600 -- exactly Task 24's plan
+    // Step 1 ask ("<agent>_configure_preserves_unrelated_keys_and_writes_
+    // backup_and_0600").
+
+    #[cfg(unix)]
+    fn assert_0600(path: &std::path::Path) {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "expected 0600, got {mode:o}");
+    }
+
+    #[test]
+    fn cline_configure_preserves_unrelated_keys_and_writes_backup_and_0600() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        let path = home.join(".config").join("Code").join("User").join("settings.json");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, r#"{"editor.fontSize": 14}"#).unwrap();
+
+        let result = ClineAdapter.configure_mcp(home, &sample_servers(), false).unwrap();
+        assert!(result.applied);
+        assert!(result.backup_path.is_some());
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert!(written.contains("editor.fontSize"));
+        assert!(written.contains("cline.mcpServers"));
+        assert_0600(&path);
+    }
+
+    #[test]
+    fn continue_configure_preserves_unrelated_keys_and_writes_backup_and_0600() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        let path = home.join(".continue").join("config.json");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, r#"{"models": ["gpt-4"]}"#).unwrap();
+
+        let result = ContinueAdapter.configure_mcp(home, &sample_servers(), false).unwrap();
+        assert!(result.applied);
+        assert!(result.backup_path.is_some());
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert!(written.contains("gpt-4"));
+        assert!(written.contains("mcpServers"));
+        assert_0600(&path);
+    }
+
+    #[test]
+    fn roo_configure_preserves_unrelated_keys_and_writes_backup_and_0600() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        let path = home.join(".config").join("roo").join("config.json");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, r#"{"theme": "dark"}"#).unwrap();
+
+        let result = RooAdapter.configure_mcp(home, &sample_servers(), false).unwrap();
+        assert!(result.applied);
+        assert!(result.backup_path.is_some());
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert!(written.contains("dark"));
+        assert!(written.contains("mcpServers"));
+        assert_0600(&path);
+    }
+
+    #[test]
+    fn mimo_configure_preserves_unrelated_keys_and_writes_backup_and_0600() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        let path = home.join(".config").join("mimocode").join("config.json");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, r#"{"provider": "openai"}"#).unwrap();
+
+        let result = MimoAdapter.configure_mcp(home, &sample_servers(), false).unwrap();
+        assert!(result.applied);
+        assert!(result.backup_path.is_some());
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert!(written.contains("openai"));
+        assert!(written.contains("mcpServers"));
+        assert_0600(&path);
+    }
+
+    #[test]
+    fn atomcode_configure_preserves_unrelated_keys_and_writes_backup_and_0600() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        let path = home.join(".atomcode").join("config.toml");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "default_provider = \"freellmapi\"\n").unwrap();
+
+        let result = AtomcodeAdapter.configure_mcp(home, &sample_servers(), false).unwrap();
+        assert!(result.applied);
+        assert!(result.backup_path.is_some());
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert!(written.contains("freellmapi"));
+        assert!(written.contains("mcp_servers"));
+        assert_0600(&path);
+    }
+
+    #[test]
+    fn dsh_configure_preserves_unrelated_keys_and_writes_backup_and_0600() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        let path = home.join(".dsh").join("settings.yaml");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "llm-pi-ai:\n  providers: []\n").unwrap();
+
+        let result = DshAdapter.configure_mcp(home, &sample_servers(), false).unwrap();
+        assert!(result.applied);
+        assert!(result.backup_path.is_some());
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert!(written.contains("llm-pi-ai"));
+        assert!(written.contains("mcp_servers"));
+        assert_0600(&path);
     }
 
     #[test]
