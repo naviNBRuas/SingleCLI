@@ -200,6 +200,18 @@ pub fn run_as_task(conn: &Connection, prompt: &str, timeout: Duration, session_k
     let strategy = bandit::Strategy::Balanced;
     let started = Instant::now();
 
+    // E29: any `{{REDACTED:<session>:N}}` alias `redact::scan_and_replace`
+    // left in the prompt gets resolved back to its real value here, at
+    // the last possible moment before the outbound HTTP call — the agent
+    // upstream of this point never sees the plaintext, only the wire
+    // request built from `resolved_prompt` does. A prompt with no alias
+    // tokens passes through unchanged; a dangling unresolvable alias is a
+    // real error (see `redact::resolve`'s doc comment).
+    single_core::redact::ensure_schema(conn)?;
+    let redact_store = single_core::redact::RedactStore { conn };
+    let secret_store = single_core::secrets::SecretTool;
+    let resolved_prompt = single_core::redact::resolve(&redact_store, &secret_store, prompt)?;
+
     let resolve_secret = |platform: &str, key_id: &str| -> Option<String> {
         use single_core::secrets::{SecretStore, SecretTool};
         let name = single_core::pool_keys::secret_name(platform, key_id);
@@ -209,7 +221,7 @@ pub fn run_as_task(conn: &Connection, prompt: &str, timeout: Duration, session_k
 
     let _ = timeout; // per-attempt timeouts come from each provider's own FreeProvider.timeout; an overall task timeout is enforced by task::execute's existing timeout machinery around this call.
 
-    let outcome = execute(conn, prompt, &strategy, &candidates, session_key, handoff_store, &resolve_secret, &dispatch)?;
+    let outcome = execute(conn, &resolved_prompt, &strategy, &candidates, session_key, handoff_store, &resolve_secret, &dispatch)?;
 
     Ok(match outcome {
         PoolAgentOutcome::Ok(resp) => RunOutcome {
@@ -279,6 +291,67 @@ mod tests {
 
     fn always_resolve(_p: &str, _k: &str) -> Option<String> {
         Some("secret".to_string())
+    }
+
+    /// E29: proves the exact sequence `run_as_task` performs — resolve
+    /// then dispatch — never lets a `{{REDACTED:...}}` alias reach the
+    /// wire, and does deliver the real secret value to whatever the
+    /// dispatch closure represents (a real provider's HTTP call in
+    /// production). `run_as_task` itself hardcodes the real network
+    /// dispatcher, so this replicates its resolve-then-execute sequence
+    /// with an injectable one instead of adding network I/O to a unit test.
+    #[test]
+    fn resolve_then_dispatch_never_leaks_the_alias_and_delivers_the_real_secret() {
+        let conn = test_conn();
+        single_core::redact::ensure_schema(&conn).unwrap();
+        seed_key(&conn, "groq", "default");
+
+        struct FakeKeychain(RefCell<std::collections::HashMap<String, String>>);
+        impl single_core::secrets::SecretStore for FakeKeychain {
+            fn set(&self, name: &str, value: &str) -> anyhow::Result<()> {
+                self.0.borrow_mut().insert(name.to_string(), value.to_string());
+                Ok(())
+            }
+            fn get(&self, name: &str) -> anyhow::Result<Option<String>> {
+                Ok(self.0.borrow().get(name).cloned())
+            }
+            fn delete(&self, name: &str) -> anyhow::Result<bool> {
+                Ok(self.0.borrow_mut().remove(name).is_some())
+            }
+            fn list(&self) -> anyhow::Result<Vec<String>> {
+                Ok(self.0.borrow().keys().cloned().collect())
+            }
+        }
+        let keychain = FakeKeychain(RefCell::new(std::collections::HashMap::new()));
+
+        let redact_store = single_core::redact::RedactStore { conn: &conn };
+        let (redacted_prompt, aliases) = single_core::redact::scan_and_replace(
+            &redact_store,
+            &keychain,
+            "sess1",
+            "use sk-abcdEFGH1234567890abcdEFGH1234567890abcd to call it",
+        )
+        .unwrap();
+        assert_eq!(aliases.len(), 1);
+        assert!(redacted_prompt.contains("{{REDACTED:sess1:"));
+
+        // exactly what `run_as_task` does before calling `execute`.
+        let resolved_prompt = single_core::redact::resolve(&redact_store, &keychain, &redacted_prompt).unwrap();
+        assert!(resolved_prompt.contains("sk-abcdEFGH1234567890abcdEFGH1234567890abcd"));
+        assert!(!resolved_prompt.contains("REDACTED"));
+
+        let seen: RefCell<String> = RefCell::new(String::new());
+        let handoff_store = HandoffStore::default();
+        let dispatch = |req: &PoolRequest, _: &FreeProvider, _: &str| {
+            *seen.borrow_mut() = req.messages[0].content.clone();
+            Ok(PoolResponse { content: "ok".to_string(), tool_calls: vec![], finish_reason: None, truncated: false, usage_tokens: None, ttfb_ms: None, latency_ms: 1 })
+        };
+        let candidates = vec![("groq".to_string(), "groq".to_string(), "default".to_string())];
+        let _ = execute(&conn, &resolved_prompt, &bandit::Strategy::Balanced, &candidates, None, &handoff_store, &always_resolve, &dispatch).unwrap();
+
+        let dispatched = seen.borrow().clone();
+        assert!(dispatched.contains("sk-abcdEFGH1234567890abcdEFGH1234567890abcd"));
+        assert!(!dispatched.contains("REDACTED"));
     }
 
     #[test]

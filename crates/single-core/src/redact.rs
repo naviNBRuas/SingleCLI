@@ -110,9 +110,20 @@ fn decrypt(passphrase: &SecretString, ciphertext: &[u8]) -> Result<String> {
 static ALIAS_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 /// Scans `text` for secret-shaped substrings, replaces each with a fresh
-/// `{{REDACTED_N}}` alias, and stores the encrypted real value scoped to
-/// `session_id` with a 3-hour TTL. Over-redacts on ambiguity: a false
-/// positive costs an un-redact, a miss costs a leaked key.
+/// `{{REDACTED:<session_id>:N}}` alias, and stores the encrypted real
+/// value scoped to `session_id` with a 3-hour TTL. Over-redacts on
+/// ambiguity: a false positive costs an un-redact, a miss costs a leaked
+/// key.
+///
+/// The session id is embedded in the alias token itself (rather than
+/// threaded separately into `resolve`) because a redacted goal's text
+/// gets rewritten and re-dispatched through several layers — coordinator
+/// planning, node prompts, `single-pool`'s dispatch — that don't all
+/// carry an explicit session parameter today. `resolve` derives its scope
+/// purely by reading the token, so it works uniformly at every dispatch
+/// path with no additional plumbing, and a lookup still requires the
+/// exact `(session_id, alias)` row this call created — embedding the id
+/// does not by itself grant access to another session's secret.
 pub fn scan_and_replace(
     store: &RedactStore,
     secret_store: &dyn single_secret_store::SecretStoreObj,
@@ -133,7 +144,7 @@ pub fn scan_and_replace(
     for (start, end) in spans {
         out.push_str(&text[last..start]);
         let n = ALIAS_COUNTER.fetch_add(1, Ordering::SeqCst);
-        let alias = format!("{{{{REDACTED_{n}}}}}");
+        let alias = format!("{{{{REDACTED:{session_id}:{n}}}}}");
         let real_value = &text[start..end];
         let ciphertext = encrypt(&passphrase, real_value)?;
         let expires_at = now + TTL_MS;
@@ -150,12 +161,13 @@ pub fn scan_and_replace(
     Ok((out, aliases))
 }
 
-/// Replaces every `{{REDACTED_N}}` alias in `text` with its decrypted
-/// real value, scoped to `session_id`. Text with no alias tokens passes
-/// through unchanged (not an error). An alias token present but
-/// unresolvable (wrong session, expired, unknown) is a real error — a
-/// dangling alias reaching a provider is worse than a failed dispatch.
-pub fn resolve(store: &RedactStore, secret_store: &dyn single_secret_store::SecretStoreObj, session_id: &str, text: &str) -> Result<String> {
+/// Replaces every `{{REDACTED:<session_id>:N}}` alias in `text` with its
+/// decrypted real value — the session scope is read from the token
+/// itself (see `scan_and_replace`'s doc comment). Text with no alias
+/// tokens passes through unchanged (not an error). An alias token present
+/// but unresolvable (expired or unknown) is a real error — a dangling
+/// alias reaching a provider is worse than a failed dispatch.
+pub fn resolve(store: &RedactStore, secret_store: &dyn single_secret_store::SecretStoreObj, text: &str) -> Result<String> {
     let alias_re_matches = find_alias_tokens(text);
     if alias_re_matches.is_empty() {
         return Ok(text.to_string());
@@ -165,7 +177,7 @@ pub fn resolve(store: &RedactStore, secret_store: &dyn single_secret_store::Secr
     let passphrase = master_passphrase(secret_store)?;
     let mut out = String::with_capacity(text.len());
     let mut last = 0usize;
-    for (start, end, alias) in alias_re_matches {
+    for (start, end, session_id, alias) in alias_re_matches {
         out.push_str(&text[last..start]);
         let ciphertext: Vec<u8> = store
             .conn
@@ -175,7 +187,7 @@ pub fn resolve(store: &RedactStore, secret_store: &dyn single_secret_store::Secr
                 |r| r.get(0),
             )
             .optional()?
-            .ok_or_else(|| anyhow!("unresolvable alias {alias} (expired or unknown for this session)"))?;
+            .ok_or_else(|| anyhow!("unresolvable alias {alias} (expired or unknown)"))?;
         let real_value = decrypt(&passphrase, &ciphertext)?;
         out.push_str(&real_value);
         last = end;
@@ -190,23 +202,28 @@ pub fn sweep_expired(conn: &Connection) -> Result<usize> {
     Ok(conn.execute("DELETE FROM redact_aliases WHERE expires_at < ?1", params![now_ms()])?)
 }
 
-fn find_alias_tokens(text: &str) -> Vec<(usize, usize, String)> {
+/// Parses `{{REDACTED:<session_id>:<n>}}` tokens out of `text`, returning
+/// `(start, end, session_id, full_alias_token)` for each, left to right.
+fn find_alias_tokens(text: &str) -> Vec<(usize, usize, String, String)> {
     let mut out = Vec::new();
-    let bytes = text.as_bytes();
     let mut i = 0;
-    while let Some(rel) = text[i..].find("{{REDACTED_") {
+    while let Some(rel) = text[i..].find("{{REDACTED:") {
         let start = i + rel;
         if let Some(rel_end) = text[start..].find("}}") {
             let end = start + rel_end + 2;
             let candidate = &text[start..end];
-            if candidate[2..candidate.len() - 2].strip_prefix("REDACTED_").map(|n| n.chars().all(|c| c.is_ascii_digit())).unwrap_or(false) {
-                out.push((start, end, candidate.to_string()));
+            let inner = &candidate[2..candidate.len() - 2]; // strip {{ }}
+            if let Some(rest) = inner.strip_prefix("REDACTED:") {
+                if let Some((session_id, n)) = rest.rsplit_once(':') {
+                    if !session_id.is_empty() && !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()) {
+                        out.push((start, end, session_id.to_string(), candidate.to_string()));
+                    }
+                }
             }
             i = end;
         } else {
             break;
         }
-        let _ = bytes;
     }
     out
 }
@@ -530,7 +547,7 @@ mod tests {
         let store = RedactStore { conn: &conn };
         let (redacted, aliases) =
             scan_and_replace(&store, &keychain, "sess1", "key sk-abcdEFGH1234567890abcdEFGH1234567890abcd here").unwrap();
-        let resolved = resolve(&store, &keychain, "sess1", &redacted).unwrap();
+        let resolved = resolve(&store, &keychain, &redacted).unwrap();
         assert!(resolved.contains("sk-abcdEFGH1234567890abcdEFGH1234567890abcd"));
         assert_eq!(aliases.len(), 1);
     }
@@ -539,7 +556,7 @@ mod tests {
     fn resolve_passes_through_text_with_no_alias_tokens() {
         let (conn, keychain) = setup();
         let store = RedactStore { conn: &conn };
-        let resolved = resolve(&store, &keychain, "sess1", "nothing redacted here").unwrap();
+        let resolved = resolve(&store, &keychain, "nothing redacted here").unwrap();
         assert_eq!(resolved, "nothing redacted here");
     }
 
@@ -547,25 +564,28 @@ mod tests {
     fn resolve_errors_on_expired_or_unknown_alias() {
         let (conn, keychain) = setup();
         let store = RedactStore { conn: &conn };
-        let err = resolve(&store, &keychain, "sess1", "value is {{REDACTED_99}}").unwrap_err();
-        assert!(err.to_string().contains("REDACTED_99"));
+        let err = resolve(&store, &keychain, "value is {{REDACTED:sess1:99}}").unwrap_err();
+        assert!(err.to_string().contains("REDACTED"));
     }
 
     #[test]
-    fn aliases_are_session_scoped() {
+    fn resolve_finds_the_session_embedded_in_the_alias_token() {
         let (conn, keychain) = setup();
         let store = RedactStore { conn: &conn };
+        // written under sess1's scope; resolve() has no external session
+        // parameter to get wrong — it reads sess1 straight out of the
+        // token and finds exactly the row scan_and_replace created.
         let (redacted, _) =
             scan_and_replace(&store, &keychain, "sess1", "key sk-abcdEFGH1234567890abcdEFGH1234567890abcd here").unwrap();
-        let err = resolve(&store, &keychain, "sess2", &redacted).unwrap_err();
-        assert!(err.to_string().contains("REDACTED"));
+        let resolved = resolve(&store, &keychain, &redacted).unwrap();
+        assert!(resolved.contains("sk-abcdEFGH1234567890abcdEFGH1234567890abcd"));
     }
 
     #[test]
     fn sweep_expired_removes_only_past_ttl_rows() {
         let (conn, _keychain) = setup();
         conn.execute(
-            "INSERT INTO redact_aliases (session_id, alias, ciphertext, created_at, expires_at) VALUES ('s', '{{REDACTED_1}}', X'00', 0, 1)",
+            "INSERT INTO redact_aliases (session_id, alias, ciphertext, created_at, expires_at) VALUES ('s', '{{REDACTED:s:1}}', X'00', 0, 1)",
             [],
         )
         .unwrap();
