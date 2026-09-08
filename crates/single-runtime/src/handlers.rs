@@ -1757,6 +1757,10 @@ fn dispatch(
                     &format!("amendment: {text}"),
                 )?;
             }
+            // E28 spec §9.2: every real amend counts as a human touching
+            // this goal — self-heal's coordinator category checks this
+            // before auto-editing it.
+            crate::coordinator::goal::mark_human_edited(&conn, &goal_id)?;
             let _ = crate::coordinator::drive(ctx, &mut conn, registry);
             Ok(ResponseData::Empty)
         }

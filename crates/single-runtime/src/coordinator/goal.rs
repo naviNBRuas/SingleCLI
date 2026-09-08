@@ -37,6 +37,13 @@ pub struct Goal {
     /// E28 spec §8: `single goal amend <id> capacity-budget=N` override of
     /// `CoordinatorConfig::max_capacity_waits_per_goal` for this goal only.
     pub capacity_budget_override: Option<u32>,
+    /// E28 spec §9.2: last time a human touched this goal via `GoalAmend`
+    /// — self-heal's coordinator category never edits a goal touched in
+    /// the last hour.
+    pub last_human_edit_at: Option<String>,
+    /// E28 spec §9.2: how many times self-heal's coordinator category has
+    /// re-evaluated a `Blocked` goal — bounded by `max_auto_reevals_per_goal`.
+    pub auto_reevals: u32,
 }
 
 pub fn ensure_schema(conn: &Connection) -> Result<()> {
@@ -85,6 +92,12 @@ pub fn ensure_schema(conn: &Connection) -> Result<()> {
     crate::task::add_column_if_missing(conn, "goals", "capacity_waits", "INTEGER NOT NULL DEFAULT 0")?;
     crate::task::add_column_if_missing(conn, "goals", "capacity_budget_override", "INTEGER")?;
     crate::task::add_column_if_missing(conn, "graph_nodes", "earliest_retry_at_ms", "INTEGER")?;
+    // E28 spec §9.2 (self-heal coordinator category): `last_human_edit_at`
+    // is the hard-rule marker — the pass never touches a goal a human
+    // `amend`ed in the last hour; `auto_reevals` bounds how many times the
+    // pass re-evaluates one `Blocked` goal.
+    crate::task::add_column_if_missing(conn, "goals", "last_human_edit_at", "TEXT")?;
+    crate::task::add_column_if_missing(conn, "goals", "auto_reevals", "INTEGER NOT NULL DEFAULT 0")?;
     Ok(())
 }
 
@@ -148,6 +161,8 @@ fn row_to_goal(row: &rusqlite::Row) -> rusqlite::Result<Goal> {
         earliest_retry_at_ms: row.get("earliest_retry_at_ms")?,
         capacity_waits: row.get("capacity_waits")?,
         capacity_budget_override: row.get("capacity_budget_override")?,
+        last_human_edit_at: row.get("last_human_edit_at")?,
+        auto_reevals: row.get("auto_reevals")?,
     })
 }
 
@@ -222,6 +237,39 @@ pub fn resume_status(conn: &Connection, id: &str) -> Result<()> {
 /// reset just because the daemon restarted).
 pub fn clear_node_retry_stamps(conn: &Connection, goal_id: &str) -> Result<()> {
     conn.execute("UPDATE graph_nodes SET earliest_retry_at_ms = NULL WHERE goal_id = ?1", params![goal_id])?;
+    Ok(())
+}
+
+/// E28 spec §9.2: stamped whenever `GoalAmend` processes a real edit —
+/// the marker self-heal's coordinator category checks before touching
+/// this goal.
+pub fn mark_human_edited(conn: &Connection, id: &str) -> Result<()> {
+    conn.execute("UPDATE goals SET last_human_edit_at = ?2 WHERE id = ?1", params![id, now()])?;
+    Ok(())
+}
+
+/// E28 spec §9.2: the self-heal pass's own re-evaluation of a `Blocked`
+/// goal — distinct from `resume_status` (the human/`resume_interrupted`
+/// path): this one also increments `auto_reevals` so the pass can bound
+/// how many times it retries the same goal.
+pub fn reevaluate_blocked(conn: &Connection, id: &str) -> Result<u32> {
+    conn.execute(
+        "UPDATE goals SET status = 'running', blocked_reason = NULL, auto_reevals = auto_reevals + 1, updated_at = ?2 WHERE id = ?1",
+        params![id, now()],
+    )?;
+    Ok(conn.query_row("SELECT auto_reevals FROM goals WHERE id = ?1", [id], |r| r.get(0))?)
+}
+
+/// E28 spec §9.2: clears a node's pinned `agent` and resets it to
+/// `Pending` — used when a node keeps failing on the same explicitly-
+/// pinned agent, so the next tick's `select_agent` routes it fresh
+/// (walking past the known-bad agent, potentially onto `single-pool`)
+/// instead of retrying the same pin forever.
+pub fn clear_node_agent_pin(conn: &Connection, goal_id: &str, node_id: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE graph_nodes SET agent = '', status = 'pending' WHERE goal_id = ?1 AND id = ?2",
+        params![goal_id, node_id],
+    )?;
     Ok(())
 }
 
