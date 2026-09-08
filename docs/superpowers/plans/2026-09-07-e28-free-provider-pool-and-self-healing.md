@@ -587,11 +587,11 @@ Landing before Part E (self-heal) per spec §16's stated order — resume logic 
 
 **Interfaces:** one adapter each, per spec §11's table (config file path, wire, notes). Each follows the existing `AgentAdapter` pattern: structural merge, timestamped backup, `0600` perms (E27 `configure_mcp` precedent). The `single-<name>`-aliased pool providers (Part A) and `single-pool` itself become selectable models in each config. `single install-integrations` learns these 6 new targets. `goose`, `aider`, `qwen-code`, `crush`, `kilocode` (already exist) just need the pool providers synced in — verify, don't reimplement.
 
-- [ ] **Step 1:** failing tests, one per adapter: `<agent>_configure_preserves_unrelated_keys_and_writes_backup_and_0600` (structural-merge snapshot test, tempdir).
-- [ ] **Step 2:** FAIL.
-- [ ] **Step 3:** implement each of the 6.
-- [ ] **Step 4:** PASS; `cargo build -p single-agent-sdk -j2` (or wherever they land).
-- [ ] **Step 5: Commit:** `feat: agent adapters for cline, continue, roo, mimo, atomcode, deepseek-harness`
+- [x] **Step 1:** failing tests, one per adapter: `<agent>_configure_preserves_unrelated_keys_and_writes_backup_and_0600` (structural-merge snapshot test, tempdir).
+- [x] **Step 2:** FAIL.
+- [x] **Step 3:** implement each of the 6.
+- [x] **Step 4:** PASS; `cargo build -p single-agent-sdk -j2` (or wherever they land).
+- [x] **Step 5: Commit:** `feat: agent adapters for cline, continue, roo, mimo, atomcode, deepseek-harness`
 
 ---
 
