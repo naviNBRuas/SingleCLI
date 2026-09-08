@@ -420,11 +420,11 @@ Pure / in-mem SQLite, exhaustively unit-tested, no HTTP yet.
 - `coordinator.toml` gains `prefer_pool: bool` (default `false`) — when `true`, `select_agent` tries `single-pool` first for every kind unless that kind's list explicitly overrides (spec §7 last bullet).
 - `select_agent`'s existing signature (`table, kind, effort, health`) is unchanged; it just needs to treat `"single-pool"` as always-available (no `detected_authed`/`rate_limited` health check the way CLI agents get one — the pool engine has its own admission) rather than filtering it out as an undetected binary.
 
-- [ ] **Step 1:** failing tests: `select_agent_returns_single_pool_when_named_in_kind_list`, `prefer_pool_true_tries_single_pool_first_unless_kind_overrides`, `single_pool_is_never_filtered_as_undetected`.
-- [ ] **Step 2:** FAIL.
-- [ ] **Step 3:** implement.
-- [ ] **Step 4:** PASS; `cargo build -p single-runtime -j2`.
-- [ ] **Step 5: Commit:** `feat: coordinator routing recognizes single-pool as a routable agent`
+- [x] **Step 1:** failing tests: `select_agent_returns_single_pool_when_named_in_kind_list`, `prefer_pool_true_tries_single_pool_first_unless_kind_overrides`, `single_pool_is_never_filtered_as_undetected`.
+- [x] **Step 2:** FAIL.
+- [x] **Step 3:** implement.
+- [x] **Step 4:** PASS; `cargo build -p single-runtime -j2`.
+- [x] **Step 5: Commit:** `feat: coordinator routing recognizes single-pool as a routable agent`
 
 ---
 
@@ -440,16 +440,16 @@ Pure / in-mem SQLite, exhaustively unit-tested, no HTTP yet.
 - On resume: node's prompt rebuilt via `handoff::inject` (different provider/model can pick up cleanly), dependency outputs re-attached (already how E27 builds a node's dispatch options — no new plumbing, just re-triggered).
 - Events: `capacity_wait` (body = reason + ETA), `capacity_resumed`.
 
-- [ ] **Step 1:** failing tests (fake dispatcher returning `Exhausted`, per E27 Task 8's `Dispatcher` seam):
+- [x] **Step 1:** failing tests (fake dispatcher returning `Exhausted`, per E27 Task 8's `Dispatcher` seam):
   - `exhausted_dispatch_moves_node_to_pending_with_retry_stamp_and_goal_to_waiting_on_capacity`
   - `tick_skips_node_whose_retry_stamp_is_in_the_future`
   - `tick_readmits_node_once_retry_stamp_passes`
   - `resume_budget_exhaustion_moves_goal_to_blocked_with_reason`
   - `capacity_budget_amend_raises_the_per_goal_limit`
-- [ ] **Step 2:** `cargo test -p single-runtime coordinator::scheduler -- --nocapture`, expect FAIL.
-- [ ] **Step 3:** implement.
-- [ ] **Step 4:** PASS; `cargo build -p single-runtime -j2`.
-- [ ] **Step 5: Commit:** `feat: waiting_on_capacity goal state and auto-continue scheduling`
+- [x] **Step 2:** `cargo test -p single-runtime coordinator::scheduler -- --nocapture`, expect FAIL.
+- [x] **Step 3:** implement.
+- [x] **Step 4:** PASS; `cargo build -p single-runtime -j2`.
+- [x] **Step 5: Commit:** `feat: waiting_on_capacity goal state and auto-continue scheduling`
 
 ---
 
@@ -459,11 +459,11 @@ Pure / in-mem SQLite, exhaustively unit-tested, no HTTP yet.
 
 **Interfaces:** `single coordinator status` line: `waiting: goal_x — nvidia+groq pools spent, resumes ~14:03Z`. If `single acp` exists: translate `capacity_wait` events to an `agent_thought_chunk` ("all providers rate-limited; holding, resumes ~14:03Z") so the Zed panel shows a live hold rather than a stall.
 
-- [ ] **Step 1:** failing test `coordinator_status_renders_waiting_on_capacity_line_with_reason_and_eta`.
-- [ ] **Step 2:** FAIL.
-- [ ] **Step 3:** implement; CHECK whether `single acp` exists in this checkout (`ls crates/single-cli/src/acp.rs`) — if not, note in the commit body that the ACP translation is deferred to whenever `single acp` lands, per spec §8.
-- [ ] **Step 4:** PASS; `cargo build -p single-cli -j2`.
-- [ ] **Step 5: Commit:** `feat: surface waiting_on_capacity in coordinator status (and acp, if present)`
+- [x] **Step 1:** failing test `coordinator_status_renders_waiting_on_capacity_line_with_reason_and_eta`.
+- [x] **Step 2:** FAIL.
+- [x] **Step 3:** implement; CHECK whether `single acp` exists in this checkout (`ls crates/single-cli/src/acp.rs`) — if not, note in the commit body that the ACP translation is deferred to whenever `single acp` lands, per spec §8.
+- [x] **Step 4:** PASS; `cargo build -p single-cli -j2`.
+- [x] **Step 5: Commit:** `feat: surface waiting_on_capacity in coordinator status (and acp, if present)`
 
 ---
 
