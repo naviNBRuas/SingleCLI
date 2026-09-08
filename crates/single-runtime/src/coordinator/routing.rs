@@ -44,6 +44,23 @@ pub struct CoordinatorConfig {
     /// upgrading to 0.11.0 doesn't change any existing goal's routing.
     #[serde(default)]
     pub prefer_pool: bool,
+    /// E28 spec §8: per-goal cap on `capacity_waits` before a
+    /// `waiting_on_capacity` goal finally gives up to `Blocked`.
+    /// Overridable per goal via `single goal amend <id> capacity-budget=N`.
+    #[serde(default = "default_max_capacity_waits_per_goal")]
+    pub max_capacity_waits_per_goal: u32,
+    /// E28 spec §8: per-goal wall-clock cap (minutes, since the goal's
+    /// `created_at`) on how long it may spend in capacity waits before
+    /// giving up to `Blocked`, independent of `max_capacity_waits_per_goal`.
+    #[serde(default = "default_max_capacity_wait_minutes")]
+    pub max_capacity_wait_minutes: u32,
+}
+
+fn default_max_capacity_waits_per_goal() -> u32 {
+    20
+}
+fn default_max_capacity_wait_minutes() -> u32 {
+    720
 }
 
 impl Default for CoordinatorConfig {
@@ -56,6 +73,8 @@ impl Default for CoordinatorConfig {
             max_supervisor_patches: 5,
             usage_json_agents: Vec::new(),
             prefer_pool: false,
+            max_capacity_waits_per_goal: default_max_capacity_waits_per_goal(),
+            max_capacity_wait_minutes: default_max_capacity_wait_minutes(),
         }
     }
 }
