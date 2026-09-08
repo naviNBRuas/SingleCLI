@@ -29,7 +29,7 @@ pub async fn serve(socket_path: &std::path::Path) -> Result<()> {
     // sweep those orphans to `failed` before accepting connections.
     // Best-effort: a reconciliation failure must not stop the daemon.
     match Context::load().and_then(|ctx| {
-        let mut conn = crate::state::open(&ctx.dirs.db_path())?;
+        let conn = crate::state::open(&ctx.dirs.db_path())?;
         crate::task::ensure_schema(&conn)?;
         crate::state::ensure_events_schema(&conn)?;
         crate::coordinator::ensure_coordinator_schema(&conn)?;
@@ -38,30 +38,11 @@ pub async fn serve(socket_path: &std::path::Path) -> Result<()> {
         let n = crate::task::reconcile_orphaned_tasks(&conn)?;
         // spec E27.02 §4.1: a daemon just starting owns no in-flight
         // coordinator nodes either — settle interrupted ones from their
-        // backing task rows so there are no permanent zombie nodes.
+        // backing task rows so there are no permanent zombie nodes. Both
+        // of these are pure DB scans, fast and safe to run synchronously
+        // before the socket accept loop starts.
         if let Err(e) = crate::coordinator::scheduler::reconcile(&conn) {
             tracing::warn!(error = %e, "coordinator node reconciliation failed");
-        }
-        // E28 spec §10 (Part F): after the crash-oriented reconcile above,
-        // pick up what it doesn't catch — a clean-stop `Paused` goal, or a
-        // `Planning` goal whose planner call never got to write a graph.
-        match crate::coordinator::resume_interrupted(&ctx, &mut conn) {
-            Ok(0) => {}
-            Ok(touched) => tracing::info!(count = touched, "resumed goal(s) interrupted by the previous daemon"),
-            Err(e) => tracing::warn!(error = %e, "resume_interrupted failed"),
-        }
-        // E28 spec §9 (Part E): one self-heal pass on every daemon start,
-        // after the reconcile/resume steps above have already settled
-        // whatever they can — self-heal picks up anything still broken
-        // (corrupt config, a DB integrity issue, a routing drift, …).
-        match crate::self_heal::run_pass(&ctx, &conn, None) {
-            Ok(report) => {
-                let failed = report.actions.iter().filter(|a| !a.ok).count();
-                if failed > 0 {
-                    tracing::warn!(failed, total = report.actions.len(), "self-heal pass found unresolved issues on daemon start");
-                }
-            }
-            Err(e) => tracing::warn!(error = %e, "self-heal pass failed on daemon start"),
         }
         Ok(n)
     }) {
@@ -89,12 +70,40 @@ pub async fn serve(socket_path: &std::path::Path) -> Result<()> {
             .ok();
     }
 
-    // E28 spec §9: the self-heal pass's own timer, same "own OS thread,
-    // best-effort, config re-read every iteration" shape as the
-    // coordinator tick loop above.
+    // E28 spec §9/§10: `resume_interrupted` (Part F) and the self-heal
+    // pass's own timer, both spawned on their own OS thread rather than
+    // run synchronously in the startup block above. Both can block for
+    // real seconds-to-minutes: `resume_interrupted` re-runs `plan_goal`
+    // for an interrupted empty-graph goal (a genuine blocking `task::run`
+    // agent call, up to its full timeout), and `run_pass`'s `agent`
+    // category shells `which` for every registry agent it checks
+    // (`discover()`) — confirmed live to take several seconds. Either one
+    // running in the startup block would block the socket accept loop
+    // below from ever starting, making every client request (even a
+    // plain `daemon status`) hang until it finished, on every restart.
     std::thread::Builder::new()
-        .name("self-heal-tick".into())
-        .spawn(self_heal_tick_loop)
+        .name("resume-and-self-heal".into())
+        .spawn(|| {
+            if let Ok(ctx) = Context::load() {
+                if let Ok(mut conn) = crate::state::open(&ctx.dirs.db_path()) {
+                    match crate::coordinator::resume_interrupted(&ctx, &mut conn) {
+                        Ok(0) => {}
+                        Ok(touched) => tracing::info!(count = touched, "resumed goal(s) interrupted by the previous daemon"),
+                        Err(e) => tracing::warn!(error = %e, "resume_interrupted failed"),
+                    }
+                    match crate::self_heal::run_pass(&ctx, &conn, None) {
+                        Ok(report) => {
+                            let failed = report.actions.iter().filter(|a| !a.ok).count();
+                            if failed > 0 {
+                                tracing::warn!(failed, total = report.actions.len(), "self-heal pass found unresolved issues on daemon start");
+                            }
+                        }
+                        Err(e) => tracing::warn!(error = %e, "self-heal pass failed on daemon start"),
+                    }
+                }
+            }
+            self_heal_tick_loop();
+        })
         .ok();
 
     loop {
