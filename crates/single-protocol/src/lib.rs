@@ -497,11 +497,16 @@ pub enum Request {
     /// `enabled`/`disabled_reason` state. Idempotent.
     ProviderSyncPool,
     /// Per free-pool provider: keyed?, last validation, disabled reason
-    /// (region-walled/`sail`), and (until the pool engine's `ledger`/
-    /// `cooldown` modules land in Phase 2) `"n/a"` cooldown/headroom.
+    /// (region-walled/`sail`), current cooldown state, and remaining RPD
+    /// headroom (when the provider publishes an RPD limit).
     ProviderKeyStatus {
         platform: Option<String>,
     },
+    /// `single pool status` — every currently-benched `(platform, model,
+    /// key_id)` plus a healthy-ratio snapshot (spec §6.5). The snapshot
+    /// is stateless (no persisted entry/exit-grace hysteresis this
+    /// iteration — see `PoolStatusInfo`'s doc comment).
+    PoolStatus,
     UsageShow {
         provider: Option<String>,
     },
@@ -749,6 +754,7 @@ pub enum ResponseData {
         synced: usize,
     },
     PoolKeyStatuses(Vec<PoolKeyStatusInfo>),
+    PoolStatus(PoolStatusInfo),
     Usage(UsageSummary),
     KgEntityId(i64),
     KgEntity(KgEntity),
@@ -1684,11 +1690,34 @@ pub struct PoolKeyStatusInfo {
     pub valid: bool,
     pub last_validated_at: Option<String>,
     pub disabled_reason: Option<String>,
-    /// `"n/a"` until `single-runtime::pool::cooldown` lands (E28 Phase 2)
-    /// — see `ProviderKeyStatus`'s doc comment.
+    /// `"clear"`, `"benched <N>s"`, or `"n/a"` if the cooldown table
+    /// couldn't be read.
     pub cooldown: String,
-    /// `"n/a"` until `single-runtime::pool::ledger` lands (E28 Phase 2).
+    /// `"<remaining>/<limit> rpd"` when the provider publishes an RPD
+    /// limit, else `"unbounded/unknown"`.
     pub headroom: String,
+}
+
+/// `single pool status`. `degraded`/`healthy_ratio` are a **stateless
+/// snapshot** — spec §6.5's entry/exit-grace hysteresis needs a
+/// `DegradeState` persisted across ticks, which this iteration doesn't
+/// wire into the daemon yet (documented follow-up); this reports the
+/// instantaneous ratio, not a debounced mode with a "degraded since
+/// <ts>" timestamp.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PoolStatusInfo {
+    pub degraded: bool,
+    pub healthy_ratio: f64,
+    pub benched: Vec<PoolBenchedKey>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PoolBenchedKey {
+    pub platform: String,
+    pub model: String,
+    pub key_id: String,
+    pub remaining_secs: u64,
+    pub provenance: String,
 }
 
 /// The result of trying to sync one provider's key into one agent's real

@@ -1316,12 +1316,13 @@ fn dispatch(
         }
         Request::ProviderKeyStatus { platform } => {
             let conn = crate::state::open(&ctx.dirs.db_path())?;
-            single_core::pool_keys::ensure_schema(&conn)?;
+            crate::pool::ensure_pool_schema(&conn)?;
             let pool_state = single_core::free_pool::load_pool_file(&ctx.dirs.free_pool_registry_file())?;
             let providers: Vec<_> = single_core::free_pool::FREE_PROVIDERS
                 .iter()
                 .filter(|p| platform.as_deref().is_none_or(|want| want == p.id))
                 .collect();
+            let now = crate::pool::ledger::now_ms();
             let mut statuses = Vec::new();
             for provider in providers {
                 let keys = single_core::pool_keys::list(&conn, Some(provider.id))?;
@@ -1329,19 +1330,77 @@ fn dispatch(
                 let disabled_reason = single_core::free_pool::default_disabled_reason(provider.id)
                     .map(str::to_string)
                     .or_else(|| pool_state.get(provider.id).and_then(|e| e.disabled_reason.clone()));
+
+                // Cooldown/headroom are per (platform, model, key_id); this
+                // iteration has no live per-provider model list (D3 seam
+                // documented in pool_agent.rs), so `key-status` reports the
+                // one nominal model matching what `client.rs`/`pool_agent.rs`
+                // actually dispatch against: `provider.id` itself.
+                let key_id = key.map(|k| k.key_id.as_str()).unwrap_or("default");
+                let cooldown = match crate::pool::cooldown::is_benched(&conn, provider.id, provider.id, key_id, now) {
+                    Ok(Some(until_ms)) => {
+                        let remaining_s = (until_ms - now).max(0) / 1000;
+                        format!("benched {remaining_s}s")
+                    }
+                    Ok(None) => "clear".to_string(),
+                    Err(_) => "n/a".to_string(),
+                };
+                let headroom = provider
+                    .limits
+                    .rpd
+                    .map(|limit| {
+                        let since = crate::pool::ledger::next_utc_midnight_ms(now) - 24 * 60 * 60 * 1000;
+                        let used: u64 = crate::pool::ledger::recorded_requests_since(&conn, provider.id, key_id, since).unwrap_or(0);
+                        format!("{}/{} rpd", limit.saturating_sub(used as u32), limit)
+                    })
+                    .unwrap_or_else(|| "unbounded/unknown".to_string());
+
                 statuses.push(single_protocol::PoolKeyStatusInfo {
                     platform: provider.id.to_string(),
                     keyed: key.is_some(),
                     valid: key.map(|k| k.valid).unwrap_or(false),
                     last_validated_at: key.and_then(|k| k.last_validated_at.clone()),
                     disabled_reason,
-                    // TODO(Phase 2): wire real cooldown/headroom once
-                    // `single-runtime::pool::{ledger,cooldown}` exist.
-                    cooldown: "n/a".to_string(),
-                    headroom: "n/a".to_string(),
+                    cooldown,
+                    headroom,
                 });
             }
             Ok(ResponseData::PoolKeyStatuses(statuses))
+        }
+        Request::PoolStatus => {
+            let conn = crate::state::open(&ctx.dirs.db_path())?;
+            crate::pool::ensure_pool_schema(&conn)?;
+            let now = crate::pool::ledger::now_ms();
+
+            let mut benched = Vec::new();
+            {
+                let mut stmt = conn.prepare("SELECT platform, model, key_id, until_ms, provenance FROM pool_cooldowns WHERE until_ms > ?1")?;
+                let rows = stmt.query_map(rusqlite::params![now], |r| {
+                    Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, i64>(3)?, r.get::<_, String>(4)?))
+                })?;
+                for row in rows {
+                    let (platform, model, key_id, until_ms, provenance) = row?;
+                    benched.push(single_protocol::PoolBenchedKey { platform, model, key_id, remaining_secs: ((until_ms - now).max(0) / 1000) as u64, provenance });
+                }
+            }
+
+            // Stateless healthy-ratio snapshot -- entry/exit grace hysteresis
+            // (spec §6.5) needs a persisted DegradeState this iteration
+            // doesn't wire into the daemon yet (documented follow-up); this
+            // reports the instantaneous ratio, not a debounced mode with a
+            // "degraded since <ts>" timestamp.
+            let enabled_providers: Vec<_> = single_core::free_pool::FREE_PROVIDERS
+                .iter()
+                .filter(|p| single_core::free_pool::default_disabled_reason(p.id).is_none())
+                .collect();
+            let usable = enabled_providers
+                .iter()
+                .filter(|p| single_core::pool_keys::list(&conn, Some(p.id)).map(|ks| ks.iter().any(|k| !k.disabled)).unwrap_or(false))
+                .count();
+            let ratio = crate::pool::degrade::healthy_ratio(usable, enabled_providers.len());
+            let degraded = ratio < 0.5 && enabled_providers.len() >= 3;
+
+            Ok(ResponseData::PoolStatus(single_protocol::PoolStatusInfo { degraded, healthy_ratio: ratio, benched }))
         }
         Request::UsageShow { provider } => usage_summary(ctx, provider),
         Request::UsageRefresh => usage_summary(ctx, None),
@@ -2210,6 +2269,38 @@ mod tests {
         let dirs = single_core::SingleDirs::from_root(dir.to_path_buf());
         dirs.ensure_created().unwrap();
         Context { dirs, resolved: single_core::ResolvedConfig::default(), registry: single_core::builtin_registry() }
+    }
+
+    #[test]
+    fn pool_status_reports_a_real_bench_after_cooldown_bench() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = test_ctx(dir.path());
+        let conn = crate::state::open(&ctx.dirs.db_path()).unwrap();
+        crate::pool::ensure_pool_schema(&conn).unwrap();
+        crate::pool::cooldown::bench(&conn, "groq", "groq", "default", crate::pool::cooldown::BenchKind::Transient, crate::pool::ledger::now_ms()).unwrap();
+
+        let response = handle(&ctx, Request::PoolStatus);
+        let Response::Ok { data: ResponseData::PoolStatus(status) } = response else { panic!("unexpected response") };
+        assert!(status.benched.iter().any(|b| b.platform == "groq" && b.key_id == "default"), "{:?}", status.benched);
+    }
+
+    #[test]
+    fn provider_key_status_reports_benched_and_headroom_after_real_usage() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = test_ctx(dir.path());
+        let conn = crate::state::open(&ctx.dirs.db_path()).unwrap();
+        crate::pool::ensure_pool_schema(&conn).unwrap();
+        single_core::pool_keys::add(&conn, "groq", "default").unwrap();
+        crate::pool::cooldown::bench(&conn, "groq", "groq", "default", crate::pool::cooldown::BenchKind::Transient, crate::pool::ledger::now_ms()).unwrap();
+        crate::pool::ledger::record(&conn, "groq", "groq", "default", crate::pool::ledger::UsageKind::Request, 3, crate::pool::ledger::now_ms()).unwrap();
+
+        let response = handle(&ctx, Request::ProviderKeyStatus { platform: Some("groq".to_string()) });
+        let Response::Ok { data: ResponseData::PoolKeyStatuses(statuses) } = response else { panic!("unexpected response") };
+        let groq = statuses.iter().find(|s| s.platform == "groq").unwrap();
+        assert!(groq.cooldown.starts_with("benched"), "{}", groq.cooldown);
+        // groq's catalog rpd limit is 1000 -- 3 recorded requests should
+        // leave 997/1000 in the headroom string.
+        assert_eq!(groq.headroom, "997/1000 rpd");
     }
 
     #[test]

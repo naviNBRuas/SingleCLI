@@ -125,6 +125,22 @@ fn recorded_sum_fallback(platform: &str, model: &str, key_id: &str, kind: UsageK
         .sum()
 }
 
+/// Sums recorded `Request` usage across every model for one
+/// `(platform, key_id)` since `since_ms` — used by `single provider
+/// key-status`'s headroom column, which has no single-model granularity
+/// to filter on (spec §17's model-selection seam: each provider is one
+/// nominal model this iteration).
+pub fn recorded_requests_since(conn: &Connection, platform: &str, key_id: &str, since_ms: i64) -> Result<u64> {
+    let sum: Option<i64> = conn
+        .query_row(
+            "SELECT SUM(amount) FROM pool_usage WHERE platform = ?1 AND key_id = ?2 AND kind = 'request' AND at_ms >= ?3",
+            params![platform, key_id, since_ms],
+            |row| row.get(0),
+        )
+        .unwrap_or(None);
+    Ok(sum.unwrap_or(0).max(0) as u64)
+}
+
 /// Records one usage event. Falls back to the in-memory ledger if the
 /// SQLite write fails so admission math keeps working (spec §6.1).
 pub fn record(conn: &Connection, platform: &str, model: &str, key_id: &str, kind: UsageKind, amount: u64, at_ms: i64) -> Result<()> {

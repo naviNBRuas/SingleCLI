@@ -310,6 +310,11 @@ enum Command {
         #[command(subcommand)]
         action: CoordinatorCommand,
     },
+    /// E28 free-provider pool engine status.
+    Pool {
+        #[command(subcommand)]
+        action: PoolCommand,
+    },
     /// Keep one agent iterating on a goal until it reports done. Sugar
     /// over `single goal submit --mode careful`: the coordinator
     /// re-dispatches the agent with its previous output appended until it
@@ -431,6 +436,15 @@ enum GoalCommand {
 
 #[derive(Subcommand)]
 enum CoordinatorCommand {
+    Status {
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum PoolCommand {
+    /// Benched keys + a healthy-ratio snapshot.
     Status {
         #[arg(long)]
         json: bool,
@@ -2779,6 +2793,12 @@ fn main() -> anyhow::Result<()> {
         Command::Coordinator { action } => match action {
             CoordinatorCommand::Status { json } => {
                 let response = client::send(&socket_path, Request::CoordinatorStatus)?;
+                render::print(response, json);
+            }
+        },
+        Command::Pool { action } => match action {
+            PoolCommand::Status { json } => {
+                let response = client::send(&socket_path, Request::PoolStatus)?;
                 render::print(response, json);
             }
         },

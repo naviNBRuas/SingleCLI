@@ -864,6 +864,18 @@ fn print_data(data: ResponseData) {
                 println!("    {:<20} {}/{}{}", p.agent, p.running, cap, rl);
             }
         }
+        ResponseData::PoolStatus(s) => {
+            let mode = if s.degraded { "degraded" } else { "normal" };
+            println!("pool: {mode} (healthy_ratio={:.2})", s.healthy_ratio);
+            if s.benched.is_empty() {
+                println!("  no benched keys");
+            } else {
+                println!("  benched:");
+                for b in &s.benched {
+                    println!("    {:<12} {:<20} {:<12} {}s remaining ({})", b.platform, b.model, b.key_id, b.remaining_secs, b.provenance);
+                }
+            }
+        }
         ResponseData::Empty => {}
     }
 }
