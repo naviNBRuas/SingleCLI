@@ -35,6 +35,10 @@ struct AcpSession {
     /// highest `coordinator_events` id already translated for this session.
     last_event_id: i64,
     cancel: Arc<AtomicBool>,
+    /// E29: `/agent <name>` override for this session's goal submissions.
+    /// `None` means the ACP default (`single-pool`) — see `run_turn`'s
+    /// `GoalSubmit` construction.
+    agent_override: Option<String>,
 }
 
 pub struct Acp {
@@ -180,7 +184,7 @@ impl Acp {
         let acp_sid = coord_id.clone();
         self.sessions.lock().unwrap().insert(
             acp_sid.clone(),
-            AcpSession { coord_id, mode: "auto".into(), last_event_id: 0, cancel: Arc::new(AtomicBool::new(false)) },
+            AcpSession { coord_id, mode: "auto".into(), last_event_id: 0, cancel: Arc::new(AtomicBool::new(false)), agent_override: None },
         );
         self.respond(id, json!({ "sessionId": acp_sid, "modes": modes_block("auto") }));
         self.session_update(&acp_sid, json!({ "sessionUpdate": "available_commands_update", "availableCommands": commands() }));
@@ -213,6 +217,7 @@ impl Acp {
             mode: mode.clone(),
             last_event_id: 0,
             cancel: Arc::new(AtomicBool::new(false)),
+            agent_override: None,
         });
 
         self.respond(id, json!({ "modes": modes_block(&mode) }));
@@ -255,7 +260,7 @@ impl Acp {
         };
         self.sessions.lock().unwrap().insert(
             coord_id.clone(),
-            AcpSession { coord_id: coord_id.clone(), mode: "auto".into(), last_event_id: 0, cancel: Arc::new(AtomicBool::new(false)) },
+            AcpSession { coord_id: coord_id.clone(), mode: "auto".into(), last_event_id: 0, cancel: Arc::new(AtomicBool::new(false)), agent_override: None },
         );
         coord_id
     }
@@ -282,22 +287,25 @@ impl Acp {
         }
 
         // otherwise: submit a goal and stream the coordinator's progress.
-        let (coord_id, mode) = {
+        let (coord_id, mode, agent) = {
             let map = self.sessions.lock().unwrap();
             let Some(s) = map.get(acp_sid) else {
                 self.rpc_error(rid, -32602, "unknown session");
                 return;
             };
-            (s.coord_id.clone(), s.mode.clone())
+            (s.coord_id.clone(), s.mode.clone(), s.agent_override.clone())
         };
         self.chunk(acp_sid, "planning…\n", "agent_thought_chunk");
+        // E29: `single-pool` is the ACP default agent, overridable per
+        // session via `/agent <name>` — see `AcpSession::agent_override`.
+        let agent = agent.or_else(|| Some("single-pool".to_string()));
         let goal_id = match self.socket(Request::GoalSubmit {
             session_id: coord_id.clone(),
             text: text.to_string(),
             mode: Some(mode),
             max_dispatches: None,
             max_minutes: None,
-            agent: None,
+            agent,
         }) {
             Ok(ResponseData::GoalId(g)) => g,
             Ok(other) => {
@@ -492,14 +500,21 @@ impl Acp {
 
     // ---- slash commands ------------------------------------------------
 
-    fn run_slash(&self, acp_sid: &str, name: &str, _arg: &str) -> String {
+    fn run_slash(&self, acp_sid: &str, name: &str, arg: &str) -> String {
         match name {
             "status" | "queue" => {
-                match self.socket(Request::CoordinatorStatus) {
+                let coord = match self.socket(Request::CoordinatorStatus) {
                     Ok(ResponseData::CoordinatorSnapshot(s)) => format_snapshot(&s),
                     Ok(other) => format!("unexpected: {other:?}"),
                     Err(e) => format!("[error: {e}]"),
-                }
+                };
+                // E29: fold provider auth/exhaustion state into the same
+                // command — Zed has no native status-bar/panel API to put
+                // this in on its own (see the E29 design spec's Zed
+                // capability research), so `/status`'s text output is the
+                // whole status surface.
+                let providers = shell_out(&["provider", "key-status"]);
+                format!("{coord}\nprovider auth/exhaustion:\n{providers}")
             }
             "goals" => match self.socket(Request::GoalList { session_id: None }) {
                 Ok(ResponseData::Goals(gs)) => {
@@ -518,6 +533,28 @@ impl Acp {
             "lsp" => shell_out(&["lsp", "list"]),
             "providers" => shell_out(&["provider", "list"]),
             "dashboard" => "Open the SingleCLI control panel: run `single` in a terminal, or the Zed task \"SingleCLI: control panel\".".into(),
+            "agent" => {
+                if arg.is_empty() {
+                    let current = self
+                        .sessions
+                        .lock()
+                        .unwrap()
+                        .get(acp_sid)
+                        .and_then(|s| s.agent_override.clone())
+                        .unwrap_or_else(|| "single-pool (default)".to_string());
+                    format!("current session agent: {current}\nusage: /agent <name>  or  /agent default")
+                } else if arg == "default" {
+                    if let Some(s) = self.sessions.lock().unwrap().get_mut(acp_sid) {
+                        s.agent_override = None;
+                    }
+                    "reset to default agent (single-pool)".to_string()
+                } else {
+                    if let Some(s) = self.sessions.lock().unwrap().get_mut(acp_sid) {
+                        s.agent_override = Some(arg.to_string());
+                    }
+                    format!("session agent pinned to {arg}")
+                }
+            }
             "cancel" => {
                 if let Ok(Some(gid)) = self.active_goal(acp_sid) {
                     let _ = self.socket(Request::GoalCancel { goal_id: gid.clone() });
@@ -527,7 +564,7 @@ impl Acp {
                 }
             }
             _ => "single acp — bridge to the SingleCLI coordinator.\n\
-                  Commands: /status /goals /agents /usage /mcp /lsp /providers /dashboard /cancel\n\
+                  Commands: /status /goals /agents /usage /mcp /lsp /providers /dashboard /agent /cancel\n\
                   Modes: auto · plan · careful · dry\n\
                   Any other prompt becomes a coordinator goal; progress streams back here."
                 .into(),
@@ -703,7 +740,7 @@ fn modes_block(current: &str) -> Value {
 
 fn commands() -> Value {
     json!([
-        { "name": "status", "description": "coordinator: running / queued / blocked goals + pool" },
+        { "name": "status", "description": "coordinator: running/queued/blocked goals + pool + provider auth/exhaustion" },
         { "name": "goals", "description": "list all goals" },
         { "name": "agents", "description": "detected agents / auth (single doctor)" },
         { "name": "usage", "description": "per-agent run counts / latency" },
@@ -711,6 +748,7 @@ fn commands() -> Value {
         { "name": "lsp", "description": "LSP servers single-lsp can route to" },
         { "name": "providers", "description": "configured LLM providers" },
         { "name": "dashboard", "description": "how to open the SingleCLI control panel" },
+        { "name": "agent", "description": "set or clear this session's pinned agent (default: single-pool)" },
         { "name": "cancel", "description": "cancel this session's active goal" }
     ])
 }
@@ -805,6 +843,20 @@ fn chrono_now() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn goal_submit_defaults_to_single_pool_when_no_override_set() {
+        let agent: Option<String> = None;
+        let resolved = agent.or_else(|| Some("single-pool".to_string()));
+        assert_eq!(resolved.as_deref(), Some("single-pool"));
+    }
+
+    #[test]
+    fn goal_submit_honors_explicit_override() {
+        let agent: Option<String> = Some("opencode".to_string());
+        let resolved = agent.or_else(|| Some("single-pool".to_string()));
+        assert_eq!(resolved.as_deref(), Some("opencode"));
+    }
 
     #[test]
     fn status_query_heuristic() {
