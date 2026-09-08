@@ -112,7 +112,7 @@ impl Acp {
             ),
             "authenticate" => self.respond(id, json!({})),
             "session/new" => self.session_new(id, &p),
-            "session/load" => self.session_load(id, &p),
+            "session/load" => self.session_load(acp.clone(), id, &p),
             "session/set_mode" => {
                 let sid = p["sessionId"].as_str().unwrap_or_default().to_string();
                 let mode = p["modeId"].as_str().unwrap_or("auto").to_string();
@@ -186,7 +186,7 @@ impl Acp {
         self.session_update(&acp_sid, json!({ "sessionUpdate": "available_commands_update", "availableCommands": commands() }));
     }
 
-    fn session_load(&self, id: Option<Value>, p: &Value) {
+    fn session_load(&self, acp: Arc<Acp>, id: Option<Value>, p: &Value) {
         let cwd = p["cwd"].as_str().map(str::to_string).unwrap_or_else(default_cwd);
         let given = p["sessionId"].as_str().map(str::to_string).unwrap_or_default();
 
@@ -227,6 +227,22 @@ impl Acp {
             if let Some(s) = self.sessions.lock().unwrap().get_mut(&acp_sid) {
                 s.last_event_id = max_id;
             }
+        }
+
+        // E28 spec §10 (Part F): if this session has a goal still
+        // `running`/`waiting_on_capacity` (etc.) — e.g. the daemon or this
+        // `single acp` process restarted mid-goal — re-attach its event
+        // long-poll so a restarted Zed panel keeps streaming without the
+        // user having to send a new prompt. No JSON-RPC response is owed
+        // for this background stream (unlike `run_turn`'s prompt-driven
+        // one), so the stop reason is just logged.
+        if let Ok(Some(goal_id)) = self.active_goal(&acp_sid) {
+            let coord_id = acp_sid.clone();
+            let acp_sid = acp_sid.clone();
+            std::thread::spawn(move || {
+                let stop = acp.stream_goal(&acp_sid, &coord_id, &goal_id);
+                log(&format!("session/load re-attach for {acp_sid} ended: {stop}"));
+            });
         }
     }
 
@@ -384,6 +400,10 @@ impl Acp {
             // rate-limited; holding, resumes ~14:03Z".
             "capacity_wait" => self.chunk(acp_sid, &format!("all providers rate-limited; holding — {body}\n"), "agent_thought_chunk"),
             "capacity_resumed" => self.chunk(acp_sid, &format!("capacity freed, resuming — {body}\n"), "agent_thought_chunk"),
+            // E28 spec §10: the goal survived a daemon restart or a
+            // manual `single goal resume` — a live signal instead of a
+            // silent gap in the Zed panel's history.
+            "session_resumed" => self.chunk(acp_sid, &format!("[resumed] {body}\n"), "agent_thought_chunk"),
             "integrated" => {} // the summary is emitted from the terminal GoalStatus
             "plan" => {}       // the plan is emitted from GoalStatus node list
             _ => {}
@@ -544,7 +564,10 @@ impl Acp {
         match self.socket(Request::GoalList { session_id: Some(coord_id) })? {
             ResponseData::Goals(gs) => Ok(gs
                 .iter()
-                .find(|g| matches!(g.status.as_str(), "running" | "planning" | "queued" | "blocked"))
+                // E28 spec §10/§8: `waiting_on_capacity` counts as active
+                // too -- it's a live hold, not a stall, so `session/cancel`
+                // can reach it and `session_load`'s re-attach finds it.
+                .find(|g| matches!(g.status.as_str(), "running" | "planning" | "queued" | "blocked" | "waiting_on_capacity"))
                 .map(|g| g.id.clone())),
             _ => Ok(None),
         }

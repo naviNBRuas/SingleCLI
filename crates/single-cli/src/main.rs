@@ -415,6 +415,12 @@ enum GoalCommand {
     Cancel {
         goal_id: String,
     },
+    /// Manual re-tick of a `blocked`/`failed`/`paused`/`waiting_on_capacity`
+    /// goal you judge recoverable (E28 spec §10) — the same path the
+    /// daemon runs automatically on its own restart.
+    Resume {
+        goal_id: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -2757,6 +2763,10 @@ fn main() -> anyhow::Result<()> {
             }
             GoalCommand::Cancel { goal_id } => {
                 let response = client::send(&socket_path, Request::GoalCancel { goal_id })?;
+                render::print(response, false);
+            }
+            GoalCommand::Resume { goal_id } => {
+                let response = client::send(&socket_path, Request::GoalResume { goal_id })?;
                 render::print(response, false);
             }
         },

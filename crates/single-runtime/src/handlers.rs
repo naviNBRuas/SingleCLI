@@ -78,7 +78,16 @@ fn dispatch(
         }
         // Actual process exit happens in server.rs after this response is
         // flushed to the client — see its handle_connection.
-        Request::Shutdown => Ok(ResponseData::Empty),
+        Request::Shutdown => {
+            // E28 spec §10: a clean stop, distinct from a crash — mark
+            // active goals `Paused` so `resume_interrupted` (not the
+            // crash-oriented reconcile) picks them back up next start.
+            // Best-effort: this must never block the daemon from exiting.
+            if let Ok(conn) = coordinator_db(ctx) {
+                let _ = crate::coordinator::pause_active_goals(&conn);
+            }
+            Ok(ResponseData::Empty)
+        }
         Request::AgentList => {
             // Parallelized across agents for the same reason `status()` is
             // — see `cached_discover`'s doc comment.
@@ -1758,6 +1767,12 @@ fn dispatch(
                 &goal_id,
                 crate::coordinator::graph::GoalStatus::Cancelled,
             )?;
+            Ok(ResponseData::Empty)
+        }
+        Request::GoalResume { goal_id } => {
+            let mut conn = coordinator_db(ctx)?;
+            crate::coordinator::resume_goal(ctx, &mut conn, &goal_id)?;
+            let _ = crate::coordinator::drive(ctx, &mut conn, registry);
             Ok(ResponseData::Empty)
         }
         Request::SessionEvents { session_id, since_event_id } => {

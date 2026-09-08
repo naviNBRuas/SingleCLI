@@ -664,6 +664,13 @@ pub enum Request {
     GoalCancel {
         goal_id: String,
     },
+    /// E28 spec §10 (Part F): manual re-tick of a `blocked`/`failed`/
+    /// `paused`/`waiting_on_capacity` goal a human judges recoverable —
+    /// the same path `coordinator::resume_interrupted` runs automatically
+    /// on daemon start.
+    GoalResume {
+        goal_id: String,
+    },
     /// Poll (the messenger long-polls) for a session's events after an id.
     SessionEvents {
         session_id: String,
@@ -1950,6 +1957,7 @@ mod tests {
             Request::GoalList { session_id: None },
             Request::GoalAmend { goal_id: "goal_1".into(), text: "budget=30".into() },
             Request::GoalCancel { goal_id: "goal_1".into() },
+            Request::GoalResume { goal_id: "goal_1".into() },
             Request::SessionEvents { session_id: "sess_1".into(), since_event_id: 4 },
             Request::CoordinatorStatus,
         ];
