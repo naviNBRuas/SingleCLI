@@ -21,6 +21,7 @@ pub mod project_context;
 pub mod provider_keys;
 pub mod providers;
 pub mod ratelimit;
+pub mod redact;
 pub mod registry;
 pub mod secrets;
 pub mod skills;
