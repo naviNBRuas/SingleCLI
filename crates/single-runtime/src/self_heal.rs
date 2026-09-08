@@ -42,7 +42,18 @@ pub struct Categories {
 
 impl Default for Categories {
     fn default() -> Self {
-        Categories { infra: true, coordinator: true, agent: true }
+        // `agent` defaults OFF, unlike the other two — confirmed live
+        // (not just per the spec's own safety note) that unattended real
+        // installs (`bootstrap::run_one(.., dry_run: false)`, no `--yes`
+        // confirmation from anyone) run on a real production daemon and
+        // wedged it: `DoctorGuard` held indefinitely with no subprocess
+        // visible in `ps`, everything else on the box otherwise healthy.
+        // Root cause not fully isolated before this default was flipped
+        // (see `agent::install_missing_agents`'s doc comment for the
+        // follow-up); until it is, this category needs an explicit
+        // opt-in (`self_heal.toml`'s `[categories] agent = true`), not
+        // opt-out.
+        Categories { infra: true, coordinator: true, agent: false }
     }
 }
 
@@ -289,7 +300,9 @@ mod tests {
         let dirs = SingleDirs::from_root(tmp.path().to_path_buf());
         dirs.ensure_created().unwrap();
         let cfg = SelfHealConfig::load(&dirs);
-        assert!(cfg.categories.infra && cfg.categories.coordinator && cfg.categories.agent);
+        assert!(cfg.categories.infra && cfg.categories.coordinator);
+        // `agent` defaults off -- see `Categories::default()`'s doc comment.
+        assert!(!cfg.categories.agent);
         assert!(self_heal_file(&dirs).exists());
     }
 }

@@ -60,6 +60,17 @@ fn missing_routable_agents(ctx: &Context) -> Vec<String> {
 /// Runs `bootstrap::run_one` for every missing routable agent, one at a
 /// time. `dry_run` is threaded straight through to `bootstrap::run_one` —
 /// tests always pass `true` (see `run`'s doc comment on why).
+/// **Known real risk, not yet fixed**: `bootstrap::run_one` (pre-existing
+/// E27 code, not new in E28) shells the install command via
+/// `Command::new("sh").arg("-c")...status()` with **no timeout at all**.
+/// Confirmed live: this can hang the daemon's whole self-heal pass
+/// indefinitely while holding `INSTALL_GATE`, with no subprocess visible
+/// in `ps` by the time it's noticed (the hang was in Rust-land waiting on
+/// the child, not necessarily still executing). That's exactly why
+/// `Categories::default()`'s `agent` field defaults to `false` — until
+/// `bootstrap::run_one` gets a real timeout wrapper (a `single setup`
+/// concern too, not just this call site), enabling this category is a
+/// deliberate opt-in risk, not a safe default.
 fn install_missing_agents(ctx: &Context, dry_run: bool) -> Result<String> {
     let missing = missing_routable_agents(ctx);
     if missing.is_empty() {

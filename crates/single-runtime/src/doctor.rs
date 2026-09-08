@@ -202,14 +202,19 @@ mod tests {
         let _guard = crate::SELF_HEAL_ENV_LOCK.lock().unwrap();
         let tmp = tempfile::tempdir().unwrap();
         let ctx = test_ctx(tmp.path());
+        // `agent` defaults off (a real production hang, not just the
+        // spec's own safety note, is why -- see `Categories::default()`).
         let report = run(&ctx);
         let check = report.checks.iter().find(|c| c.name == "self-heal: agent category").unwrap();
-        assert_eq!(check.status, CheckStatus::Ok, "enabled by default");
-
-        crate::self_heal::SelfHealConfig::disable_category(&ctx.dirs, crate::self_heal::Category::Agent).unwrap();
-        let report = run(&ctx);
-        let check = report.checks.iter().find(|c| c.name == "self-heal: agent category").unwrap();
-        assert_eq!(check.status, CheckStatus::Skipped);
+        assert_eq!(check.status, CheckStatus::Skipped, "off by default");
         assert!(check.detail.contains("disabled in self_heal.toml"), "{}", check.detail);
+
+        // Explicit opt-in flips it to Ok.
+        let mut cfg = crate::self_heal::SelfHealConfig::load(&ctx.dirs);
+        cfg.categories.agent = true;
+        std::fs::write(ctx.dirs.root().join("self_heal.toml"), toml::to_string_pretty(&cfg).unwrap()).unwrap();
+        let report = run(&ctx);
+        let check = report.checks.iter().find(|c| c.name == "self-heal: agent category").unwrap();
+        assert_eq!(check.status, CheckStatus::Ok, "explicitly opted in");
     }
 }
