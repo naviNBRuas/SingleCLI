@@ -9,6 +9,39 @@ patch version (`0.0.x`) carries fixes, per [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## [Unreleased]
 
+## [0.12.0]
+
+Zed + SingleCLI deep integration (E29): live secret redaction ahead of
+every prompt SingleCLI dispatches, `single-pool` as the default Zed ACP
+agent, a richer `/status` in place of a Zed status-bar icon (confirmed
+unavailable in Zed's current extension API), and cross-session goal
+dedup.
+
+- Added: `single_core::redact` — heuristic secret detection (known
+  vendor key prefixes, JWT shape, `key=`/`password=`-style assignments,
+  generic high-entropy tokens with UUID/git-SHA negative guards) with a
+  TTL'd, `age`-encrypted alias store (`{{REDACTED:<session>:N}}`), keyed
+  by a per-machine master passphrase held in the OS keychain via
+  `single_core::secrets`. Wired into every prompt-ingestion path
+  (`single acp`'s `session/prompt`, `single goal submit`, `single loop`,
+  `single task run`, `single serve --openai`) before the text is ever
+  submitted to a goal or task; resolved back to plaintext only at
+  `single-pool`'s outbound HTTP dispatch boundary — never in anything
+  logged or persisted.
+- Added: `single acp` sessions default to the `single-pool` agent
+  (previously routing decided per-goal with no ACP-level default);
+  overridable per session via `/agent <name>` / `/agent default`.
+- Changed: `/status` in `single acp` now folds in `provider key-status`
+  (auth/exhaustion state) alongside the existing goal/pool summary — the
+  closest available substitute for a Zed taskbar/status-bar indicator,
+  which Zed's extension API does not support as of this release (no
+  general sidebar/panel API either; slash-command output is the only
+  structured-info surface available to an extension).
+- Added: `goal::find_overlapping` — a token-overlap check against active
+  goals, run before every goal submission; an ask that's already in
+  flight (from any session) returns the existing goal instead of
+  starting a duplicate.
+
 ## [0.11.0]
 
 The free-provider pool (E28): SingleCLI absorbs the ~40-provider free-LLM
