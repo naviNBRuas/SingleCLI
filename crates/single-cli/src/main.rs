@@ -710,6 +710,15 @@ enum SecretCommand {
     Set { name: String, value: String },
     Get { name: String },
     Delete { name: String },
+    /// E29: moves a live redaction alias (e.g. `{{REDACTED:sess_.../3}}`,
+    /// still within its 3h TTL) into a properly named secret. Prompts for
+    /// confirmation unless `--yes` is given.
+    PromoteAlias {
+        alias: String,
+        name: String,
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1862,6 +1871,21 @@ fn main() -> anyhow::Result<()> {
             }
             SecretCommand::Delete { name } => {
                 let response = client::send(&socket_path, Request::SecretDelete { name })?;
+                render::print(response, false);
+            }
+            SecretCommand::PromoteAlias { alias, name, yes } => {
+                if !yes {
+                    eprint!("promote {alias} to secret \"{name}\"? [y/N] ");
+                    use std::io::Write as _;
+                    std::io::stderr().flush().ok();
+                    let mut answer = String::new();
+                    std::io::stdin().read_line(&mut answer)?;
+                    if !matches!(answer.trim().to_lowercase().as_str(), "y" | "yes") {
+                        eprintln!("cancelled");
+                        return Ok(());
+                    }
+                }
+                let response = client::send(&socket_path, Request::SecretPromoteAlias { alias, name })?;
                 render::print(response, false);
             }
         },

@@ -202,6 +202,38 @@ pub fn sweep_expired(conn: &Connection) -> Result<usize> {
     Ok(conn.execute("DELETE FROM redact_aliases WHERE expires_at < ?1", params![now_ms()])?)
 }
 
+/// Decrypts a single `{{REDACTED:<session_id>:N}}` alias token's real
+/// value and deletes its row — used by `single secret promote-alias` to
+/// move a temp alias into a properly named secret. Errors if `alias_token`
+/// isn't a well-formed alias, or the row is unknown/expired.
+pub fn take_alias_value(store: &RedactStore, secret_store: &dyn single_secret_store::SecretStoreObj, alias_token: &str) -> Result<String> {
+    let trimmed = alias_token.trim();
+    let inner = trimmed
+        .strip_prefix("{{")
+        .and_then(|s| s.strip_suffix("}}"))
+        .and_then(|s| s.strip_prefix("REDACTED:"))
+        .ok_or_else(|| anyhow!("not a well-formed alias token: {trimmed}"))?;
+    let (session_id, n) = inner.rsplit_once(':').ok_or_else(|| anyhow!("not a well-formed alias token: {trimmed}"))?;
+    if session_id.is_empty() || n.is_empty() || !n.chars().all(|c| c.is_ascii_digit()) {
+        anyhow::bail!("not a well-formed alias token: {trimmed}");
+    }
+
+    sweep_expired(store.conn)?;
+    let passphrase = master_passphrase(secret_store)?;
+    let ciphertext: Vec<u8> = store
+        .conn
+        .query_row(
+            "SELECT ciphertext FROM redact_aliases WHERE session_id = ?1 AND alias = ?2",
+            params![session_id, trimmed],
+            |r| r.get(0),
+        )
+        .optional()?
+        .ok_or_else(|| anyhow!("unresolvable alias {trimmed} (expired or unknown)"))?;
+    let real_value = decrypt(&passphrase, &ciphertext)?;
+    store.conn.execute("DELETE FROM redact_aliases WHERE session_id = ?1 AND alias = ?2", params![session_id, trimmed])?;
+    Ok(real_value)
+}
+
 /// Parses `{{REDACTED:<session_id>:<n>}}` tokens out of `text`, returning
 /// `(start, end, session_id, full_alias_token)` for each, left to right.
 fn find_alias_tokens(text: &str) -> Vec<(usize, usize, String, String)> {
@@ -539,6 +571,30 @@ mod tests {
         let (out, aliases) = scan_and_replace(&store, &keychain, "sess1", text).unwrap();
         assert_eq!(aliases.len(), 0);
         assert_eq!(out, text);
+    }
+
+    #[test]
+    fn take_alias_value_decrypts_and_deletes_the_row() {
+        let (conn, keychain) = setup();
+        let store = RedactStore { conn: &conn };
+        let (_redacted, aliases) =
+            scan_and_replace(&store, &keychain, "sess1", "key sk-abcdEFGH1234567890abcdEFGH1234567890abcd here").unwrap();
+        let alias = &aliases[0].alias;
+
+        let value = take_alias_value(&store, &keychain, alias).unwrap();
+        assert_eq!(value, "sk-abcdEFGH1234567890abcdEFGH1234567890abcd");
+
+        // second call fails: the row was deleted by the first.
+        let err = take_alias_value(&store, &keychain, alias).unwrap_err();
+        assert!(err.to_string().contains("unresolvable"));
+    }
+
+    #[test]
+    fn take_alias_value_rejects_malformed_tokens() {
+        let (conn, keychain) = setup();
+        let store = RedactStore { conn: &conn };
+        let err = take_alias_value(&store, &keychain, "not an alias").unwrap_err();
+        assert!(err.to_string().contains("not a well-formed alias token"));
     }
 
     #[test]

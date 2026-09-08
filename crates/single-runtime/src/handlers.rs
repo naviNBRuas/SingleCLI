@@ -279,6 +279,15 @@ fn dispatch(
             }
             Ok(ResponseData::Empty)
         }
+        Request::SecretPromoteAlias { alias, name } => {
+            let conn = coordinator_db(ctx)?;
+            single_core::redact::ensure_schema(&conn)?;
+            let redact_store = single_core::redact::RedactStore { conn: &conn };
+            let secret_store = single_core::secrets::SecretTool;
+            let value = single_core::redact::take_alias_value(&redact_store, &secret_store, &alias)?;
+            single_core::secrets::SecretStore::set(&secret_store, &name, &value)?;
+            Ok(ResponseData::Empty)
+        }
         Request::SkillList => Ok(ResponseData::Skills(single_core::skills::list(
             &ctx.dirs.skills_dir(),
         )?)),
@@ -2292,6 +2301,57 @@ mod tests {
         let dirs = single_core::SingleDirs::from_root(dir.to_path_buf());
         dirs.ensure_created().unwrap();
         Context { dirs, resolved: single_core::ResolvedConfig::default(), registry: single_core::builtin_registry() }
+    }
+
+    /// E29: exercises the real `GoalSubmit` → `SecretPromoteAlias` path
+    /// end to end through `handle()`, against the real OS keychain (this
+    /// environment has a working `secret-tool`) — the only way to prove
+    /// the whole chain (redact on submit, embed session in the alias
+    /// token, decrypt + promote + delete on request) actually works
+    /// together, not just each piece in isolation.
+    #[test]
+    fn goal_submit_redacts_then_promote_alias_recovers_the_real_secret() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = test_ctx(dir.path());
+
+        let Response::Ok { data: ResponseData::Session(session) } =
+            handle(&ctx, Request::SessionNew { cwd: dir.path().display().to_string() })
+        else {
+            panic!("SessionNew failed");
+        };
+
+        let response = handle(
+            &ctx,
+            Request::GoalSubmit {
+                session_id: session.id.clone(),
+                text: "call the api with sk-abcdEFGH1234567890abcdEFGH1234567890abcd please".to_string(),
+                mode: Some("dry".to_string()),
+                max_dispatches: None,
+                max_minutes: None,
+                agent: None,
+            },
+        );
+        let Response::Ok { data: ResponseData::GoalId(goal_id) } = response else { panic!("GoalSubmit failed: {response:?}") };
+
+        let Response::Ok { data: ResponseData::GoalView(view) } = handle(&ctx, Request::GoalStatus { goal_id }) else {
+            panic!("GoalStatus failed");
+        };
+        assert!(!view.goal.text.contains("sk-abcdEFGH"), "goal text leaked the real key: {}", view.goal.text);
+        let alias_start = view.goal.text.find("{{REDACTED:").expect("goal text has no alias token");
+        let alias_end = view.goal.text[alias_start..].find("}}").unwrap() + alias_start + 2;
+        let alias = view.goal.text[alias_start..alias_end].to_string();
+
+        let secret_name = format!("e29-test-promoted-{}", crate::pool::ledger::now_ms());
+        let response = handle(&ctx, Request::SecretPromoteAlias { alias, name: secret_name.clone() });
+        assert!(matches!(response, Response::Ok { data: ResponseData::Empty }), "{response:?}");
+
+        let Response::Ok { data: ResponseData::SecretValue(value) } = handle(&ctx, Request::SecretGet { name: secret_name.clone() }) else {
+            panic!("SecretGet failed");
+        };
+        assert_eq!(value.as_deref(), Some("sk-abcdEFGH1234567890abcdEFGH1234567890abcd"));
+
+        // cleanup: don't leave a real keychain entry behind.
+        let _ = handle(&ctx, Request::SecretDelete { name: secret_name });
     }
 
     #[test]

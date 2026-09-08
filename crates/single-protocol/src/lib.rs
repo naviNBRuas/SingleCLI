@@ -105,6 +105,14 @@ pub enum Request {
     SecretDelete {
         name: String,
     },
+    /// E29: promotes a live `{{REDACTED:<session>:N}}` redaction alias
+    /// (still within its 3h TTL) into a properly named secret, then
+    /// deletes the pending-alias row. The CLI caller is expected to have
+    /// already confirmed this with the user — the daemon does not ask.
+    SecretPromoteAlias {
+        alias: String,
+        name: String,
+    },
     SkillList,
     SkillInstall {
         name: String,
