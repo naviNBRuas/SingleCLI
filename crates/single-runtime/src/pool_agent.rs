@@ -157,11 +157,23 @@ fn estimate_tokens(text: &str) -> u64 {
 
 /// Every keyed, non-disabled pool provider becomes one candidate model
 /// (see the model-selection seam note at the top of this file).
+///
+/// Deliberately does **not** require `key.valid` — that flag only ever
+/// gets set by `add-free`'s validation probe, which needs a provider's
+/// `validate_url` quirk to exist at all. A provider like `groq` has none
+/// (spec §5.2's table lists no validate path for it), so its key would
+/// sit at `valid = false` forever and never become a candidate even
+/// though it's perfectly usable — confirmed live: this filter used to
+/// include `k.valid` and silently produced zero candidates (an instant,
+/// no-network "Exhausted") for every unvalidated-but-real key. A bad key
+/// still gets caught for real, just one dispatch attempt later: a 401
+/// benches it via `AuthBenched` in `execute`'s error-mapping match, same
+/// as any other real dispatch failure.
 pub fn candidates_from_keys(conn: &Connection) -> Result<Vec<(String, String, String)>> {
     let keys = single_core::pool_keys::list(conn, None)?;
     Ok(keys
         .into_iter()
-        .filter(|k| !k.disabled && k.valid)
+        .filter(|k| !k.disabled)
         .filter_map(|k| single_core::free_pool::by_id(&k.platform).map(|p| (k.platform.clone(), p.id.to_string(), k.key_id.clone())))
         .collect())
 }
@@ -240,6 +252,29 @@ mod tests {
     fn seed_key(conn: &Connection, platform: &str, key_id: &str) {
         single_core::pool_keys::add(conn, platform, key_id).unwrap();
         single_core::pool_keys::mark_validated(conn, platform, key_id, true).unwrap();
+    }
+
+    #[test]
+    fn candidates_from_keys_includes_an_unvalidated_key() {
+        // Regression test: a provider with no `validate_url` quirk (e.g.
+        // groq) can never have its key marked `valid` by `add-free`'s
+        // probe, since there's nothing to probe. Confirmed live against
+        // the real daemon: the old filter (`!disabled && valid`) silently
+        // produced zero candidates for a perfectly real, working key.
+        let conn = test_conn();
+        single_core::pool_keys::add(&conn, "groq", "default").unwrap();
+        // deliberately NOT calling mark_validated -- valid stays false.
+        let candidates = candidates_from_keys(&conn).unwrap();
+        assert!(candidates.iter().any(|(p, _, k)| p == "groq" && k == "default"), "{candidates:?}");
+    }
+
+    #[test]
+    fn candidates_from_keys_excludes_a_disabled_key() {
+        let conn = test_conn();
+        single_core::pool_keys::add(&conn, "groq", "default").unwrap();
+        single_core::pool_keys::disable(&conn, "groq", "default").unwrap();
+        let candidates = candidates_from_keys(&conn).unwrap();
+        assert!(candidates.is_empty(), "{candidates:?}");
     }
 
     fn always_resolve(_p: &str, _k: &str) -> Option<String> {
