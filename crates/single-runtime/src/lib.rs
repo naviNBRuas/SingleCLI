@@ -34,3 +34,9 @@ pub use handlers::handle;
 /// one shared static is acquired by both.
 #[cfg(test)]
 pub(crate) static HOME_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Same reasoning as `HOME_ENV_LOCK`, for `SINGLE_SELF_HEAL_AGENT_INSTALL`
+/// — `self_heal::agent`'s test sets/clears it and `doctor`'s test reads
+/// it, in the same test binary, on separate threads, by default.
+#[cfg(test)]
+pub(crate) static SELF_HEAL_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());

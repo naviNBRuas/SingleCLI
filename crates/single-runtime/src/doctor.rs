@@ -166,5 +166,50 @@ pub fn run(ctx: &Context) -> DoctorReport {
         },
     });
 
+    // E28 spec §9.3: agent installs shell package managers -- the
+    // category most likely to want off on a shared box, so `doctor`
+    // always states plainly whether it's currently enabled.
+    let self_heal_cfg = crate::self_heal::SelfHealConfig::load(&ctx.dirs);
+    let env_disabled = std::env::var("SINGLE_SELF_HEAL_AGENT_INSTALL").is_ok_and(|v| v == "0");
+    let agent_category_on = self_heal_cfg.categories.agent && !env_disabled;
+    checks.push(DoctorCheck {
+        name: "self-heal: agent category".into(),
+        status: if agent_category_on { CheckStatus::Ok } else { CheckStatus::Skipped },
+        detail: if !self_heal_cfg.categories.agent {
+            "disabled in self_heal.toml — no automatic agent installs/repairs".into()
+        } else if env_disabled {
+            "disabled via SINGLE_SELF_HEAL_AGENT_INSTALL=0 — no automatic agent installs/repairs".into()
+        } else {
+            "enabled — missing routable agents may be auto-installed, stale pool keys auto-disabled".into()
+        },
+    });
+
     DoctorReport { checks }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_ctx(root: &std::path::Path) -> Context {
+        let dirs = single_core::SingleDirs::from_root(root.to_path_buf());
+        dirs.ensure_created().unwrap();
+        Context { dirs, resolved: single_core::ResolvedConfig::default(), registry: single_core::builtin_registry() }
+    }
+
+    #[test]
+    fn doctor_reports_agent_category_on_off_state() {
+        let _guard = crate::SELF_HEAL_ENV_LOCK.lock().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = test_ctx(tmp.path());
+        let report = run(&ctx);
+        let check = report.checks.iter().find(|c| c.name == "self-heal: agent category").unwrap();
+        assert_eq!(check.status, CheckStatus::Ok, "enabled by default");
+
+        crate::self_heal::SelfHealConfig::disable_category(&ctx.dirs, crate::self_heal::Category::Agent).unwrap();
+        let report = run(&ctx);
+        let check = report.checks.iter().find(|c| c.name == "self-heal: agent category").unwrap();
+        assert_eq!(check.status, CheckStatus::Skipped);
+        assert!(check.detail.contains("disabled in self_heal.toml"), "{}", check.detail);
+    }
 }
