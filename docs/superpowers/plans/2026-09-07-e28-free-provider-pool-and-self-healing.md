@@ -484,11 +484,11 @@ Landing before Part E (self-heal) per spec §16's stated order — resume logic 
 - `single daemon stop` (clean) marks its non-terminal goals `Paused` instead of leaving them `Running` (distinguishing clean-stop from crash — a crash leaves rows `Running`, caught by the existing PID-check reconcile).
 - `single goal resume <id>` — CLI subcommand, manual trigger of the same re-tick path for a `Blocked`/`Failed` goal a human judges recoverable.
 
-- [ ] **Step 1:** failing tests (tempdir daemon-start path): `running_goal_with_pending_node_and_no_live_task_is_reticked_and_events_session_resumed`, `planning_goal_with_empty_graph_reruns_plan` (stub planner), `paused_goal_is_reticked_on_resume_interrupted`, `clean_stop_marks_nonterminal_goals_paused`.
-- [ ] **Step 2:** FAIL.
-- [ ] **Step 3:** implement.
-- [ ] **Step 4:** PASS; `cargo build -p single-runtime -j2`.
-- [ ] **Step 5: Commit:** `feat: coordinator resume_interrupted — re-tick on daemon restart, paused state on clean stop`
+- [x] **Step 1:** failing tests (tempdir daemon-start path): `running_goal_with_pending_node_and_no_live_task_is_reticked_and_events_session_resumed`, `planning_goal_with_empty_graph_reruns_plan` (stub planner), `paused_goal_is_reticked_on_resume_interrupted`, `clean_stop_marks_nonterminal_goals_paused`.
+- [x] **Step 2:** FAIL.
+- [x] **Step 3:** implement.
+- [x] **Step 4:** PASS; `cargo build -p single-runtime -j2`.
+- [x] **Step 5: Commit:** `feat: coordinator resume_interrupted — re-tick on daemon restart, paused state on clean stop`
 
 ---
 
@@ -498,11 +498,11 @@ Landing before Part E (self-heal) per spec §16's stated order — resume logic 
 
 **Interfaces:** after `session/load` replay (E27), if the session has a `Running`/`WaitingOnCapacity` goal, re-attach its event long-poll so a restarted Zed panel keeps streaming. `single goal resume <id>` CLI wraps `coordinator::resume_interrupted`'s single-goal path.
 
-- [ ] **Step 1:** failing test `goal_resume_parses_and_dispatches` (arg-parse) + (if acp present) a scripted-client test `session_load_reattaches_long_poll_for_inflight_goal`.
-- [ ] **Step 2:** FAIL.
-- [ ] **Step 3:** implement; if `single acp` doesn't exist in this checkout, note the deferral explicitly in the commit.
-- [ ] **Step 4:** PASS; `cargo build -p single-cli -p single-runtime -j2`.
-- [ ] **Step 5: Commit:** `feat: single goal resume and acp session/load re-attach for in-flight goals`
+- [x] **Step 1:** failing test `goal_resume_parses_and_dispatches` (arg-parse) + (if acp present) a scripted-client test `session_load_reattaches_long_poll_for_inflight_goal`.
+- [x] **Step 2:** FAIL.
+- [x] **Step 3:** implement; if `single acp` doesn't exist in this checkout, note the deferral explicitly in the commit.
+- [x] **Step 4:** PASS; `cargo build -p single-cli -p single-runtime -j2`.
+- [x] **Step 5: Commit:** `feat: single goal resume and acp session/load re-attach for in-flight goals`
 
 ---
 
