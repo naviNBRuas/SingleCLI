@@ -9,6 +9,16 @@ patch version (`0.0.x`) carries fixes, per [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## [Unreleased]
 
+## [0.13.2]
+
+- Fixed: `single_core::redact`'s generic high-entropy detector was also
+  flagging JSON/code fragments (e.g. a planner prompt's
+  `{"id":"s1",...,"depends_on":[]}` schema example) as secret-shaped —
+  found live via `single task run` with a real planner-style prompt.
+  Tokens containing `{`, `}`, `[`, `]`, or `"` are now excluded from
+  that check; `key=value`-style assignment detection is unaffected
+  since it already extracts only the value span.
+
 ## [0.13.1]
 
 - Fixed: `single_core::redact`'s generic high-entropy detector was

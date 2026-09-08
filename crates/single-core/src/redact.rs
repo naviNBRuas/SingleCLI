@@ -428,6 +428,19 @@ fn find_high_entropy_tokens(text: &str) -> Vec<(usize, usize)> {
         if word.contains('/') || looks_like_a_filename(word) {
             continue;
         }
+        // Live-verification finding: a JSON/code fragment ("{"id":"s1",
+        // ...,"depends_on":[]}" — a real planner-prompt example) is one
+        // whitespace-delimited "word" with plenty of punctuation variety,
+        // which reads as high entropy the same way a real secret does. A
+        // bearer-token-shaped secret essentially never contains any of
+        // these structural characters, so their presence is a strong,
+        // cheap signal this is code/data, not a secret — assignment-style
+        // detection (`key=value`) already covers the one case where a
+        // secret legitimately sits next to such punctuation, since it
+        // extracts only the value span, stopping at whitespace/quotes.
+        if word.chars().any(|c| matches!(c, '{' | '}' | '[' | ']' | '"')) {
+            continue;
+        }
         let has_digit = word.chars().any(|c| c.is_ascii_digit());
         let has_alpha = word.chars().any(|c| c.is_ascii_alphabetic());
         if !has_digit || !has_alpha {
@@ -597,6 +610,22 @@ mod tests {
         let text = "Read docs/queue/E00-platform-foundation/HANDOFF.md and \
                      nbr-workspace/docs/queue/E03-vault-evolution/01-vault-core-ontology.md, \
                      then update EXECUTION-PLAN.md when done.";
+        let (out, aliases) = scan_and_replace(&store, &keychain, "sess1", text).unwrap();
+        assert_eq!(aliases.len(), 0, "{out}");
+        assert_eq!(out, text);
+    }
+
+    /// Live-verification regression: a real planner-prompt JSON schema
+    /// example (`single-runtime`'s own `PLAN_INSTRUCTION`) is one
+    /// whitespace-delimited "word" full of punctuation variety — high
+    /// entropy for the wrong reason. Confirmed live via `single task run`
+    /// with a JSON-example prompt before this fix.
+    #[test]
+    fn does_not_redact_json_schema_examples() {
+        let (conn, keychain) = setup();
+        let store = RedactStore { conn: &conn };
+        let text = "Output ONLY a JSON array. Each element: \
+                     {\"id\":\"s1\",\"desc\":\"...\",\"kind\":\"code|test|research|review|docs|infra\",\"effort\":\"quick|standard|deep\",\"depends_on\":[]}";
         let (out, aliases) = scan_and_replace(&store, &keychain, "sess1", text).unwrap();
         assert_eq!(aliases.len(), 0, "{out}");
         assert_eq!(out, text);
