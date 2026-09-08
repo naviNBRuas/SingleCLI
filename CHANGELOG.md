@@ -9,6 +9,15 @@ patch version (`0.0.x`) carries fixes, per [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## [Unreleased]
 
+## [0.13.0]
+
+- Added: `single secret promote-alias <alias> <name>` — moves a live
+  redaction alias (still within its 3h TTL) into a properly named
+  secret via the OS keychain, then deletes the pending-alias row.
+  Prompts for confirmation unless `--yes` is given. New
+  `single_core::redact::take_alias_value` and
+  `Request::SecretPromoteAlias` back it.
+
 ## [0.12.0]
 
 Zed + SingleCLI deep integration (E29): live secret redaction ahead of
