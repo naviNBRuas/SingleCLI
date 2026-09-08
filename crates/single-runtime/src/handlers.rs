@@ -1729,6 +1729,12 @@ fn dispatch(
             let redact_store = single_core::redact::RedactStore { conn: &conn };
             let secret_store = single_core::secrets::SecretTool;
             let (text, _aliases) = single_core::redact::scan_and_replace(&redact_store, &secret_store, &session_id, &text)?;
+            // E29: don't start a duplicate goal for an ask that's already
+            // in flight (possibly from a different session/prompt) — hand
+            // back the existing goal instead.
+            if let Some(existing) = crate::coordinator::goal::find_overlapping(&conn, &text)? {
+                return Ok(ResponseData::GoalId(existing.id));
+            }
             let gmode = mode
                 .as_deref()
                 .and_then(|m| crate::coordinator::graph::GoalMode::parse(m).ok())

@@ -195,6 +195,31 @@ pub fn active(conn: &Connection) -> Result<Vec<Goal>> {
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
+/// E29: normalized-token-overlap check against every active goal's
+/// `text`, used at goal submission to detect "this is the same ask
+/// already in flight" across sessions/prompts rather than starting a
+/// duplicate. Not semantic/LLM-based — a fixed threshold on shared
+/// lowercased word tokens (>2 chars, to drop stopword-length noise) is
+/// the v1 cut; a documented follow-up if it proves too coarse.
+pub fn find_overlapping(conn: &Connection, text: &str) -> Result<Option<Goal>> {
+    fn tokens(s: &str) -> std::collections::HashSet<String> {
+        s.to_lowercase().split(|c: char| !c.is_alphanumeric()).filter(|w| w.len() > 2).map(|w| w.to_string()).collect()
+    }
+    let want = tokens(text);
+    if want.is_empty() {
+        return Ok(None);
+    }
+    for g in active(conn)? {
+        let have = tokens(&g.text);
+        let shared = want.intersection(&have).count();
+        let smaller = want.len().min(have.len());
+        if smaller > 0 && (shared as f64 / smaller as f64) >= 0.6 {
+            return Ok(Some(g));
+        }
+    }
+    Ok(None)
+}
+
 /// All goals currently in one status — used by `resume_interrupted`
 /// (E28 spec §10) to find `Paused` goals, which `active()` deliberately
 /// excludes (a paused goal doesn't get ticked until something explicitly
@@ -499,6 +524,43 @@ mod tests {
             output_ref: None,
             earliest_retry_at_ms: None,
         }
+    }
+
+    #[test]
+    fn find_overlapping_matches_exact_duplicate_text() {
+        let conn = mem();
+        let s = super::super::session::new_session(&conn, std::path::Path::new("/tmp/p")).unwrap();
+        let g = create(&conn, &s.id, "fix the login bug in auth.rs", GoalMode::Auto, 25, 60).unwrap();
+        let found = find_overlapping(&conn, "fix the login bug in auth.rs").unwrap();
+        assert_eq!(found.unwrap().id, g.id);
+    }
+
+    #[test]
+    fn find_overlapping_matches_near_duplicate_phrasing() {
+        let conn = mem();
+        let s = super::super::session::new_session(&conn, std::path::Path::new("/tmp/p")).unwrap();
+        create(&conn, &s.id, "please fix the login bug found in auth.rs today", GoalMode::Auto, 25, 60).unwrap();
+        let found = find_overlapping(&conn, "fix login bug in auth.rs").unwrap();
+        assert!(found.is_some());
+    }
+
+    #[test]
+    fn find_overlapping_ignores_distinct_asks() {
+        let conn = mem();
+        let s = super::super::session::new_session(&conn, std::path::Path::new("/tmp/p")).unwrap();
+        create(&conn, &s.id, "fix the login bug in auth.rs", GoalMode::Auto, 25, 60).unwrap();
+        let found = find_overlapping(&conn, "add dark mode to the settings page").unwrap();
+        assert!(found.is_none());
+    }
+
+    #[test]
+    fn find_overlapping_ignores_terminal_goals() {
+        let conn = mem();
+        let s = super::super::session::new_session(&conn, std::path::Path::new("/tmp/p")).unwrap();
+        let g = create(&conn, &s.id, "fix the login bug in auth.rs", GoalMode::Auto, 25, 60).unwrap();
+        set_status(&conn, &g.id, GoalStatus::Done).unwrap();
+        let found = find_overlapping(&conn, "fix the login bug in auth.rs").unwrap();
+        assert!(found.is_none());
     }
 
     #[test]
