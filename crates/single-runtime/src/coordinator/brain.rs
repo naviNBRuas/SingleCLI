@@ -141,6 +141,7 @@ pub fn specs_to_graph(specs: &[PlanNodeSpec], table: &RoutingTable, health: &Poo
             attempts: 0,
             worktree: s.kind.default_worktree(),
             output_ref: None,
+            earliest_retry_at_ms: None,
         })
         .collect();
     TaskGraph { nodes }

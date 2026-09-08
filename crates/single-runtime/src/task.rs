@@ -119,7 +119,7 @@ pub fn ensure_schema(conn: &Connection) -> Result<()> {
 /// first so re-running `ensure_schema` against an already-migrated
 /// database (every daemon startup) doesn't error trying to re-add a
 /// column that's already there.
-fn add_column_if_missing(conn: &Connection, table: &str, column: &str, ddl: &str) -> Result<()> {
+pub(crate) fn add_column_if_missing(conn: &Connection, table: &str, column: &str, ddl: &str) -> Result<()> {
     let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
     let exists = stmt
         .query_map([], |row| row.get::<_, String>("name"))?

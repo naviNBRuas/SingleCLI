@@ -21,6 +21,12 @@ pub enum EventKind {
     Integrated,
     Budget,
     Message,
+    /// E28 spec §8: a goal's only routable candidates are exhausted/benched;
+    /// body carries the reason + ETA (`goal::set_waiting_on_capacity`).
+    CapacityWait,
+    /// E28 spec §8: a `waiting_on_capacity` goal's retry stamp passed and a
+    /// node was re-dispatched.
+    CapacityResumed,
 }
 
 impl EventKind {
@@ -37,6 +43,8 @@ impl EventKind {
             EventKind::Integrated => "integrated",
             EventKind::Budget => "budget",
             EventKind::Message => "message",
+            EventKind::CapacityWait => "capacity_wait",
+            EventKind::CapacityResumed => "capacity_resumed",
         }
     }
 }

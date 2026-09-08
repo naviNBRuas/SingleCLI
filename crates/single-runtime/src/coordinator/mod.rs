@@ -87,6 +87,7 @@ pub fn plan_goal(
             attempts: 0,
             worktree: false, // loop iterates in the goal cwd, like the prototype
             output_ref: None,
+            earliest_retry_at_ms: None,
         };
         events::append(conn, &goal.session_id, Some(goal_id), events::EventKind::Plan, "careful mode: 1 iterating node")?;
         graph::TaskGraph { nodes: vec![node] }

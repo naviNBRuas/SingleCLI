@@ -147,8 +147,10 @@ pub fn tick_pure(
         return vec![TickAction::RunIntegrator];
     }
 
-    // step 2: ready-set.
-    let mut ready: Vec<_> = graph.ready_set();
+    // step 2: ready-set. E28 spec §8: `ready_set_at` (not the unstamped
+    // `ready_set`) so a node still benched/exhausted (`earliest_retry_at_ms`
+    // in the future) doesn't get re-admitted every tick and spin.
+    let mut ready: Vec<_> = graph.ready_set_at(budget.now.timestamp_millis());
     if ready.is_empty() {
         return vec![TickAction::Noop];
     }
@@ -338,7 +340,7 @@ pub fn tick(
         ids
     };
     for task_id in finished {
-        settle_finished_node(ctx, conn, table, health, task_id)?;
+        settle_finished_node(ctx, conn, cfg, table, health, task_id)?;
     }
 
     for goal in goal::active(conn)? {
@@ -372,6 +374,21 @@ pub fn tick(
                 }
                 TickAction::Dispatch { node_id, agent, effort, worktree, max_steps: _ } => {
                     let Some(node) = graph.find(&node_id) else { continue };
+                    // E28 spec §8: a real re-admission out of
+                    // `waiting_on_capacity` -- its retry stamp passed and
+                    // `ready_set_at` let it back into this tick's ready
+                    // set. Clear the hold and log the resume before the
+                    // ordinary dispatch bookkeeping below.
+                    if goal.status == GoalStatus::WaitingOnCapacity {
+                        goal::clear_waiting_on_capacity(conn, &goal.id)?;
+                        events::append(
+                            conn,
+                            &goal.session_id,
+                            Some(&goal.id),
+                            EventKind::CapacityResumed,
+                            &format!("{node_id}: capacity window freed, resuming"),
+                        )?;
+                    }
                     let prompt = build_node_prompt(&graph, node);
                     let opts = crate::task::OwnedRunTaskOptions {
                         description: prompt,
@@ -428,16 +445,18 @@ pub fn on_task_finished(
     dispatcher: &dyn Dispatcher,
     task_id: i64,
 ) -> Result<()> {
-    settle_finished_node(ctx, conn, table, health, task_id)?;
+    settle_finished_node(ctx, conn, cfg, table, health, task_id)?;
     tick(ctx, conn, cfg, table, health, dispatcher)
 }
 
 /// records the outcome of one finished coordinator-backed task against its
 /// node and runs retry / supervisor / block, WITHOUT re-ticking. a no-op
 /// when `task_id` is not a running coordinator node.
+#[allow(clippy::too_many_arguments)]
 fn settle_finished_node(
     ctx: &Context,
     conn: &mut Connection,
+    cfg: &CoordinatorConfig,
     table: &RoutingTable,
     health: &PoolHealth,
     task_id: i64,
@@ -475,14 +494,20 @@ fn settle_finished_node(
     if completed {
         goal::update_node(conn, &goal_id, &node_id, NodeStatus::Done, None, artifact.as_deref(), None)?;
         events::append(conn, &goal.session_id, Some(&goal_id), EventKind::NodeDone, &node_id)?;
+    } else if rate_limited {
+        // E28 spec §8 (Part D, auto-continue): a `pool_agent::Exhausted`
+        // outcome (Task 14 mapped it onto this same `rate_limited` signal)
+        // or a CLI agent's fallback chain fully rate-limited -- either way
+        // the node isn't broken, capacity is just spent. Never falls
+        // through to the supervisor/failed path below.
+        handle_capacity_exhaustion(conn, &goal, &node_id, artifact.as_deref(), cfg)?;
     } else {
-        let semantic = false; // crash/timeout/rate-limit, not a wrong result
+        let semantic = false; // crash/timeout, not a wrong result (rate-limit handled above)
         match retry_decision(attempts, semantic) {
-            RetryDecision::RetrySameNextAgent if !rate_limited => {
+            RetryDecision::RetrySameNextAgent => {
                 // bounce the node back to pending with an incremented
                 // attempt count; the next tick re-routes it (select_agent
-                // walks past the now-known-bad agent via pool health, and
-                // dispatch-time fallback already covers rate limits).
+                // walks past the now-known-bad agent via pool health).
                 goal::update_node(
                     conn,
                     &goal_id,
@@ -515,6 +540,51 @@ fn settle_finished_node(
     }
 
     Ok(())
+}
+
+/// E28 spec §8: a node's dispatch was rate-limited/exhausted. Bounded by
+/// `max_capacity_waits_per_goal` (or a per-goal `capacity-budget=N`
+/// override) and `max_capacity_wait_minutes` (wall clock since the goal
+/// was created) — past either, the goal finally gives up to `Blocked`
+/// rather than waiting forever.
+fn handle_capacity_exhaustion(conn: &Connection, goal: &Goal, node_id: &str, artifact: Option<&str>, cfg: &CoordinatorConfig) -> Result<()> {
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let earliest_recovery_ms = artifact
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|text| parse_earliest_recovery_ms(&text))
+        // No precise stamp available (a CLI agent's fallback chain, not
+        // single-pool) -- a short heuristic hold beats failing outright;
+        // the next tick just tries again since this isn't authoritative.
+        .unwrap_or(now_ms + 5 * 60 * 1000);
+
+    let max_waits = goal.capacity_budget_override.unwrap_or(cfg.max_capacity_waits_per_goal);
+    let elapsed_minutes = (chrono::Utc::now() - goal.created_at.parse().unwrap_or_else(|_| Utc::now())).num_minutes();
+
+    if goal.capacity_waits >= max_waits || elapsed_minutes >= cfg.max_capacity_wait_minutes as i64 {
+        let reason = format!("waited {:.1}h for capacity, still exhausted", elapsed_minutes as f64 / 60.0);
+        goal::set_blocked(conn, &goal.id, &reason)?;
+        events::append(conn, &goal.session_id, Some(&goal.id), EventKind::Blocked, &reason)?;
+        return Ok(());
+    }
+
+    let eta = chrono::DateTime::from_timestamp_millis(earliest_recovery_ms).map(|d| d.to_rfc3339()).unwrap_or_default();
+    let reason = format!("{node_id}: every routable candidate exhausted, resumes ~{eta}");
+    goal::set_waiting_on_capacity(conn, &goal.id, &reason, earliest_recovery_ms)?;
+    goal::stamp_node_retry(conn, &goal.id, node_id, Some(earliest_recovery_ms))?;
+    events::append(conn, &goal.session_id, Some(&goal.id), EventKind::CapacityWait, &reason)?;
+    Ok(())
+}
+
+/// Parses the `earliest recovery at <ms>` marker `pool_agent::run_as_task`
+/// writes into a task's artifact on `Exhausted`. `None` for anything else
+/// (a CLI agent's ordinary rate-limit text) -- the caller falls back to a
+/// heuristic hold in that case.
+fn parse_earliest_recovery_ms(text: &str) -> Option<i64> {
+    let marker = "earliest recovery at ";
+    let pos = text.find(marker)?;
+    let rest = &text[pos + marker.len()..];
+    let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+    digits.parse().ok()
 }
 
 /// One iteration step for a `careful` (`single loop`) goal. `prev_artifact`
@@ -739,6 +809,7 @@ mod tests {
             attempts: 0,
             worktree: false,
             output_ref: None,
+            earliest_retry_at_ms: None,
         }
     }
 
@@ -821,6 +892,31 @@ mod tests {
         let g = TaskGraph { nodes: vec![node("s1", &[], Effort::Standard, "grok")] };
         let a = tick_pure(&g, &cfg(2), &caps(2, &[], &[]), &budget_ok(), &RoutingTable::default(), &PoolHealth::default());
         assert_eq!(a, vec![TickAction::Noop]);
+    }
+
+    #[test]
+    fn tick_skips_node_whose_retry_stamp_is_in_the_future() {
+        let mut n = node("s1", &[], Effort::Standard, "grok");
+        let mut budget = budget_ok();
+        n.earliest_retry_at_ms = Some(budget.now.timestamp_millis() + 60_000); // 1 min from now
+        let g = TaskGraph { nodes: vec![n] };
+        let a = tick_pure(&g, &cfg(6), &caps(0, &[], &[]), &budget, &RoutingTable::default(), &PoolHealth::default());
+        assert_eq!(a, vec![TickAction::Noop]);
+
+        // advance past the stamp -> re-admitted.
+        budget.now += chrono::Duration::seconds(61);
+        let a2 = tick_pure(&g, &cfg(6), &caps(0, &[], &[]), &budget, &RoutingTable::default(), &PoolHealth::default());
+        assert_eq!(dispatched_ids(&a2), vec!["s1"]);
+    }
+
+    #[test]
+    fn tick_readmits_node_once_retry_stamp_passes() {
+        let mut n = node("s1", &[], Effort::Standard, "grok");
+        let budget = budget_ok();
+        n.earliest_retry_at_ms = Some(budget.now.timestamp_millis() - 1000); // already past
+        let g = TaskGraph { nodes: vec![n] };
+        let a = tick_pure(&g, &cfg(6), &caps(0, &[], &[]), &budget, &RoutingTable::default(), &PoolHealth::default());
+        assert_eq!(dispatched_ids(&a), vec!["s1"]);
     }
 
     #[test]
@@ -916,6 +1012,119 @@ mod tests {
         assert_eq!(reloaded.find("s1").unwrap().status, NodeStatus::Failed);
         assert_eq!(reloaded.find("s2").unwrap().status, NodeStatus::Running);
         assert_eq!(reloaded.find("s3").unwrap().status, NodeStatus::Done);
+    }
+
+    // ---- E28 spec §8: auto-continue on capacity exhaustion ----
+
+    fn test_ctx(root: &std::path::Path) -> crate::context::Context {
+        let dirs = single_core::SingleDirs::from_root(root.to_path_buf());
+        dirs.ensure_created().unwrap();
+        crate::context::Context { dirs, resolved: single_core::ResolvedConfig::default(), registry: single_core::builtin_registry() }
+    }
+
+    /// Sets up one goal with a single node whose backing task row is
+    /// `failed` + `rate_limited = 1` (the same shape `task::execute`
+    /// leaves after a `pool_agent::Exhausted` outcome, per Task 14), with
+    /// `artifact_path` pointing at a file containing the exact "earliest
+    /// recovery at <ms>" marker `pool_agent::run_as_task` writes.
+    fn rate_limited_goal(conn: &mut rusqlite::Connection, dir: &std::path::Path, earliest_recovery_ms: Option<i64>) -> (crate::coordinator::goal::Goal, i64) {
+        use crate::coordinator::{goal, graph::GoalMode};
+        let s = crate::coordinator::session::new_session(conn, dir).unwrap();
+        let g = goal::create(conn, &s.id, "g", GoalMode::Auto, 25, 60).unwrap();
+        let graph = TaskGraph { nodes: vec![node("s1", &[], Effort::Standard, "single-pool")] };
+        goal::save_graph(conn, &g.id, &graph).unwrap();
+
+        let artifact_path = dir.join("artifact.txt");
+        let body = match earliest_recovery_ms {
+            Some(ms) => format!("single-pool: rate limited — every keyed provider is exhausted or benched, earliest recovery at {ms}"),
+            None => "some CLI agent's rate-limit text with no parseable marker".to_string(),
+        };
+        std::fs::write(&artifact_path, &body).unwrap();
+
+        let tid = 900i64;
+        conn.execute(
+            "INSERT INTO tasks (id, description, agent, status, timed_out, created_at, updated_at, cwd, workspace_id, rate_limited, artifact_path)
+             VALUES (?1, 'x', 'single-pool', 'failed', 0, '', '', '', '', 1, ?2)",
+            rusqlite::params![tid, artifact_path.display().to_string()],
+        )
+        .unwrap();
+        goal::update_node(conn, &g.id, "s1", NodeStatus::Running, Some(tid), None, None).unwrap();
+        (g, tid)
+    }
+
+    #[test]
+    fn exhausted_dispatch_moves_node_to_pending_with_retry_stamp_and_goal_to_waiting_on_capacity() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = test_ctx(tmp.path());
+        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::coordinator::ensure_coordinator_schema(&conn).unwrap();
+        crate::task::ensure_schema(&conn).unwrap();
+
+        let earliest_ms = Utc::now().timestamp_millis() + 90_000;
+        let (g, tid) = rate_limited_goal(&mut conn, tmp.path(), Some(earliest_ms));
+
+        settle_finished_node(&ctx, &mut conn, &CoordinatorConfig::default(), &RoutingTable::default(), &PoolHealth::default(), tid).unwrap();
+
+        let reloaded_goal = crate::coordinator::goal::get(&conn, &g.id).unwrap().unwrap();
+        assert_eq!(reloaded_goal.status, crate::coordinator::graph::GoalStatus::WaitingOnCapacity);
+        assert_eq!(reloaded_goal.earliest_retry_at_ms, Some(earliest_ms));
+        assert_eq!(reloaded_goal.capacity_waits, 1);
+        assert!(reloaded_goal.capacity_reason.unwrap().contains("s1"));
+
+        let reloaded_graph = crate::coordinator::goal::load_graph(&conn, &g.id).unwrap();
+        let n = reloaded_graph.find("s1").unwrap();
+        assert_eq!(n.status, NodeStatus::Pending);
+        assert_eq!(n.earliest_retry_at_ms, Some(earliest_ms));
+    }
+
+    #[test]
+    fn exhausted_dispatch_falls_back_to_heuristic_hold_when_no_marker_present() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = test_ctx(tmp.path());
+        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::coordinator::ensure_coordinator_schema(&conn).unwrap();
+        crate::task::ensure_schema(&conn).unwrap();
+
+        let before = Utc::now().timestamp_millis();
+        let (g, tid) = rate_limited_goal(&mut conn, tmp.path(), None); // a CLI agent, no marker
+        settle_finished_node(&ctx, &mut conn, &CoordinatorConfig::default(), &RoutingTable::default(), &PoolHealth::default(), tid).unwrap();
+
+        let reloaded_goal = crate::coordinator::goal::get(&conn, &g.id).unwrap().unwrap();
+        assert_eq!(reloaded_goal.status, crate::coordinator::graph::GoalStatus::WaitingOnCapacity);
+        // heuristic hold is ~5 minutes out, not authoritative -- just confirm it's in the future.
+        assert!(reloaded_goal.earliest_retry_at_ms.unwrap() > before);
+    }
+
+    #[test]
+    fn resume_budget_exhaustion_moves_goal_to_blocked_with_reason() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = test_ctx(tmp.path());
+        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::coordinator::ensure_coordinator_schema(&conn).unwrap();
+        crate::task::ensure_schema(&conn).unwrap();
+
+        let (g, tid) = rate_limited_goal(&mut conn, tmp.path(), Some(Utc::now().timestamp_millis() + 1000));
+        // A cfg with max_capacity_waits_per_goal = 0 -> the very first
+        // exhaustion already exceeds budget -> Blocked, not WaitingOnCapacity.
+        let tight_cfg = CoordinatorConfig { max_capacity_waits_per_goal: 0, ..Default::default() };
+        settle_finished_node(&ctx, &mut conn, &tight_cfg, &RoutingTable::default(), &PoolHealth::default(), tid).unwrap();
+
+        let reloaded_goal = crate::coordinator::goal::get(&conn, &g.id).unwrap().unwrap();
+        assert_eq!(reloaded_goal.status, crate::coordinator::graph::GoalStatus::Blocked);
+        assert!(reloaded_goal.blocked_reason.unwrap().contains("capacity"));
+    }
+
+    #[test]
+    fn capacity_budget_amend_raises_the_per_goal_limit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::coordinator::ensure_coordinator_schema(&conn).unwrap();
+        crate::task::ensure_schema(&conn).unwrap();
+        let (g, _tid) = rate_limited_goal(&mut conn, tmp.path(), Some(Utc::now().timestamp_millis()));
+
+        assert_eq!(crate::coordinator::goal::get(&conn, &g.id).unwrap().unwrap().capacity_budget_override, None);
+        crate::coordinator::goal::raise_capacity_budget(&conn, &g.id, 50).unwrap();
+        assert_eq!(crate::coordinator::goal::get(&conn, &g.id).unwrap().unwrap().capacity_budget_override, Some(50));
     }
 
     #[test]

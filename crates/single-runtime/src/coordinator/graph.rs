@@ -40,6 +40,11 @@ str_enum!(GoalMode { Auto => "auto", Plan => "plan", Careful => "careful", Dry =
 str_enum!(GoalStatus {
     Planning => "planning", Running => "running", Queued => "queued", Blocked => "blocked",
     Done => "done", Failed => "failed", Cancelled => "cancelled",
+    // E28 spec §8 (Part D): between `running` and `blocked` — every
+    // routable candidate is exhausted/benched, holding for a stamped
+    // retry time rather than failing outright. `Paused` (Part F,
+    // self-resuming sessions) is a later phase, not added here.
+    WaitingOnCapacity => "waiting_on_capacity",
 });
 
 impl NodeKind {
@@ -71,6 +76,13 @@ pub struct Node {
     pub worktree: bool,
     #[serde(default)]
     pub output_ref: Option<String>,
+    /// E28 spec §8: set when this node bounced back to `Pending` after a
+    /// capacity exhaustion (`pool_agent::Exhausted` or a CLI fallback
+    /// chain fully rate-limited) — `ready_set_at` excludes it until this
+    /// time passes, driven by real cooldown state rather than a fixed
+    /// sleep. `None` for an ordinary pending node.
+    #[serde(default)]
+    pub earliest_retry_at_ms: Option<i64>,
 }
 
 fn pending() -> NodeStatus {
@@ -108,9 +120,19 @@ impl TaskGraph {
     /// `done` or `skipped`. a dependency id with no matching node counts as
     /// unsatisfied (defensive — a malformed plan can't unblock a node).
     pub fn ready_set(&self) -> Vec<&Node> {
+        self.ready_set_at(i64::MAX)
+    }
+
+    /// Same as `ready_set`, but also excludes a node whose
+    /// `earliest_retry_at_ms` stamp (E28 spec §8) is still in the future
+    /// relative to `now_ms` — the scheduler tick's admit pass calls this
+    /// with the real clock so a capacity-exhausted node can't spin, and
+    /// re-admits itself automatically once the stamp passes.
+    pub fn ready_set_at(&self, now_ms: i64) -> Vec<&Node> {
         self.nodes
             .iter()
             .filter(|n| matches!(n.status, NodeStatus::Pending | NodeStatus::Ready))
+            .filter(|n| n.earliest_retry_at_ms.is_none_or(|t| t <= now_ms))
             .filter(|n| {
                 n.depends_on.iter().all(|dep| {
                     matches!(
@@ -237,6 +259,7 @@ mod tests {
             attempts: 0,
             worktree: false,
             output_ref: None,
+            earliest_retry_at_ms: None,
         }
     }
 

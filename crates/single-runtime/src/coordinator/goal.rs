@@ -24,6 +24,19 @@ pub struct Goal {
     pub blocked_reason: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+    /// E28 spec §8: which providers/pools are spent — set alongside
+    /// `WaitingOnCapacity`, cleared on resume.
+    pub capacity_reason: Option<String>,
+    /// E28 spec §8: unix-ms ETA for the earliest-recovering candidate;
+    /// paired with `capacity_reason`.
+    pub earliest_retry_at_ms: Option<i64>,
+    /// E28 spec §8: how many times this goal has entered
+    /// `WaitingOnCapacity` — checked against `max_capacity_waits_per_goal`
+    /// (or `capacity_budget_override`) before finally giving up to `Blocked`.
+    pub capacity_waits: u32,
+    /// E28 spec §8: `single goal amend <id> capacity-budget=N` override of
+    /// `CoordinatorConfig::max_capacity_waits_per_goal` for this goal only.
+    pub capacity_budget_override: Option<u32>,
 }
 
 pub fn ensure_schema(conn: &Connection) -> Result<()> {
@@ -64,6 +77,14 @@ pub fn ensure_schema(conn: &Connection) -> Result<()> {
         )",
         (),
     )?;
+    // E28 spec §8/§12 (Part D, auto-continue): additive columns, via
+    // `add_column_if_missing` per the plan (same helper `task.rs`'s
+    // `tasks` table migrations use) — no rewrite of either table.
+    crate::task::add_column_if_missing(conn, "goals", "capacity_reason", "TEXT")?;
+    crate::task::add_column_if_missing(conn, "goals", "earliest_retry_at_ms", "INTEGER")?;
+    crate::task::add_column_if_missing(conn, "goals", "capacity_waits", "INTEGER NOT NULL DEFAULT 0")?;
+    crate::task::add_column_if_missing(conn, "goals", "capacity_budget_override", "INTEGER")?;
+    crate::task::add_column_if_missing(conn, "graph_nodes", "earliest_retry_at_ms", "INTEGER")?;
     Ok(())
 }
 
@@ -123,6 +144,10 @@ fn row_to_goal(row: &rusqlite::Row) -> rusqlite::Result<Goal> {
         blocked_reason: row.get("blocked_reason")?,
         created_at: row.get("created_at")?,
         updated_at: row.get("updated_at")?,
+        capacity_reason: row.get("capacity_reason")?,
+        earliest_retry_at_ms: row.get("earliest_retry_at_ms")?,
+        capacity_waits: row.get("capacity_waits")?,
+        capacity_budget_override: row.get("capacity_budget_override")?,
     })
 }
 
@@ -143,10 +168,13 @@ pub fn list(conn: &Connection, session_id: Option<&str>) -> Result<Vec<Goal>> {
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
-/// non-terminal goals — the scheduler tick iterates these.
+/// non-terminal goals — the scheduler tick iterates these. Includes
+/// `waiting_on_capacity` (E28 spec §8) so a held goal keeps getting
+/// ticked and re-admits its node once the retry stamp passes, instead of
+/// going stale the way a genuinely terminal status would.
 pub fn active(conn: &Connection) -> Result<Vec<Goal>> {
     let mut stmt = conn.prepare(
-        "SELECT * FROM goals WHERE status IN ('planning','running','queued') ORDER BY created_at ASC",
+        "SELECT * FROM goals WHERE status IN ('planning','running','queued','waiting_on_capacity') ORDER BY created_at ASC",
     )?;
     let rows = stmt.query_map([], row_to_goal)?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -164,6 +192,56 @@ pub fn set_blocked(conn: &Connection, id: &str, reason: &str) -> Result<()> {
     conn.execute(
         "UPDATE goals SET status = 'blocked', blocked_reason = ?2, updated_at = ?3 WHERE id = ?1",
         params![id, reason, now()],
+    )?;
+    Ok(())
+}
+
+/// E28 spec §8: moves a goal into `waiting_on_capacity`, recording why and
+/// the earliest recovery time, and bumps the `capacity_waits` counter the
+/// resume budget is checked against. Never touches node status — the
+/// caller (`scheduler::settle_finished_node`) stamps the specific node
+/// via `stamp_node_retry` in the same operation.
+pub fn set_waiting_on_capacity(conn: &Connection, id: &str, reason: &str, earliest_retry_at_ms: i64) -> Result<()> {
+    conn.execute(
+        "UPDATE goals SET status = 'waiting_on_capacity', capacity_reason = ?2, earliest_retry_at_ms = ?3,
+                          capacity_waits = capacity_waits + 1, updated_at = ?4
+         WHERE id = ?1",
+        params![id, reason, earliest_retry_at_ms, now()],
+    )?;
+    Ok(())
+}
+
+/// E28 spec §8: clears the capacity-wait bookkeeping and moves the goal
+/// back to `running` — called when a stamped node's retry time passes and
+/// the scheduler actually re-dispatches it (`capacity_resumed`).
+pub fn clear_waiting_on_capacity(conn: &Connection, id: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE goals SET status = 'running', capacity_reason = NULL, earliest_retry_at_ms = NULL, updated_at = ?2 WHERE id = ?1",
+        params![id, now()],
+    )?;
+    Ok(())
+}
+
+/// E28 spec §8: `single goal amend <id> capacity-budget=N` — raises this
+/// goal's own `max_capacity_waits_per_goal` override (reuses the existing
+/// `budget=N` amend-text parsing precedent, extended to a second key).
+pub fn raise_capacity_budget(conn: &Connection, id: &str, new_budget: u32) -> Result<()> {
+    conn.execute(
+        "UPDATE goals SET capacity_budget_override = ?2, updated_at = ?3 WHERE id = ?1",
+        params![id, new_budget, now()],
+    )?;
+    Ok(())
+}
+
+/// E28 spec §8: stamps (or clears, when `None`) one node's
+/// `earliest_retry_at_ms` and sets it back to `Pending` so the next tick's
+/// `ready_set_at` re-evaluates it once the stamp passes. A plain `SET`
+/// (not `update_node`'s `COALESCE`) since clearing the stamp on eventual
+/// success is a real requirement, not just "leave it alone".
+pub fn stamp_node_retry(conn: &Connection, goal_id: &str, node_id: &str, earliest_retry_at_ms: Option<i64>) -> Result<()> {
+    conn.execute(
+        "UPDATE graph_nodes SET status = 'pending', earliest_retry_at_ms = ?3 WHERE goal_id = ?1 AND id = ?2",
+        params![goal_id, node_id, earliest_retry_at_ms],
     )?;
     Ok(())
 }
@@ -219,8 +297,8 @@ pub fn save_graph(conn: &mut Connection, goal_id: &str, graph: &TaskGraph) -> Re
     for n in &graph.nodes {
         tx.execute(
             "INSERT INTO graph_nodes
-             (goal_id, id, desc, kind, effort, agent, depends_on, status, task_id, attempts, worktree, output_ref)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
+             (goal_id, id, desc, kind, effort, agent, depends_on, status, task_id, attempts, worktree, output_ref, earliest_retry_at_ms)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
             params![
                 goal_id,
                 n.id,
@@ -234,6 +312,7 @@ pub fn save_graph(conn: &mut Connection, goal_id: &str, graph: &TaskGraph) -> Re
                 n.attempts,
                 n.worktree as i64,
                 n.output_ref,
+                n.earliest_retry_at_ms,
             ],
         )?;
     }
@@ -243,7 +322,7 @@ pub fn save_graph(conn: &mut Connection, goal_id: &str, graph: &TaskGraph) -> Re
 
 pub fn load_graph(conn: &Connection, goal_id: &str) -> Result<TaskGraph> {
     let mut stmt = conn.prepare(
-        "SELECT id, desc, kind, effort, agent, depends_on, status, task_id, attempts, worktree, output_ref
+        "SELECT id, desc, kind, effort, agent, depends_on, status, task_id, attempts, worktree, output_ref, earliest_retry_at_ms
          FROM graph_nodes WHERE goal_id = ?1 ORDER BY id ASC",
     )?;
     let nodes = stmt
@@ -261,6 +340,7 @@ pub fn load_graph(conn: &Connection, goal_id: &str) -> Result<TaskGraph> {
                 attempts: row.get("attempts")?,
                 worktree: row.get::<_, i64>("worktree")? != 0,
                 output_ref: row.get("output_ref")?,
+                earliest_retry_at_ms: row.get("earliest_retry_at_ms")?,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -324,6 +404,7 @@ mod tests {
             attempts: 0,
             worktree: true,
             output_ref: None,
+            earliest_retry_at_ms: None,
         }
     }
 
