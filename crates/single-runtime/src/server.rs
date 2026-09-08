@@ -29,7 +29,7 @@ pub async fn serve(socket_path: &std::path::Path) -> Result<()> {
     // sweep those orphans to `failed` before accepting connections.
     // Best-effort: a reconciliation failure must not stop the daemon.
     match Context::load().and_then(|ctx| {
-        let conn = crate::state::open(&ctx.dirs.db_path())?;
+        let mut conn = crate::state::open(&ctx.dirs.db_path())?;
         crate::task::ensure_schema(&conn)?;
         crate::state::ensure_events_schema(&conn)?;
         crate::coordinator::ensure_coordinator_schema(&conn)?;
@@ -41,6 +41,14 @@ pub async fn serve(socket_path: &std::path::Path) -> Result<()> {
         // backing task rows so there are no permanent zombie nodes.
         if let Err(e) = crate::coordinator::scheduler::reconcile(&conn) {
             tracing::warn!(error = %e, "coordinator node reconciliation failed");
+        }
+        // E28 spec §10 (Part F): after the crash-oriented reconcile above,
+        // pick up what it doesn't catch — a clean-stop `Paused` goal, or a
+        // `Planning` goal whose planner call never got to write a graph.
+        match crate::coordinator::resume_interrupted(&ctx, &mut conn) {
+            Ok(0) => {}
+            Ok(touched) => tracing::info!(count = touched, "resumed goal(s) interrupted by the previous daemon"),
+            Err(e) => tracing::warn!(error = %e, "resume_interrupted failed"),
         }
         Ok(n)
     }) {

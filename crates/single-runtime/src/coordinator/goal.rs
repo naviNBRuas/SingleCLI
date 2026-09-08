@@ -180,6 +180,51 @@ pub fn active(conn: &Connection) -> Result<Vec<Goal>> {
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
+/// All goals currently in one status — used by `resume_interrupted`
+/// (E28 spec §10) to find `Paused` goals, which `active()` deliberately
+/// excludes (a paused goal doesn't get ticked until something explicitly
+/// resumes it).
+pub fn list_by_status(conn: &Connection, status: GoalStatus) -> Result<Vec<Goal>> {
+    let mut stmt = conn.prepare("SELECT * FROM goals WHERE status = ?1 ORDER BY created_at ASC")?;
+    let rows = stmt.query_map([status.as_str()], row_to_goal)?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+/// E28 spec §10: a clean `single daemon stop` marks every currently
+/// active goal `Paused` (instead of leaving it `Running`, which
+/// `scheduler::reconcile`'s PID check would otherwise mistake for a
+/// crash) -- returns how many were touched.
+pub fn pause_all_active(conn: &Connection) -> Result<usize> {
+    Ok(conn.execute(
+        "UPDATE goals SET status = 'paused', updated_at = ?1 WHERE status IN ('planning','running','queued','waiting_on_capacity')",
+        params![now()],
+    )?)
+}
+
+/// E28 spec §10: full reset back to `running` for a goal a human (or
+/// `resume_interrupted`) judges recoverable -- clears every hold reason
+/// (`blocked_reason`, capacity bookkeeping) so stale state from before
+/// the pause/block can't linger and confuse the next tick.
+pub fn resume_status(conn: &Connection, id: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE goals SET status = 'running', blocked_reason = NULL, capacity_reason = NULL, earliest_retry_at_ms = NULL, updated_at = ?2
+         WHERE id = ?1",
+        params![id, now()],
+    )?;
+    Ok(())
+}
+
+/// Companion to `resume_status` for a manually-triggered `single goal
+/// resume`: a human overriding a `Blocked` goal wants its nodes retried
+/// now, not held to a stale capacity stamp from before the block. NOT
+/// called by the automatic `resume_interrupted` path, which deliberately
+/// leaves real cooldown stamps alone (a provider's recovery time doesn't
+/// reset just because the daemon restarted).
+pub fn clear_node_retry_stamps(conn: &Connection, goal_id: &str) -> Result<()> {
+    conn.execute("UPDATE graph_nodes SET earliest_retry_at_ms = NULL WHERE goal_id = ?1", params![goal_id])?;
+    Ok(())
+}
+
 pub fn set_status(conn: &Connection, id: &str, status: GoalStatus) -> Result<()> {
     conn.execute(
         "UPDATE goals SET status = ?2, updated_at = ?3 WHERE id = ?1",

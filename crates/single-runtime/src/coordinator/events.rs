@@ -27,6 +27,9 @@ pub enum EventKind {
     /// E28 spec §8: a `waiting_on_capacity` goal's retry stamp passed and a
     /// node was re-dispatched.
     CapacityResumed,
+    /// E28 spec §10 (Part F): `resume_interrupted` (daemon start) or
+    /// `single goal resume` (manual) picked this goal back up.
+    SessionResumed,
 }
 
 impl EventKind {
@@ -45,6 +48,7 @@ impl EventKind {
             EventKind::Message => "message",
             EventKind::CapacityWait => "capacity_wait",
             EventKind::CapacityResumed => "capacity_resumed",
+            EventKind::SessionResumed => "session_resumed",
         }
     }
 }

@@ -42,9 +42,14 @@ str_enum!(GoalStatus {
     Done => "done", Failed => "failed", Cancelled => "cancelled",
     // E28 spec §8 (Part D): between `running` and `blocked` — every
     // routable candidate is exhausted/benched, holding for a stamped
-    // retry time rather than failing outright. `Paused` (Part F,
-    // self-resuming sessions) is a later phase, not added here.
+    // retry time rather than failing outright.
     WaitingOnCapacity => "waiting_on_capacity",
+    // E28 spec §10 (Part F): a clean `single daemon stop` marks its
+    // non-terminal goals `Paused` instead of leaving them `Running` --
+    // distinguishes a clean stop (caught here, by `resume_interrupted`)
+    // from a crash (leaves rows `Running`, caught by the existing
+    // PID-check `scheduler::reconcile`).
+    Paused => "paused",
 });
 
 impl NodeKind {
