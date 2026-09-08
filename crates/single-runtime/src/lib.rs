@@ -17,6 +17,7 @@ pub mod pool_agent;
 pub mod qdrant_backend;
 pub mod redis_backend;
 pub mod registry;
+pub mod self_heal;
 pub mod server;
 pub mod state;
 pub mod task;
