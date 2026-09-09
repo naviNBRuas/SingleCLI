@@ -9,6 +9,20 @@ patch version (`0.0.x`) carries fixes, per [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## [Unreleased]
 
+## [0.14.8]
+
+- Fixed: `single provider add-free` silently accepted a bare token for a
+  `Compound`-auth provider (currently just Cloudflare, which needs
+  `account_id:token`) with no error and no validation — its empty
+  `base_url` means the usual best-effort validate-URL probe never runs
+  for it either, so a malformed key read as "keyed, unvalidated",
+  indistinguishable from a good one, right up until a real dispatch hit
+  `PoolError::AuthFailed` with nothing explaining why. Live-verification
+  finding while wiring up a batch of new free-pool keys tonight. Added
+  `free_pool::validate_key_shape`, called from `add-free` before the key
+  is stored — a `Compound` provider now gets a clear error naming the
+  expected `first_half:second_half` form instead of silent acceptance.
+
 ## [0.14.7]
 
 - Fixed: a directory that was `git add`-ed while it happened to contain

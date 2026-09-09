@@ -1280,6 +1280,7 @@ fn dispatch(
             let provider = single_core::free_pool::by_id(&id).ok_or_else(|| {
                 anyhow::anyhow!("no such free provider: {id} (see `single provider list-free`)")
             })?;
+            single_core::free_pool::validate_key_shape(provider, &key).map_err(|e| anyhow::anyhow!(e))?;
             let store = single_core::secrets::SecretTool;
             let secret_name = single_core::pool_keys::secret_name(&id, "default");
             single_core::secrets::SecretStore::set(&store, &secret_name, &key)?;

@@ -134,6 +134,28 @@ pub fn by_id(id: &str) -> Option<&'static FreeProvider> {
     FREE_PROVIDERS.iter().find(|p| p.id == id)
 }
 
+/// Shape-checks a key against its provider's `Auth` requirement before
+/// `provider add-free` stores it. Live-verification finding: a
+/// `Compound` provider (currently just Cloudflare, `account_id:token`)
+/// silently accepted a bare token with no error — its empty `base_url`
+/// means the usual best-effort validate-URL probe never runs for it
+/// either, so a malformed key looked identical to a good one ("keyed,
+/// unvalidated") right up until a real dispatch hit `PoolError::AuthFailed`
+/// with no clue why. `Ok(())` for every other `Auth` variant — there's
+/// nothing shape-checkable about a bearer token or an API-key header.
+pub fn validate_key_shape(provider: &FreeProvider, key: &str) -> Result<(), String> {
+    if let Auth::Compound(second_half) = provider.auth {
+        if !key.contains(':') {
+            return Err(format!(
+                "{} needs a compound key in `first_half:{second_half}` form (e.g. Cloudflare's `account_id:token`), \
+                 got a value with no ':' separator — see the provider's signup page for what the first half is",
+                provider.id
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// The §17-resolved reason string for the five providers `sync-pool`
 /// writes `enabled = false` regardless of whether a key is on file —
 /// `sail` (needs a payment method) and the four region-walled/real-name
@@ -875,6 +897,20 @@ mod tests {
         ids.sort_unstable();
         ids.dedup();
         assert_eq!(ids.len(), before, "duplicate provider id in FREE_PROVIDERS");
+    }
+
+    #[test]
+    fn validate_key_shape_rejects_a_bare_token_for_a_compound_provider() {
+        let cloudflare = by_id("cloudflare").unwrap();
+        assert!(validate_key_shape(cloudflare, "cfat_justatoken").is_err());
+        assert!(validate_key_shape(cloudflare, "7d911b71704e00b8:cfat_justatoken").is_ok());
+    }
+
+    #[test]
+    fn validate_key_shape_accepts_anything_for_non_compound_providers() {
+        let groq = by_id("groq").unwrap();
+        assert!(validate_key_shape(groq, "gsk-anything-at-all").is_ok());
+        assert!(validate_key_shape(groq, "no-colon-either").is_ok());
     }
 
     #[test]
