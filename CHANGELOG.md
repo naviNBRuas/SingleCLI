@@ -9,6 +9,19 @@ patch version (`0.0.x`) carries fixes, per [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## [Unreleased]
 
+## [0.14.6]
+
+- Fixed: a goal blocked with `waited N.Nh for capacity, still exhausted`
+  had no recovery path either — `max_capacity_wait_minutes` (default 720,
+  i.e. 12h) is measured from the goal's `created_at` and never resets, so
+  any goal simply older than the default hits it permanently on its next
+  capacity wait, however brief, with `budget=N`/`minutes=N` both doing
+  nothing for it. Live-verification finding while unblocking a real
+  overnight goal. Added `single goal amend <id> capacity-minutes=N`
+  (`goal::raise_capacity_wait_minutes`, mirroring the existing
+  `capacity-budget=N`), and made the ACP raise-prompt and CLI hint pick
+  this cap too when it's the one that actually tripped.
+
 ## [0.14.5]
 
 - Fixed: a goal blocked on its wall-clock cap (`blocked: time budget

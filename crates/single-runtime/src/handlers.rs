@@ -1850,6 +1850,8 @@ fn dispatch(
                 crate::coordinator::goal::raise_time_cap(&conn, &goal_id, n)?;
             } else if let Some(n) = text.strip_prefix("capacity-budget=").and_then(|s| s.trim().parse::<u32>().ok()) {
                 crate::coordinator::goal::raise_capacity_budget(&conn, &goal_id, n)?;
+            } else if let Some(n) = text.strip_prefix("capacity-minutes=").and_then(|s| s.trim().parse::<u32>().ok()) {
+                crate::coordinator::goal::raise_capacity_wait_minutes(&conn, &goal_id, n)?;
             } else {
                 crate::coordinator::events::append(
                     &conn,

@@ -418,8 +418,9 @@ enum GoalCommand {
         #[arg(long)]
         json: bool,
     },
-    /// Add context, `budget=N` to raise the dispatch cap, or `minutes=N`
-    /// to raise the wall-clock cap, and re-tick.
+    /// Add context, `budget=N` to raise the dispatch cap, `minutes=N` to
+    /// raise the wall-clock cap, or `capacity-minutes=N` to raise the
+    /// capacity-wait wall-clock cap, and re-tick.
     Amend {
         goal_id: String,
         text: Vec<String>,

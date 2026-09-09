@@ -584,9 +584,10 @@ fn handle_capacity_exhaustion(conn: &Connection, goal: &Goal, node_id: &str, art
         .unwrap_or(now_ms + 5 * 60 * 1000);
 
     let max_waits = goal.capacity_budget_override.unwrap_or(cfg.max_capacity_waits_per_goal);
+    let max_wait_minutes = goal.capacity_wait_minutes_override.unwrap_or(cfg.max_capacity_wait_minutes);
     let elapsed_minutes = (chrono::Utc::now() - goal.created_at.parse().unwrap_or_else(|_| Utc::now())).num_minutes();
 
-    if goal.capacity_waits >= max_waits || elapsed_minutes >= cfg.max_capacity_wait_minutes as i64 {
+    if goal.capacity_waits >= max_waits || elapsed_minutes >= max_wait_minutes as i64 {
         let reason = format!("waited {:.1}h for capacity, still exhausted", elapsed_minutes as f64 / 60.0);
         goal::set_blocked(conn, &goal.id, &reason)?;
         events::append(conn, &goal.session_id, Some(&goal.id), EventKind::Blocked, &reason)?;

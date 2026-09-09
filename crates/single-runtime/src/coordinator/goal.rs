@@ -37,6 +37,15 @@ pub struct Goal {
     /// E28 spec §8: `single goal amend <id> capacity-budget=N` override of
     /// `CoordinatorConfig::max_capacity_waits_per_goal` for this goal only.
     pub capacity_budget_override: Option<u32>,
+    /// `single goal amend <id> capacity-minutes=N` override of
+    /// `CoordinatorConfig::max_capacity_wait_minutes` for this goal only.
+    /// Live-verification finding: unlike `max_dispatches`/`max_minutes`,
+    /// this wall-clock cap (measured from `created_at`, never reset) had
+    /// no per-goal override at all -- an otherwise-healthy goal older than
+    /// the global default (720 min / 12h) gets permanently `Blocked` the
+    /// next time it hits a capacity wait, no matter how briefly, with no
+    /// documented recovery path.
+    pub capacity_wait_minutes_override: Option<u32>,
     /// E28 spec §9.2: last time a human touched this goal via `GoalAmend`
     /// — self-heal's coordinator category never edits a goal touched in
     /// the last hour.
@@ -91,6 +100,7 @@ pub fn ensure_schema(conn: &Connection) -> Result<()> {
     crate::task::add_column_if_missing(conn, "goals", "earliest_retry_at_ms", "INTEGER")?;
     crate::task::add_column_if_missing(conn, "goals", "capacity_waits", "INTEGER NOT NULL DEFAULT 0")?;
     crate::task::add_column_if_missing(conn, "goals", "capacity_budget_override", "INTEGER")?;
+    crate::task::add_column_if_missing(conn, "goals", "capacity_wait_minutes_override", "INTEGER")?;
     crate::task::add_column_if_missing(conn, "graph_nodes", "earliest_retry_at_ms", "INTEGER")?;
     // E28 spec §9.2 (self-heal coordinator category): `last_human_edit_at`
     // is the hard-rule marker — the pass never touches a goal a human
@@ -161,6 +171,7 @@ fn row_to_goal(row: &rusqlite::Row) -> rusqlite::Result<Goal> {
         earliest_retry_at_ms: row.get("earliest_retry_at_ms")?,
         capacity_waits: row.get("capacity_waits")?,
         capacity_budget_override: row.get("capacity_budget_override")?,
+        capacity_wait_minutes_override: row.get("capacity_wait_minutes_override")?,
         last_human_edit_at: row.get("last_human_edit_at")?,
         auto_reevals: row.get("auto_reevals")?,
     })
@@ -347,6 +358,22 @@ pub fn raise_capacity_budget(conn: &Connection, id: &str, new_budget: u32) -> Re
     conn.execute(
         "UPDATE goals SET capacity_budget_override = ?2, updated_at = ?3 WHERE id = ?1",
         params![id, new_budget, now()],
+    )?;
+    Ok(())
+}
+
+/// `single goal amend <id> capacity-minutes=N` — raises this goal's
+/// `max_capacity_wait_minutes` override and re-opens a goal blocked on
+/// having aged past the global default. Also clears `blocked_reason` and
+/// re-opens `Blocked` -> `Running` the same way `raise_dispatch_cap` does,
+/// since this cap can be the sole reason a goal is stuck.
+pub fn raise_capacity_wait_minutes(conn: &Connection, id: &str, new_cap: u32) -> Result<()> {
+    conn.execute(
+        "UPDATE goals SET capacity_wait_minutes_override = ?2,
+                          status = CASE WHEN status = 'blocked' THEN 'running' ELSE status END,
+                          blocked_reason = NULL, updated_at = ?3
+         WHERE id = ?1",
+        params![id, new_cap, now()],
     )?;
     Ok(())
 }
@@ -643,6 +670,23 @@ mod tests {
         let g2 = get(&conn, &g.id).unwrap().unwrap();
         assert_eq!(g2.status, GoalStatus::Running);
         assert_eq!(g2.max_minutes, 120);
+        assert!(g2.blocked_reason.is_none());
+    }
+
+    #[test]
+    fn raise_capacity_wait_minutes_unblocks_a_goal_stuck_on_its_aged_out_capacity_cap() {
+        let conn = mem();
+        let s = super::super::session::new_session(&conn, std::path::Path::new("/tmp/p")).unwrap();
+        let g = create(&conn, &s.id, "g", GoalMode::Auto, 25, 60).unwrap();
+        assert!(g.capacity_wait_minutes_override.is_none());
+
+        set_blocked(&conn, &g.id, "waited 12.6h for capacity, still exhausted").unwrap();
+        assert_eq!(get(&conn, &g.id).unwrap().unwrap().status, GoalStatus::Blocked);
+
+        raise_capacity_wait_minutes(&conn, &g.id, 2880).unwrap();
+        let g2 = get(&conn, &g.id).unwrap().unwrap();
+        assert_eq!(g2.status, GoalStatus::Running);
+        assert_eq!(g2.capacity_wait_minutes_override, Some(2880));
         assert!(g2.blocked_reason.is_none());
     }
 }
