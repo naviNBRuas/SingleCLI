@@ -52,7 +52,20 @@ pub fn builtin_registry() -> Vec<AgentDefinition> {
                 source: "https://code.claude.com/docs/en/setup".into(),
             }),
             unverified: false,
-            home_requirement: HomeRequirement::Either,
+            // Live-verification finding (E29 follow-up, 2026-09-09): a
+            // fully OAuth-authenticated `~/.claude.json` + matching
+            // `~/.claude/.credentials.json` (unexpired token, same
+            // `userID`/`oauthAccount`, byte-identical copy) still fails
+            // "Not logged in" when `claude` runs with `$HOME` pointed at
+            // an isolated home — confirmed directly against the CLI
+            // itself (`HOME=<isolated> claude -p ...`), not just through
+            // SingleCLI's wrapper. The same real environment with the
+            // same files at its real `$HOME` works immediately. Whatever
+            // claude actually validates against isn't fully captured by
+            // a `$HOME`-scoped file copy on this version — the same
+            // failure mode `codex`/`cursor` already document for their
+            // own real-environment-only auth.
+            home_requirement: HomeRequirement::RealRequired,
             max_concurrency: None,
             capabilities: CapabilityFlags {
                 streaming: true,
@@ -899,17 +912,17 @@ mod home_requirement_tests {
     }
 
     #[test]
-    fn codex_and_cursor_require_real_home() {
-        // Both moved their auth token into the session-global OS keyring;
-        // an isolated $HOME can neither hold nor shadow it, so a login
-        // there never persists. See their registry-entry comments.
+    fn codex_cursor_and_claude_require_real_home() {
+        // All three moved their auth token somewhere an isolated $HOME
+        // can neither hold nor shadow, so a login there never persists.
+        // See their registry-entry comments — claude's was added after a
+        // live-verification finding (E29 follow-up): a byte-identical
+        // copy of `~/.claude.json` + `~/.claude/.credentials.json` into
+        // an isolated home still fails "Not logged in", confirmed
+        // against the CLI directly, not just through SingleCLI.
         assert_eq!(find("codex").home_requirement, HomeRequirement::RealRequired);
         assert_eq!(find("cursor").home_requirement, HomeRequirement::RealRequired);
-    }
-
-    #[test]
-    fn claude_works_either_way() {
-        assert_eq!(find("claude").home_requirement, HomeRequirement::Either);
+        assert_eq!(find("claude").home_requirement, HomeRequirement::RealRequired);
     }
 
     #[test]

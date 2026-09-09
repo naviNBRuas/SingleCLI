@@ -9,6 +9,20 @@ patch version (`0.0.x`) carries fixes, per [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## [Unreleased]
 
+## [0.14.1]
+
+- Fixed: `claude`'s `home_requirement` was `Either` (isolated-home
+  capable), but live testing found a byte-identical copy of
+  `~/.claude.json` + `~/.claude/.credentials.json` (unexpired token,
+  matching `userID`/`oauthAccount`) into an isolated home still fails
+  "Not logged in" — confirmed directly against the `claude` binary
+  itself (`HOME=<isolated> claude -p ...`), not just through SingleCLI's
+  wrapper; the same files at the real `$HOME` work immediately.
+  Reclassified `RealRequired`, matching `codex`/`cursor`'s existing
+  real-environment-only auth. `single task run --agent claude` (and
+  planning/dispatch through it) now automatically routes to the real
+  home instead of silently failing every isolated-home attempt.
+
 ## [0.14.0]
 
 Two real reliability bugs found live while running real epics through the
