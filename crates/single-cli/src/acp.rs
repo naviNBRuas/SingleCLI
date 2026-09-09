@@ -474,12 +474,31 @@ impl Acp {
 
         match choice.as_deref() {
             Some("raise") => {
-                let bump = self
-                    .goal_view(goal_id)
-                    .map(|v| v.goal.max_dispatches.saturating_mul(2).max(v.goal.max_dispatches + 10))
-                    .unwrap_or(50);
-                let _ = self.socket(Request::GoalAmend { goal_id: goal_id.to_string(), text: format!("budget={bump}") });
-                self.chunk(acp_sid, &format!("[budget raised to {bump}, continuing]\n"), "agent_thought_chunk");
+                // a goal blocked on elapsed wall time re-blocks immediately
+                // if only `max_dispatches` moves — raise whichever cap the
+                // block reason actually names.
+                if reason.contains("time budget") {
+                    // `GoalSummary` doesn't carry `max_minutes` to diff
+                    // against, unlike `max_dispatches` below -- a flat
+                    // +60m extension is a fine default for a human-in-the-
+                    // loop bump (they can amend again for more).
+                    let bump = reason
+                        .rsplit("of ")
+                        .next()
+                        .and_then(|s| s.split_whitespace().next())
+                        .and_then(|s| s.parse::<u32>().ok())
+                        .map(|cap| cap + 60)
+                        .unwrap_or(120);
+                    let _ = self.socket(Request::GoalAmend { goal_id: goal_id.to_string(), text: format!("minutes={bump}") });
+                    self.chunk(acp_sid, &format!("[time budget raised to {bump}m, continuing]\n"), "agent_thought_chunk");
+                } else {
+                    let bump = self
+                        .goal_view(goal_id)
+                        .map(|v| v.goal.max_dispatches.saturating_mul(2).max(v.goal.max_dispatches + 10))
+                        .unwrap_or(50);
+                    let _ = self.socket(Request::GoalAmend { goal_id: goal_id.to_string(), text: format!("budget={bump}") });
+                    self.chunk(acp_sid, &format!("[budget raised to {bump}, continuing]\n"), "agent_thought_chunk");
+                }
                 let coord_id = self.sessions.lock().unwrap().get(acp_sid).map(|s| s.coord_id.clone()).unwrap_or_default();
                 self.stream_goal(acp_sid, &coord_id, goal_id)
             }
@@ -488,9 +507,10 @@ impl Acp {
                 "cancelled"
             }
             _ => {
+                let hint = if reason.contains("time budget") { "minutes=N" } else { "budget=N" };
                 self.chunk(
                     acp_sid,
-                    &format!("\n**Goal blocked:** {reason}\nRun `single goal amend {goal_id} budget=N` to raise the cap.\n"),
+                    &format!("\n**Goal blocked:** {reason}\nRun `single goal amend {goal_id} {hint}` to raise the cap.\n"),
                     "agent_message_chunk",
                 );
                 "end_turn"

@@ -9,6 +9,18 @@ patch version (`0.0.x`) carries fixes, per [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## [Unreleased]
 
+## [0.14.5]
+
+- Fixed: a goal blocked on its wall-clock cap (`blocked: time budget
+  spent: N min elapsed of M min cap`) had no working recovery path.
+  `single goal amend <id> budget=N` only ever raised `max_dispatches`; a
+  goal blocked on elapsed *time* re-blocked on the very next tick since
+  `max_minutes` never moved. The Zed ACP "Raise budget and continue"
+  prompt had the same gap — it always bumped the dispatch cap regardless
+  of which cap actually tripped. Added `single goal amend <id> minutes=N`
+  (`goal::raise_time_cap`) and made both the ACP prompt and the CLI's
+  printed recovery hint pick the cap that matches the real block reason.
+
 ## [0.14.4]
 
 - Fixed: the periodic self-heal pass's `zombie_rows` infra substep called

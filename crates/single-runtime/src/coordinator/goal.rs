@@ -385,6 +385,23 @@ pub fn raise_dispatch_cap(conn: &Connection, id: &str, new_cap: u32) -> Result<(
     Ok(())
 }
 
+/// `single goal amend <id> minutes=N` — raises the per-goal wall-clock cap
+/// (`max_goal_minutes`, spec §4.5) and re-opens a goal blocked on it.
+/// `budget=N` alone can't recover this: a goal blocked on elapsed wall
+/// time re-blocks immediately on the next tick if only its dispatch cap
+/// moved, since `now() - created_at` already exceeds the unchanged
+/// `max_minutes`.
+pub fn raise_time_cap(conn: &Connection, id: &str, new_cap: u32) -> Result<()> {
+    conn.execute(
+        "UPDATE goals SET max_minutes = ?2,
+                          status = CASE WHEN status = 'blocked' THEN 'running' ELSE status END,
+                          blocked_reason = NULL, updated_at = ?3
+         WHERE id = ?1",
+        params![id, new_cap, now()],
+    )?;
+    Ok(())
+}
+
 pub fn bump_dispatches(conn: &Connection, id: &str) -> Result<u32> {
     conn.execute(
         "UPDATE goals SET dispatches = dispatches + 1, updated_at = ?2 WHERE id = ?1",
@@ -610,6 +627,22 @@ mod tests {
         let g2 = get(&conn, &g.id).unwrap().unwrap();
         assert_eq!(g2.status, GoalStatus::Running);
         assert_eq!(g2.max_dispatches, 10);
+        assert!(g2.blocked_reason.is_none());
+    }
+
+    #[test]
+    fn raise_time_cap_unblocks_a_goal_blocked_on_elapsed_wall_time() {
+        let conn = mem();
+        let s = super::super::session::new_session(&conn, std::path::Path::new("/tmp/p")).unwrap();
+        let g = create(&conn, &s.id, "g", GoalMode::Auto, 25, 60).unwrap();
+
+        set_blocked(&conn, &g.id, "time budget spent: 64 min elapsed of 60 min cap").unwrap();
+        assert_eq!(get(&conn, &g.id).unwrap().unwrap().status, GoalStatus::Blocked);
+
+        raise_time_cap(&conn, &g.id, 120).unwrap();
+        let g2 = get(&conn, &g.id).unwrap().unwrap();
+        assert_eq!(g2.status, GoalStatus::Running);
+        assert_eq!(g2.max_minutes, 120);
         assert!(g2.blocked_reason.is_none());
     }
 }

@@ -1839,11 +1839,15 @@ fn dispatch(
             let g = crate::coordinator::goal::get(&conn, &goal_id)?
                 .ok_or_else(|| anyhow::anyhow!("no such goal: {goal_id}"))?;
             // `budget=N` raises the dispatch cap and re-opens a blocked goal;
-            // `capacity-budget=N` (E28 spec §8) raises this goal's
-            // `max_capacity_waits_per_goal` override; anything else is
-            // recorded as an amendment note.
+            // `minutes=N` raises the wall-clock cap the same way (a goal
+            // blocked on elapsed time, not spent dispatches, re-blocks
+            // immediately if only the dispatch cap moves); `capacity-budget=N`
+            // (E28 spec §8) raises this goal's `max_capacity_waits_per_goal`
+            // override; anything else is recorded as an amendment note.
             if let Some(n) = text.strip_prefix("budget=").and_then(|s| s.trim().parse::<u32>().ok()) {
                 crate::coordinator::goal::raise_dispatch_cap(&conn, &goal_id, n)?;
+            } else if let Some(n) = text.strip_prefix("minutes=").and_then(|s| s.trim().parse::<u32>().ok()) {
+                crate::coordinator::goal::raise_time_cap(&conn, &goal_id, n)?;
             } else if let Some(n) = text.strip_prefix("capacity-budget=").and_then(|s| s.trim().parse::<u32>().ok()) {
                 crate::coordinator::goal::raise_capacity_budget(&conn, &goal_id, n)?;
             } else {
