@@ -9,6 +9,27 @@ patch version (`0.0.x`) carries fixes, per [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## [Unreleased]
 
+## [0.14.9]
+
+- Fixed: `custom_agents::to_agent_definition` set `capabilities.tools`
+  from `run_supported` (has a `[run]` block, i.e. can be invoked
+  non-interactively) — nothing to do with actually executing tool calls.
+  Every `single-agent run --provider X` wrapper custom agent
+  (single-openrouter, single-typhoon, single-cerebras, etc.) claimed
+  full tool capability despite being a one-shot prompt→completion
+  wrapper with no tool-call protocol at all. Live-verification finding:
+  one such agent leaked a literal `<tool_call>` token straight into its
+  output when it tried to use a tool that was never going to be
+  executed; another (the built-in `single-pool`, already correctly
+  `tools: false`) fabricated a plausible-sounding but entirely fictional
+  cargo test/clippy run when asked to verify real code. `tools` is now
+  always `false` for `[run]`-based custom agents. Not yet consumed by
+  the coordinator's own routing — that's a real follow-up (steering
+  code/test/review-kind work away from non-tool agents automatically
+  instead of relying on `routing.toml` being hand-curated correctly) —
+  but `doctor`/`agent inspect` now report the truth, and any future
+  scheduler logic built on this flag won't inherit the lie.
+
 ## [0.14.8]
 
 - Fixed: `single provider add-free` silently accepted a bare token for a

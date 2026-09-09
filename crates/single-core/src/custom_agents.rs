@@ -81,7 +81,6 @@ pub fn load_all(dir: &Path) -> Result<(Vec<CustomAgentFile>, Vec<(String, String
 
 pub fn to_agent_definition(def: &CustomAgentFile) -> crate::registry::AgentDefinition {
     let mcp_supported = def.mcp.as_ref().map(|m| m.format == "json_flat" || m.format == "toml_flat").unwrap_or(false);
-    let run_supported = def.run.is_some();
 
     crate::registry::AgentDefinition {
         name: def.name.clone(),
@@ -99,7 +98,18 @@ pub fn to_agent_definition(def: &CustomAgentFile) -> crate::registry::AgentDefin
             streaming: false,
             mcp: mcp_supported,
             lsp: false,
-            tools: run_supported,
+            // Live-verification finding: this used to be `run_supported`
+            // -- "has a `[run]` block, so it can be invoked
+            // non-interactively" -- which has nothing to do with tool
+            // execution and was silently true for every custom agent
+            // with a `[run]` section, including the `single-agent run
+            // --provider X` wrappers (single-openrouter, single-typhoon,
+            // etc.), none of which actually parse or execute tool-call
+            // syntax; one leaked a literal `<tool_call>` token straight
+            // into its output. `[run]`-based custom agents are one-shot
+            // prompt→completion wrappers with no real tool-call protocol
+            // here, so this is always false for them.
+            tools: false,
             sessions: false,
             structured_output: false,
             non_interactive_run: true,
@@ -202,8 +212,27 @@ key_path = "mcpServers"
         };
         let agent_def = to_agent_definition(&def);
         assert!(agent_def.capabilities.mcp);
-        assert!(agent_def.capabilities.tools);
         assert!(matches!(agent_def.install_method, InstallMethod::Unsupported { .. }));
         assert!(agent_def.unverified);
+    }
+
+    /// Live-verification finding: `tools` used to be true for any custom
+    /// agent with a `[run]` block, conflating "can be invoked
+    /// non-interactively" with "actually executes tool calls" — every
+    /// `single-agent run --provider X` wrapper (single-openrouter,
+    /// single-typhoon, etc.) claimed full tool capability despite being
+    /// a one-shot prompt→completion wrapper with no tool-call protocol.
+    /// One observed leaking a literal `<tool_call>` token into its
+    /// output as a direct result.
+    #[test]
+    fn to_agent_definition_never_claims_tools_for_a_run_based_custom_agent() {
+        let def = CustomAgentFile {
+            name: "single-example".into(),
+            command: "single-agent-example".into(),
+            install: None,
+            run: Some(RunSpec { mode: "flag".into(), value: "--prompt".into() }),
+            mcp: None,
+        };
+        assert!(!to_agent_definition(&def).capabilities.tools);
     }
 }
