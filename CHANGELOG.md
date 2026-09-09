@@ -9,6 +9,23 @@ patch version (`0.0.x`) carries fixes, per [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## [Unreleased]
 
+## [0.14.4]
+
+- Fixed: the periodic self-heal pass's `zombie_rows` infra substep called
+  `task::reconcile_orphaned_tasks` + `coordinator::scheduler::reconcile`
+  on every tick (default every 300s), not just at genuine daemon startup.
+  Both functions assume "every non-terminal row belongs to a process that
+  no longer exists" — true exactly once, right after `serve()` binds the
+  socket (where they already run, unconditionally, before this pass ever
+  starts) — but false the rest of the daemon's life, since tasks execute
+  on in-process threads with no separate liveness check. Live-verification
+  finding: any task/node still genuinely running past one self-heal
+  interval got killed and mislabeled "interrupted: single-runtimed
+  restarted", then retried into the same wall over and over, blocking any
+  goal with a step that legitimately runs long. Removed the periodic call;
+  the one at true startup (`server.rs::serve`) already covers the real
+  case.
+
 ## [0.14.3]
 
 - Fixed: `scheduler::reconcile` (runs on daemon start, and periodically via

@@ -8,7 +8,6 @@ use rusqlite::Connection;
 
 pub fn run(ctx: &Context, conn: &Connection, cfg: &SelfHealConfig, report: &mut PassReport) -> Result<()> {
     run_step(conn, report, Category::Infra, "stale_socket", || stale_socket(ctx));
-    run_step(conn, report, Category::Infra, "zombie_rows", || zombie_rows(ctx, conn));
     run_step(conn, report, Category::Infra, "corrupt_config", || corrupt_config(ctx));
     run_step(conn, report, Category::Infra, "db_integrity", || db_integrity(ctx, conn));
     run_step(conn, report, Category::Infra, "db_backup", || db_backup(ctx, conn, cfg));
@@ -33,17 +32,6 @@ fn stale_socket(ctx: &Context) -> Result<String> {
     }
     std::fs::remove_file(&path).context("removing stale socket")?;
     Ok(format!("removed stale socket at {}", path.display()))
-}
-
-/// Extends `task::reconcile_orphaned_tasks` + `coordinator::scheduler::
-/// reconcile` — spec explicitly wants these called from the periodic
-/// pass too, not just daemon startup (a task/node can go orphaned mid-run
-/// if this process itself gets killed -9 between passes).
-fn zombie_rows(ctx: &Context, conn: &Connection) -> Result<String> {
-    let _ = ctx;
-    let tasks_touched = crate::task::reconcile_orphaned_tasks(conn)?;
-    let nodes_touched = crate::coordinator::scheduler::reconcile(conn)?;
-    Ok(format!("{tasks_touched} orphaned task(s), {nodes_touched} coordinator node(s) reconciled"))
 }
 
 /// Every `*.toml` under `~/.config/single/` is parse-checked. A broken
@@ -356,10 +344,10 @@ mod tests {
         let cfg = crate::self_heal::SelfHealConfig { categories: Categories::default(), ..crate::self_heal::SelfHealConfig::load(&ctx.dirs) };
         let mut report = PassReport::default();
         run(&ctx, &conn, &cfg, &mut report).unwrap();
-        assert_eq!(report.actions.len(), 7, "expected all 7 infra substeps to run: {report:?}");
+        assert_eq!(report.actions.len(), 6, "expected all 6 infra substeps to run: {report:?}");
         assert!(report.actions.iter().all(|a| a.ok), "a clean tempdir/fresh db should have nothing to repair: {report:?}");
 
         let events = crate::self_heal::recent_events(&conn, 20).unwrap();
-        assert_eq!(events.len(), 7);
+        assert_eq!(events.len(), 6);
     }
 }
