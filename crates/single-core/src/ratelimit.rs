@@ -35,6 +35,38 @@ pub fn looks_like_rate_limit(text: &str) -> bool {
     SIGNALS.iter().any(|signal| lower.contains(signal))
 }
 
+// Live-verification finding: an agent whose CLI is on `$PATH` but not
+// actually authenticated (`claude` here — confirmed live: `single agent
+// login claude` reported success but didn't persist credentials into
+// SingleCLI's isolated home) gets endlessly re-selected for planning/
+// dispatch, since only a rate-limit signal excludes an agent from
+// `PoolHealth::usable()` or triggers `maybe_fail_over`'s hop to the next
+// candidate — an auth failure did neither, so a broken-auth agent could
+// burn every planning attempt for a goal with no fallback ever
+// triggering. Auth failures get the identical treatment (same 15-minute
+// exclusion window, same fallback hop) since the needed response is
+// identical: stop retrying this agent right now, try the next one.
+const AUTH_FAILURE_SIGNALS: &[&str] = &[
+    "not logged in",
+    "please run /login",
+    "please log in",
+    "please login",
+    "authentication required",
+    "unauthorized",
+    "401 unauthorized",
+];
+
+/// `looks_like_rate_limit`, broadened to also flag an authentication
+/// failure — see `AUTH_FAILURE_SIGNALS`'s doc comment for why the two are
+/// treated the same downstream (temporary exclusion + fallback hop).
+pub fn looks_like_unavailable(text: &str) -> bool {
+    if looks_like_rate_limit(text) {
+        return true;
+    }
+    let lower = text.to_lowercase();
+    AUTH_FAILURE_SIGNALS.iter().any(|signal| lower.contains(signal))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -52,5 +84,24 @@ mod tests {
         assert!(!looks_like_rate_limit("error: file not found"));
         assert!(!looks_like_rate_limit("panic: index out of bounds"));
         assert!(!looks_like_rate_limit(""));
+    }
+
+    #[test]
+    fn looks_like_unavailable_detects_auth_failures() {
+        assert!(looks_like_unavailable("Not logged in · Please run /login"));
+        assert!(looks_like_unavailable("Error: authentication required"));
+        assert!(looks_like_unavailable("401 Unauthorized"));
+    }
+
+    #[test]
+    fn looks_like_unavailable_still_detects_rate_limits() {
+        assert!(looks_like_unavailable("HTTP 429 Too Many Requests"));
+    }
+
+    #[test]
+    fn looks_like_unavailable_does_not_flag_ordinary_failures() {
+        assert!(!looks_like_unavailable("error: file not found"));
+        assert!(!looks_like_unavailable("panic: index out of bounds"));
+        assert!(!looks_like_unavailable(""));
     }
 }

@@ -1150,7 +1150,7 @@ fn execute(
             // `remember_failure`.
             let rate_limited = if !outcome.success && !outcome.cancelled {
                 let combined_output = format!("{}\n{}", outcome.stdout, outcome.stderr);
-                single_core::ratelimit::looks_like_rate_limit(&combined_output)
+                single_core::ratelimit::looks_like_unavailable(&combined_output)
             } else {
                 false
             };
@@ -1199,7 +1199,7 @@ fn execute(
         }
         Err(e) => {
             let error_text = format!("{e:#}");
-            let rate_limited = single_core::ratelimit::looks_like_rate_limit(&error_text);
+            let rate_limited = single_core::ratelimit::looks_like_unavailable(&error_text);
             rate_limited_for_fallback = rate_limited;
             finish(
                 conn,

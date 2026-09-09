@@ -9,6 +9,27 @@ patch version (`0.0.x`) carries fixes, per [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## [Unreleased]
 
+## [0.14.0]
+
+Two real reliability bugs found live while running real epics through the
+coordinator, both fixed with regression tests:
+
+- Fixed: `resume_interrupted` (daemon startup) and `resume_goal` (`single
+  goal resume`) flipped a goal to `running` *before* attempting to
+  re-plan it. A failed re-plan left the goal permanently stuck at
+  `running` with an empty graph and zero dispatches — invisible to `goal
+  status` (`resume_interrupted`'s failure was only a `tracing::warn`;
+  `resume_goal`'s propagated to the CLI caller but still left the goal
+  itself silently stuck). Both now set the goal `blocked` with the real
+  failure reason instead.
+- Added: `single_core::ratelimit::looks_like_unavailable` broadens
+  rate-limit detection to also recognize authentication failures ("not
+  logged in", "please run /login", "unauthorized", ...). An agent whose
+  CLI is on `$PATH` but not actually authenticated could previously burn
+  every planning/dispatch attempt with no fallback ever triggering,
+  since only a rate-limit signal excluded an agent or advanced the
+  fallback chain. Wired into `task.rs`'s two `rate_limited` call sites.
+
 ## [0.13.2]
 
 - Fixed: `single_core::redact`'s generic high-entropy detector was also

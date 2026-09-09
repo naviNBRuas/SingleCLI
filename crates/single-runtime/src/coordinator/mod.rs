@@ -149,25 +149,43 @@ pub fn resume_interrupted(ctx: &Context, conn: &mut Connection) -> Result<usize>
     let mut touched = 0usize;
     for g in candidates {
         let mut this_touched = false;
-
-        if g.status == graph::GoalStatus::Paused {
-            goal::set_status(conn, &g.id, graph::GoalStatus::Running)?;
-            this_touched = true;
-        }
+        let was_paused = g.status == graph::GoalStatus::Paused;
 
         let graph = goal::load_graph(conn, &g.id)?;
         if graph.nodes.is_empty() {
             // the planner call was interrupted before a graph ever landed.
             // Best-effort: a re-plan failure here shouldn't abort resuming
-            // every other goal, so it's logged and skipped, not propagated.
+            // every other goal, so it's logged and the goal is set
+            // `blocked` with the failure recorded — never left silently
+            // sitting at `running` with an empty graph and zero
+            // dispatches. Live-verification finding: `plan_goal` on
+            // success already sets the goal `running` internally, so
+            // this branch previously flipped it to `running` *before*
+            // knowing whether planning would succeed at all — a failure
+            // here was invisible to `goal status` (no event, no
+            // `blocked_reason`, `running` forever).
             match plan_goal(ctx, conn, &g.id, None) {
                 Ok(()) => this_touched = true,
-                Err(e) => tracing::warn!(goal = %g.id, error = %e, "resume_interrupted: re-plan failed"),
+                Err(e) => {
+                    tracing::warn!(goal = %g.id, error = %e, "resume_interrupted: re-plan failed");
+                    goal::set_blocked(conn, &g.id, &format!("resume: re-plan failed: {e:#}"))?;
+                    events::append(conn, &g.session_id, Some(&g.id), events::EventKind::Blocked, &format!("{}: re-plan failed on resume: {e:#}", g.id))?;
+                    this_touched = true;
+                }
             }
         } else if !graph.is_all_terminal() {
             // Pending nodes (including a capacity-stamped one, whose real
             // cooldown state is untouched) are already visible to the next
             // scheduler tick -- nothing more to do but record the resume.
+            if was_paused {
+                goal::set_status(conn, &g.id, graph::GoalStatus::Running)?;
+            }
+            this_touched = true;
+        } else if was_paused {
+            // every node already terminal but the goal itself was paused
+            // mid-finalization -- let the next tick settle it rather than
+            // leaving it stuck `paused`.
+            goal::set_status(conn, &g.id, graph::GoalStatus::Running)?;
             this_touched = true;
         }
 
@@ -202,7 +220,18 @@ pub fn resume_goal(ctx: &Context, conn: &mut Connection, goal_id: &str) -> Resul
 
     let graph = goal::load_graph(conn, goal_id)?;
     if graph.nodes.is_empty() {
-        plan_goal(ctx, conn, goal_id, None)?;
+        // Live-verification finding: `resume_status` above already flips
+        // the goal to `running` before planning is attempted; if
+        // `plan_goal` then fails, propagating the error with `?` (as this
+        // used to) reports the failure to the CLI caller but leaves the
+        // goal itself stuck at `running` with an empty graph forever —
+        // `goal status` afterward showed no trace of the failure. Set
+        // `blocked` with the real reason instead of leaving that behind.
+        if let Err(e) = plan_goal(ctx, conn, goal_id, None) {
+            goal::set_blocked(conn, goal_id, &format!("resume: re-plan failed: {e:#}"))?;
+            events::append(conn, &g.session_id, Some(goal_id), events::EventKind::Blocked, &format!("{goal_id}: re-plan failed on resume: {e:#}"))?;
+            return Err(e);
+        }
     }
     events::append(conn, &g.session_id, Some(goal_id), events::EventKind::SessionResumed, &format!("{goal_id}: resumed via `single goal resume`"))?;
     Ok(())
@@ -356,6 +385,64 @@ mod tests {
         let touched = resume_interrupted(&ctx, &mut conn).unwrap();
         assert_eq!(touched, 1);
         assert_eq!(goal::get(&conn, &g.id).unwrap().unwrap().status, graph::GoalStatus::Running);
+    }
+
+    /// Live-verification regression: a failed re-plan on resume must
+    /// leave the goal `blocked` with a real reason, never silently stuck
+    /// `running` with an empty graph forever. An empty `registry` (no
+    /// real agent, so `routing::select_agent` genuinely finds nothing
+    /// usable) fails planning deterministically without touching a real
+    /// subprocess — this machine has real agent CLIs on `$PATH`, so an
+    /// `Auto`-mode plan through the normal `builtin_registry()` could
+    /// otherwise shell out for real.
+    #[test]
+    fn resume_interrupted_blocks_the_goal_when_replan_fails_instead_of_leaving_it_running() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dirs = single_core::SingleDirs::from_root(tmp.path().to_path_buf());
+        dirs.ensure_created().unwrap();
+        let ctx = Context { dirs, resolved: single_core::ResolvedConfig::default(), registry: vec![] };
+        let mut conn = test_conn();
+        let s = session::new_session(&conn, tmp.path()).unwrap();
+        let g = goal::create(&conn, &s.id, "g", graph::GoalMode::Auto, 25, 60).unwrap();
+        goal::set_status(&conn, &g.id, graph::GoalStatus::Paused).unwrap();
+
+        let touched = resume_interrupted(&ctx, &mut conn).unwrap();
+        assert_eq!(touched, 1);
+
+        let reloaded = goal::get(&conn, &g.id).unwrap().unwrap();
+        assert_eq!(reloaded.status, graph::GoalStatus::Blocked, "a failed re-plan must not leave the goal at `running`");
+        assert!(reloaded.blocked_reason.unwrap().contains("re-plan failed"));
+    }
+
+    /// Same regression as `resume_interrupted_blocks_the_goal_when_replan_
+    /// fails_instead_of_leaving_it_running`, for `single goal resume`'s
+    /// own path (`resume_goal`) — `resume_status` flips the goal to
+    /// `running` before planning is attempted, and a failure used to
+    /// propagate to the CLI caller as an error while leaving the goal
+    /// itself stuck `running` with an empty graph, invisible to a later
+    /// `goal status`.
+    #[test]
+    fn resume_goal_blocks_the_goal_when_replan_fails_instead_of_leaving_it_running() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dirs = single_core::SingleDirs::from_root(tmp.path().to_path_buf());
+        dirs.ensure_created().unwrap();
+        let ctx = Context { dirs, resolved: single_core::ResolvedConfig::default(), registry: vec![] };
+        let mut conn = test_conn();
+        let s = session::new_session(&conn, tmp.path()).unwrap();
+        let g = goal::create(&conn, &s.id, "g", graph::GoalMode::Auto, 25, 60).unwrap();
+        goal::set_blocked(&conn, &g.id, "some earlier failure").unwrap();
+
+        // an empty registry doesn't make `select_agent` fail outright --
+        // with nothing detected at all it falls back to guessing the
+        // routing table's first candidate, which then fails for real
+        // once `run_role` actually tries to dispatch to it against this
+        // minimal test connection. The exact failure text isn't the
+        // point here; that it's surfaced as `blocked`, not swallowed, is.
+        resume_goal(&ctx, &mut conn, &g.id).unwrap_err();
+
+        let reloaded = goal::get(&conn, &g.id).unwrap().unwrap();
+        assert_eq!(reloaded.status, graph::GoalStatus::Blocked, "a failed re-plan must not leave the goal at `running`");
+        assert!(reloaded.blocked_reason.unwrap().contains("re-plan failed"));
     }
 
     #[test]
