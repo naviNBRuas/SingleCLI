@@ -9,6 +9,28 @@ patch version (`0.0.x`) carries fixes, per [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## [Unreleased]
 
+## [0.14.11]
+
+- Fixed: `stream_goal` read and wrote the shared `AcpSession::last_event_id`
+  every loop iteration. Two goals racing on the same ACP session (e.g. a
+  `session/load` re-attach overlapping a fresh `session/prompt`) shared
+  one mutable cursor — one goal's burst of events could advance it past
+  events belonging to the other, silently dropping them from that goal's
+  own stream. Each `stream_goal` call now reads its starting cursor once
+  and tracks it locally for the rest of the call, only ever pushing the
+  shared field forward as a high-water mark (never reading it back) so
+  `session_load` re-attach can still skip already-replayed history.
+- Fixed: a Zed-submitted goal defaulted `agent` to `single-pool` absent a
+  `/agent` override — but `plan_goal` applies that override to every node
+  in the planned graph, not just the planning step, so this sent a whole
+  goal's task graph (code, test, review, everything) through
+  `single-pool`, which has no real tool/file/command execution.
+  Live-verification finding: this fabricated a plausible-but-fictional
+  cargo test/clippy run when asked to actually run one. Now defaults to
+  `None`, letting normal per-node-kind routing (`routing.toml`) pick a
+  real tool-capable agent per step, same as every goal submitted via
+  `single goal submit` already does. `/agent <name>` is unaffected.
+
 ## [0.14.10]
 
 - Fixed: three real clippy warnings, verified against actual source

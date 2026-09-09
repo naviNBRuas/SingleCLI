@@ -296,9 +296,21 @@ impl Acp {
             (s.coord_id.clone(), s.mode.clone(), s.agent_override.clone())
         };
         self.chunk(acp_sid, "planning…\n", "agent_thought_chunk");
-        // E29: `single-pool` is the ACP default agent, overridable per
-        // session via `/agent <name>` — see `AcpSession::agent_override`.
-        let agent = agent.or_else(|| Some("single-pool".to_string()));
+        // Live-verification finding (E29's `single-pool`-by-default choice,
+        // reverted): `plan_goal` force-overrides EVERY node in the graph to
+        // whatever `agent` names, not just the planner step — so this
+        // default sent every Zed-submitted goal's entire task graph
+        // (code, test, review, everything) through `single-pool`, which
+        // has no real tool/file/command execution (confirmed live:
+        // fabricated a plausible but entirely fictional cargo test run,
+        // and separately leaked a raw `<tool_call>` token into its output
+        // when a different `single-agent run` wrapper tried to use a
+        // tool). `agent_override` (`/agent <name>`) still works exactly
+        // as before for a user who deliberately wants one agent for
+        // everything; absent that, leave `agent` as `None` so the
+        // coordinator's normal per-node-kind routing (routing.toml)
+        // picks a real tool-capable agent per step, same as every
+        // goal submitted directly via `single goal submit` already does.
         let goal_id = match self.socket(Request::GoalSubmit {
             session_id: coord_id.clone(),
             text: text.to_string(),
@@ -337,6 +349,20 @@ impl Acp {
             .unwrap_or_default();
         let deadline = Instant::now() + Duration::from_secs(60 * 60);
 
+        // Live-verification finding: this used to read AND write the
+        // shared `AcpSession::last_event_id` every iteration. Two goals
+        // racing on the same ACP session (e.g. a `session/load` re-attach
+        // overlapping a fresh `session/prompt`) shared one mutable
+        // cursor — one goal's burst of events could advance it past
+        // events belonging to the other goal, silently dropping them
+        // from that goal's own `stream_goal` call. Read the starting
+        // cursor once; after that, this loop is the sole source of truth
+        // for its own progress. The shared field is only ever pushed
+        // forward as a high-water mark (never read back here) so a
+        // subsequent `session_load` re-attach can still skip already-
+        // replayed history.
+        let mut since = self.sessions.lock().unwrap().get(acp_sid).map(|s| s.last_event_id).unwrap_or(0);
+
         loop {
             if cancel.load(Ordering::SeqCst) {
                 let _ = self.socket(Request::GoalCancel { goal_id: goal_id.to_string() });
@@ -347,7 +373,6 @@ impl Acp {
                 return "max_turn_requests";
             }
 
-            let since = self.sessions.lock().unwrap().get(acp_sid).map(|s| s.last_event_id).unwrap_or(0);
             if let Ok(ResponseData::CoordinatorEvents(events)) = self.socket(Request::SessionEvents {
                 session_id: coord_id.to_string(),
                 since_event_id: since,
@@ -359,9 +384,10 @@ impl Acp {
                     } else {
                         self.translate_event(acp_sid, goal_id, &e.kind, &e.body);
                     }
-                    if let Some(s) = self.sessions.lock().unwrap().get_mut(acp_sid) {
-                        s.last_event_id = s.last_event_id.max(e.id);
-                    }
+                    since = since.max(e.id);
+                }
+                if let Some(s) = self.sessions.lock().unwrap().get_mut(acp_sid) {
+                    s.last_event_id = s.last_event_id.max(since);
                 }
             }
 

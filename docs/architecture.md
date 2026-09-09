@@ -830,6 +830,106 @@ fixes/expansions:
   URL/env var pair confirmed against the vendor's own current docs, same
   bar as the original four.
 
+## ACP bridge (`single acp`)
+
+`crates/single-cli/src/acp.rs` implements a newline-delimited JSON-RPC 2.0
+stdio server that wraps the SingleCLI coordinator as an
+[Agent Client Protocol](https://agentclientprotocol.com) endpoint — the
+integration surface Zed (and any other ACP-capable host) uses.
+
+### Protocol version
+
+The bridge implements **ACP v1** (`PROTOCOL_VERSION: u64 = 1`). v2 changed
+the notification model significantly (per-turn scoping → a separate idle
+notification channel); this codebase tracks v1 only, which matters for the
+constraints below.
+
+### What `session/update` is actually emitted for
+
+`session/update` notifications are only ever sent from three places, all
+inside an active context:
+
+1. **`run_turn` → `stream_goal`** — the main prompt-turn loop. After
+   `session/prompt` arrives, `run_turn` submits a `GoalSubmit` to the
+   coordinator, then `stream_goal` long-polls `SessionEvents` at
+   1 200 ms intervals and translates each new coordinator event into a
+   `session/update` chunk. This is the primary live-output path.
+2. **`session_new` / `session_load`** — the ACP session lifecycle methods
+   each emit one `available_commands_update` immediately on setup.
+3. **`session/set_mode`** — emits a `current_mode_update` when the client
+   changes modes.
+
+There is no background goroutine or daemon-side push that emits
+`session/update` outside these three call sites.
+
+### Multi-session routing
+
+`Acp` keeps a `sessions: Mutex<HashMap<String, AcpSession>>` keyed by the
+coordinator's own `sess_…` id (the ACP session id **is** the coordinator
+session id, by design, so a restarted `single acp` process can resume a
+thread on `session/load`). Multiple sessions on one `single acp` process
+are therefore supported:
+
+- Each `session/prompt` call spawns its own OS thread to run `stream_goal`,
+  so two sessions can poll/stream independently without blocking each other.
+- **Cursor isolation.** `stream_goal` maintains a **local** cursor rather
+  than reading/writing the shared `AcpSession::last_event_id`. Previously,
+  if two goals were ever in flight on the same ACP session concurrently,
+  both `stream_goal` threads would race on that field and one could silently
+  advance the other's starting point past events belonging to its own goal.
+  The local cursor closes this race: each `stream_goal` call is correctly
+  scoped to its own goal, and the shared `last_event_id` is only updated as
+  a high-water mark so a subsequent `session/load` re-attach can skip
+  already-replayed history.
+- There is no routing across **separate `single acp` processes**: `sessions`
+  is an in-process `HashMap`, not a daemon-side table. Two concurrent
+  `single acp` invocations have disjoint session maps.
+
+### Proactive update — what's real
+
+The one proactive (unsolicited) notification path that exists is the
+**restart re-attach** in `session_load`: if the daemon or the `single acp`
+process restarts mid-goal and the given session id resolves to a goal that
+is still `running`/`waiting_on_capacity`, `session_load` spawns a new
+`stream_goal` thread to re-attach its event stream. The reconnecting Zed
+panel then keeps receiving chunks without the user resending the prompt.
+This is the only case where `session/update` chunks arrive without a new
+`session/prompt` driving them — and it is triggered by client reconnection,
+not by the coordinator pushing to an idle channel.
+
+### Why fully unsolicited idle-session push is not possible under ACP v1
+
+Under ACP v1, `session/update` is scoped to an active prompt turn. The
+spec's lifecycle delivers all updates between a `session/prompt` request
+and its response; there is no separate out-of-band channel for the server
+to push to a session that has no in-flight turn. Concretely:
+
+- Coordinator events that arrive while the ACP session has no active
+  `stream_goal` loop simply accumulate in the coordinator's `events` table.
+  They are not lost, but they are not forwarded until the next
+  `session/prompt` or `session/load` re-attach picks them up.
+- Adding an always-on background pusher would require either an ACP v2
+  upgrade (which defines a proper idle-notification extension) or a
+  out-of-spec side channel neither Zed nor any other current ACP host
+  would consume. Neither is implemented; the spec limitation is the honest
+  ceiling.
+
+### Default agent
+
+A Zed-submitted goal (`run_turn`) used to default `agent` to `single-pool`
+when the session had no `/agent` override, on the theory that it's the
+lightest-weight default. Removed: `plan_goal` applies that override to
+*every* node in the planned graph, not just the planning step, so this
+sent a goal's entire task graph — code, test, review, everything — through
+`single-pool`, which has no real tool/file/command execution. Live-
+verification finding: this fabricated a plausible-but-fictional cargo
+test/clippy run when asked to actually run one. `agent` now defaults to
+`None`, letting the coordinator's normal per-node-kind routing
+(`routing.toml`) pick a real tool-capable agent per step — the same path
+every goal submitted via `single goal submit` already takes.
+`/agent <name>` still works exactly as before for a session that
+deliberately wants one agent pinned for everything.
+
 ## Not in Phase 1-6
 
 Per the original spec's own §50 "Development Strategy" (build vertically,
