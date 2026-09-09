@@ -9,6 +9,23 @@ patch version (`0.0.x`) carries fixes, per [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## [Unreleased]
 
+## [0.14.7]
+
+- Fixed: a directory that was `git add`-ed while it happened to contain
+  its own `.git` (no `git submodule add` ever run, no `.gitmodules`
+  entry) gets recorded as a bare gitlink — git's automatic behavior for
+  that case. `git worktree add` faithfully reproduces that as an *empty*
+  directory in the new worktree, since it has no `.gitmodules` to know
+  how to populate it. Live-verification finding: real, populated content
+  sitting right next to the worktree was silently invisible to every
+  isolated task touching that path — some correctly refused to fabricate
+  work against an apparently-empty directory, others didn't, and hours of
+  coordinator work across several goals were operating blind on this
+  path without it being obvious why. `worktree::add` now symlinks any
+  such orphaned gitlink's real directory into the new worktree in place
+  of the empty stub (a real `.gitmodules`-registered submodule is left
+  to git's own correct init/update handling).
+
 ## [0.14.6]
 
 - Fixed: a goal blocked with `waited N.Nh for capacity, still exhausted`

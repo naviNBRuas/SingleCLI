@@ -27,7 +27,64 @@ pub fn add(repo_root: &Path, worktree_path: &Path, branch_name: &str) -> Result<
     if !output.status.success() {
         bail!("git worktree add failed: {}", String::from_utf8_lossy(&output.stderr));
     }
+    link_orphaned_gitlinks(repo_root, worktree_path);
     Ok(())
+}
+
+/// Live-verification finding: a directory that was `git add`-ed while it
+/// happened to contain its own `.git` (no `git submodule add` ever run,
+/// no `.gitmodules` entry) gets recorded as a bare gitlink (mode 160000)
+/// -- git's automatic behavior for that case, not something the user
+/// necessarily chose. `git worktree add` faithfully reproduces that: an
+/// empty directory at the gitlink's path, since it has no `.gitmodules`
+/// to know how to populate it. Every task working in an isolated
+/// worktree that touches such a path silently sees it as empty and
+/// either fabricates work against nothing or (correctly) refuses,
+/// blocking real progress on content that verifiably exists right next
+/// to the worktree. Best-effort, not a hard failure: for each such path,
+/// if `repo_root/<path>` is itself a real, populated git repo, symlink
+/// it into the new worktree in place of the empty stub. A real
+/// `.gitmodules`-registered submodule is left to git's own (correct)
+/// submodule-init handling.
+fn link_orphaned_gitlinks(repo_root: &Path, worktree_path: &Path) {
+    let Ok(output) = Command::new("git").current_dir(repo_root).args(["ls-files", "-s"]).output() else {
+        return;
+    };
+    if !output.status.success() {
+        return;
+    }
+    let registered_submodules: std::collections::HashSet<String> = std::fs::read_to_string(repo_root.join(".gitmodules"))
+        .ok()
+        .map(|s| {
+            s.lines()
+                .filter_map(|l| l.trim().strip_prefix("path = ").map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        // `<mode> <sha> <stage>\t<path>` -- gitlinks are mode 160000.
+        let Some((meta, path)) = line.split_once('\t') else { continue };
+        if !meta.starts_with("160000") {
+            continue;
+        }
+        if registered_submodules.contains(path) {
+            continue; // a real submodule -- git's own init/update path handles this
+        }
+        let real_dir = repo_root.join(path);
+        if !real_dir.join(".git").exists() {
+            continue; // gitlink with nothing real behind it locally -- nothing to link
+        }
+        let target = worktree_path.join(path);
+        // `git worktree add` already created an empty dir here; remove it
+        // (best-effort -- only if genuinely empty, never touch real content).
+        if target.is_dir() && std::fs::read_dir(&target).map(|mut d| d.next().is_none()).unwrap_or(false) {
+            let _ = std::fs::remove_dir(&target);
+        }
+        if !target.exists() {
+            let _ = std::os::unix::fs::symlink(&real_dir, &target);
+        }
+    }
 }
 
 /// Removes a worktree. `force` matches `git worktree remove --force`
@@ -167,6 +224,50 @@ mod tests {
 
         let worktrees = list(repo.path()).unwrap();
         assert!(worktrees.iter().any(|p| p == &worktree_path.canonicalize().unwrap() || p == &worktree_path));
+    }
+
+    /// Live-verification finding: a directory `git add`-ed while it
+    /// happened to contain its own `.git` becomes a bare gitlink with no
+    /// `.gitmodules` entry -- `git worktree add` alone leaves it as an
+    /// empty stub in the new worktree, silently hiding real content that
+    /// exists right next to it in `repo_root`.
+    #[test]
+    fn add_links_an_orphaned_gitlink_directory_into_the_new_worktree() {
+        let repo = tempfile::tempdir().unwrap();
+        init_repo(repo.path());
+
+        // an inner directory that has its own real, populated `.git` --
+        // `git add` on the outer repo records this as a gitlink (160000),
+        // not the inner file contents, and no `.gitmodules` is written.
+        let inner = repo.path().join("nested-repo");
+        std::fs::create_dir(&inner).unwrap();
+        init_repo(&inner);
+        std::fs::write(inner.join("real-content.md"), "actual content").unwrap();
+        Command::new("git").current_dir(&inner).args(["add", "."]).status().unwrap();
+        Command::new("git").current_dir(&inner).args(["commit", "-q", "-m", "more content"]).status().unwrap();
+
+        let run = |args: &[&str]| {
+            let status = Command::new("git").current_dir(repo.path()).args(args).status().unwrap();
+            assert!(status.success(), "git {:?} failed", args);
+        };
+        run(&["add", "nested-repo"]);
+        run(&["commit", "-q", "-m", "add nested-repo as an (accidental) gitlink"]);
+        assert!(
+            String::from_utf8(Command::new("git").current_dir(repo.path()).args(["ls-files", "-s", "nested-repo"]).output().unwrap().stdout)
+                .unwrap()
+                .starts_with("160000"),
+            "test setup: nested-repo must actually be recorded as a gitlink"
+        );
+
+        let worktree_parent = tempfile::tempdir().unwrap();
+        let worktree_path = worktree_parent.path().join("task-1");
+        add(repo.path(), &worktree_path, "single/task-1").unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(worktree_path.join("nested-repo").join("real-content.md")).unwrap(),
+            "actual content",
+            "the gitlink's real content must be reachable from the worktree, not an empty stub"
+        );
     }
 
     #[test]
