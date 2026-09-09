@@ -9,6 +9,20 @@ patch version (`0.0.x`) carries fixes, per [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## [Unreleased]
 
+## [0.14.10]
+
+- Fixed: three real clippy warnings, verified against actual source
+  before touching anything (`crates/single-runtime/src/`):
+  - `task.rs`'s failure-memory `NewMemory` literal already set every
+    field the struct defines — `..Default::default()` was dead code.
+  - `orchestrate_graph.rs`'s `OnFailure` check duplicated
+    `Vec::contains` with a manual `.iter().any(...)`.
+  - `task.rs`'s per-agent average-duration calc duplicated
+    `checked_div`'s zero-guard by hand.
+  No behavior change, cosmetic/style only — surfaced by a coordinator
+  goal auditing SingleCLI itself tonight; applied directly after
+  independently confirming each one against the real file contents.
+
 ## [0.14.9]
 
 - Fixed: `custom_agents::to_agent_definition` set `capabilities.tools`

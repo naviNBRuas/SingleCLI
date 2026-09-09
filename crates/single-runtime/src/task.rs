@@ -299,7 +299,7 @@ pub fn local_stats_by_agent(conn: &Connection) -> Result<Vec<single_protocol::Ag
                 last_run_at = Some(record.updated_at.clone());
             }
         }
-        let avg_duration_ms = if counted > 0 { total_ms / counted } else { 0 };
+        let avg_duration_ms = total_ms.checked_div(counted).unwrap_or(0);
         stats.push(single_protocol::AgentLocalStats {
             agent,
             run_count,
@@ -1337,7 +1337,6 @@ fn remember_failure(
             content: format!("prompt: {description}\nfailure: {detail}"),
             confidence: Some(1.0),
             expires_in_seconds: None,
-            ..Default::default()
         },
     );
 }

@@ -102,7 +102,7 @@ pub fn run(ctx: &Context, opts: GraphOrchestrateOptions<'_>) -> Result<Vec<TaskR
             let should_run = match node.run_if {
                 RunCondition::Always => true,
                 RunCondition::OnSuccess => statuses.iter().all(|s| *s == TaskStatus::Completed),
-                RunCondition::OnFailure => statuses.iter().any(|s| *s == TaskStatus::Failed),
+                RunCondition::OnFailure => statuses.contains(&TaskStatus::Failed),
             };
             if should_run {
                 runnable.push(node);
