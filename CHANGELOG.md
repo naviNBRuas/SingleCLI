@@ -9,6 +9,18 @@ patch version (`0.0.x`) carries fixes, per [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## [Unreleased]
 
+## [0.14.3]
+
+- Fixed: `scheduler::reconcile` (runs on daemon start, and periodically via
+  self-heal) sent any coordinator node still `running` whose backing task
+  died straight to `failed` — including a node simply killed mid-run by a
+  daemon restart, not a genuine agent failure. That's terminal: `single
+  goal resume` only re-ticks `pending` nodes, so a goal with downstream
+  work depending on that node stayed `running` forever with nothing left
+  to dispatch. Now runs the same `retry_decision` an ordinary
+  crash/timeout goes through — bounced back to `pending` with `attempts +
+  1` while retries remain, `failed` only once they're exhausted.
+
 ## [0.14.2]
 
 - Fixed: `handle_blocked`'s `session/request_permission` sent a `toolCall`

@@ -255,32 +255,58 @@ fn timeout_for(effort: Effort) -> Duration {
 
 /// spec §4.1: on daemon start (and periodically), any coordinator node
 /// left `running` whose backing `tasks` row is no longer live is
-/// reconciled — `done` if the task actually completed, else `failed`
-/// (interrupted). returns the number of nodes touched. this is the
-/// coordinator-node analogue of `task::reconcile_orphaned_tasks`.
+/// reconciled — `done` if the task actually completed; otherwise it was
+/// interrupted (killed mid-run by a daemon restart/crash, not a real
+/// agent failure), so it goes through the same `retry_decision` an
+/// ordinary crash/timeout would: bounced back to `pending` with
+/// `attempts + 1` while retries remain, `failed` only once exhausted.
+/// Live-verification finding: this used to jump straight to `failed`
+/// unconditionally, permanently dooming every node downstream of one that
+/// happened to be running when the daemon restarted — `single goal
+/// resume` re-ticks pending nodes but never revives a `failed` one, so
+/// the goal stayed `running` forever with no dispatchable work. Returns
+/// the number of nodes touched. This is the coordinator-node analogue of
+/// `task::reconcile_orphaned_tasks`.
 pub fn reconcile(conn: &Connection) -> Result<usize> {
     let mut stmt = conn.prepare(
-        "SELECT goal_id, id, task_id FROM graph_nodes WHERE status = 'running'",
+        "SELECT goal_id, id, task_id, attempts FROM graph_nodes WHERE status = 'running'",
     )?;
-    let rows: Vec<(String, String, Option<i64>)> = stmt
-        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+    let rows: Vec<(String, String, Option<i64>, u32)> = stmt
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
         .collect::<rusqlite::Result<_>>()?;
     drop(stmt);
 
     let mut touched = 0;
-    for (goal_id, node_id, task_id) in rows {
+    for (goal_id, node_id, task_id, attempts) in rows {
         let task_status: Option<String> = match task_id {
             Some(tid) => conn
                 .query_row("SELECT status FROM tasks WHERE id = ?1", [tid], |r| r.get(0))
                 .ok(),
             None => None,
         };
-        let new_status = match task_status.as_deref() {
+        match task_status.as_deref() {
             Some("running") | Some("created") => continue, // genuinely still live
-            Some("completed") => NodeStatus::Done,
-            _ => NodeStatus::Failed, // failed / cancelled / missing row
-        };
-        goal::update_node(conn, &goal_id, &node_id, new_status, None, None, None)?;
+            Some("completed") => {
+                goal::update_node(conn, &goal_id, &node_id, NodeStatus::Done, None, None, None)?;
+            }
+            _ => match retry_decision(attempts, false) {
+                RetryDecision::RetrySameNextAgent => {
+                    goal::update_node(conn, &goal_id, &node_id, NodeStatus::Pending, None, None, Some(attempts + 1))?;
+                    if let Ok(Some(g)) = goal::get(conn, &goal_id) {
+                        let _ = events::append(
+                            conn,
+                            &g.session_id,
+                            Some(&goal_id),
+                            events::EventKind::NodeFailed,
+                            &format!("{node_id}: interrupted, retry {} scheduled", attempts + 1),
+                        );
+                    }
+                }
+                RetryDecision::Supervisor | RetryDecision::GiveUp => {
+                    goal::update_node(conn, &goal_id, &node_id, NodeStatus::Failed, None, None, None)?;
+                }
+            },
+        }
         touched += 1;
     }
     if touched > 0 {
@@ -1002,7 +1028,7 @@ mod tests {
     }
 
     #[test]
-    fn reconcile_marks_running_node_with_dead_task_as_failed_and_completed_as_done() {
+    fn reconcile_retries_dead_task_with_attempts_left_and_marks_completed_as_done() {
         use crate::coordinator::goal;
         use crate::coordinator::graph::GoalMode;
 
@@ -1021,7 +1047,8 @@ mod tests {
         };
         goal::save_graph(&mut conn, &g.id, &graph).unwrap();
 
-        // s1 -> a task row that FAILED; s2 -> a task row still RUNNING;
+        // s1 -> a task row killed mid-run (e.g. daemon restart), attempts
+        // still under the retry cap; s2 -> a task row still RUNNING;
         // s3 -> a task row that COMPLETED.
         for (nid, tid, status) in [("s1", 10i64, "failed"), ("s2", 11, "running"), ("s3", 12, "completed")] {
             conn.execute(
@@ -1037,9 +1064,44 @@ mod tests {
         assert_eq!(touched, 2); // s1 and s3 move; s2 stays running
 
         let reloaded = goal::load_graph(&conn, &g.id).unwrap();
-        assert_eq!(reloaded.find("s1").unwrap().status, NodeStatus::Failed);
+        // interrupted, not genuinely broken -- bounced back to pending for
+        // a retry instead of permanently failed.
+        assert_eq!(reloaded.find("s1").unwrap().status, NodeStatus::Pending);
+        assert_eq!(reloaded.find("s1").unwrap().attempts, 1);
         assert_eq!(reloaded.find("s2").unwrap().status, NodeStatus::Running);
         assert_eq!(reloaded.find("s3").unwrap().status, NodeStatus::Done);
+    }
+
+    #[test]
+    fn reconcile_marks_dead_task_failed_once_retries_are_exhausted() {
+        use crate::coordinator::goal;
+        use crate::coordinator::graph::GoalMode;
+
+        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::coordinator::ensure_coordinator_schema(&conn).unwrap();
+        crate::task::ensure_schema(&conn).unwrap();
+
+        let s = crate::coordinator::session::new_session(&conn, std::path::Path::new("/tmp/p")).unwrap();
+        let g = goal::create(&conn, &s.id, "g", GoalMode::Auto, 25, 60).unwrap();
+        let mut n = node("s1", &[], Effort::Standard, "grok");
+        n.attempts = 2; // already exhausted RetrySameNextAgent's budget
+        goal::save_graph(&mut conn, &g.id, &TaskGraph { nodes: vec![n] }).unwrap();
+
+        conn.execute(
+            "INSERT INTO tasks (id, description, agent, status, timed_out, created_at, updated_at, cwd, workspace_id)
+             VALUES (10, 'x', 'grok', 'failed', 0, '', '', '', '')",
+            [],
+        )
+        .unwrap();
+        goal::update_node(&conn, &g.id, "s1", NodeStatus::Running, Some(10), None, None).unwrap();
+        // update_node's attempts arg is only touched on an explicit Some(_);
+        // set it directly to simulate a node already on its last attempt.
+        conn.execute("UPDATE graph_nodes SET attempts = 2 WHERE goal_id = ?1 AND id = 's1'", [&g.id]).unwrap();
+
+        let touched = reconcile(&conn).unwrap();
+        assert_eq!(touched, 1);
+        let reloaded = goal::load_graph(&conn, &g.id).unwrap();
+        assert_eq!(reloaded.find("s1").unwrap().status, NodeStatus::Failed);
     }
 
     // ---- E28 spec §8: auto-continue on capacity exhaustion ----
