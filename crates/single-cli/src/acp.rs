@@ -452,7 +452,7 @@ impl Acp {
             "method": "session/request_permission",
             "params": {
                 "sessionId": acp_sid,
-                "toolCall": { "title": format!("Goal blocked: {reason}") },
+                "toolCall": { "toolCallId": req_id.clone(), "title": format!("Goal blocked: {reason}") },
                 "options": [
                     { "optionId": "raise", "name": "Raise budget and continue", "kind": "allow_once" },
                     { "optionId": "cancel", "name": "Cancel the goal", "kind": "reject_once" }

@@ -9,6 +9,15 @@ patch version (`0.0.x`) carries fixes, per [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## [Unreleased]
 
+## [0.14.2]
+
+- Fixed: `handle_blocked`'s `session/request_permission` sent a `toolCall`
+  object without the required `toolCallId` field. Zed's ACP client rejected
+  the request outright (`missing field toolCallId`), so a blocked goal's
+  raise-budget/cancel prompt never reached the user — the session just
+  emitted the blocked message and ended the turn silently. Now sets
+  `toolCallId` to the request's own `srv-N` id.
+
 ## [0.14.1]
 
 - Fixed: `claude`'s `home_requirement` was `Either` (isolated-home
