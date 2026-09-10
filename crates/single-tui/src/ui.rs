@@ -121,6 +121,7 @@ fn draw_content(frame: &mut Frame, area: Rect, app: &App) {
         Tab::Providers => draw_providers(frame, area, app),
         Tab::Accounts => draw_accounts(frame, area, app),
         Tab::Usage => draw_usage(frame, area, app),
+        Tab::Pool => draw_pool(frame, area, app),
         Tab::Backup => draw_backup(frame, area, app),
         Tab::Memory => draw_memory(frame, area, app),
         Tab::Help => draw_help(frame, area),
@@ -513,6 +514,64 @@ fn draw_usage(frame: &mut Frame, area: Rect, app: &App) {
         .header(Row::new(vec!["Agent", "Runs", "Avg Duration", "Last Run"]).style(Style::default().add_modifier(Modifier::BOLD)))
         .block(Block::default().borders(Borders::ALL).title(" Connected agents — local stats only, no billing API "));
     frame.render_widget(table, chunks[1]);
+}
+
+fn draw_pool(frame: &mut Frame, area: Rect, app: &App) {
+    // Status header
+    let status_text = match &app.pool_status {
+        None if app.pool_status_loading => "Loading pool status…".to_string(),
+        None => "No pool data — press 'r' to fetch".to_string(),
+        Some(s) => format!(
+            "Pool: {}  •  healthy ratio: {:.0}%  •  benched keys: {}",
+            if s.degraded { "DEGRADED" } else { "healthy" },
+            s.healthy_ratio * 100.0,
+            s.benched.len(),
+        ),
+    };
+
+    // Key-status table
+    let key_rows: Vec<Row> = match &app.provider_key_statuses {
+        None if app.provider_key_statuses_loading => vec![Row::new(vec!["Loading…"])],
+        None => vec![Row::new(vec!["No key data yet"])],
+        Some(ks) if ks.is_empty() => vec![Row::new(vec!["No free-pool keys configured"])],
+        Some(ks) => ks
+            .iter()
+            .map(|k| {
+                let validity = match (k.keyed, k.valid) {
+                    (false, _) => "no key",
+                    (true, true) => "ok",
+                    (true, false) => "invalid",
+                };
+                Row::new(vec![
+                    Cell::from(k.platform.clone()),
+                    Cell::from(validity),
+                    Cell::from(k.cooldown.clone()),
+                    Cell::from(k.headroom.clone()),
+                    Cell::from(
+                        k.disabled_reason
+                            .as_deref()
+                            .or(k.last_validated_at.as_deref())
+                            .unwrap_or("-")
+                            .to_string(),
+                    ),
+                ])
+            })
+            .collect(),
+    };
+    let widths = [
+        Constraint::Length(14),
+        Constraint::Length(9),
+        Constraint::Length(18),
+        Constraint::Length(22),
+        Constraint::Min(20),
+    ];
+    let table = Table::new(key_rows, widths)
+        .header(
+            Row::new(vec!["platform", "key", "cooldown", "headroom", "note"])
+                .style(Style::default().add_modifier(Modifier::BOLD)),
+        )
+        .block(Block::default().borders(Borders::ALL).title(format!(" Pool — {} ", status_text)));
+    frame.render_widget(table, area);
 }
 
 fn draw_backup(frame: &mut Frame, area: Rect, _app: &App) {

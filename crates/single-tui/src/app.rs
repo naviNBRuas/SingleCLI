@@ -1,9 +1,9 @@
 use crate::client::call;
 use single_core::SingleDirs;
 use single_protocol::{
-    AccountProfileInfo, AgentInfo, LspServerSpec, McpServerInfo, PluginSpec, ProviderPresetInfo,
-    ProviderSpec, Request, Response, ResponseData, RuntimeStatus, SetupAction, TaskRecord, TaskStatus, ToolSpec, UsageSummary,
-    WorkspaceInfo,
+    AccountProfileInfo, AgentInfo, LspServerSpec, McpServerInfo, PluginSpec, PoolKeyStatusInfo,
+    PoolStatusInfo, ProviderPresetInfo, ProviderSpec, Request, Response, ResponseData, RuntimeStatus,
+    SetupAction, TaskRecord, TaskStatus, ToolSpec, UsageSummary, WorkspaceInfo,
 };
 use std::path::PathBuf;
 use std::sync::mpsc;
@@ -27,15 +27,16 @@ pub enum Tab {
     Providers,
     Accounts,
     Usage,
+    Pool,
     Backup,
     Memory,
     Help,
 }
 
 impl Tab {
-    pub const ALL: [Tab; 12] = [
+    pub const ALL: [Tab; 13] = [
         Tab::Agents, Tab::Tasks, Tab::Mcp, Tab::Lsp, Tab::Plugins, Tab::Tools, Tab::Providers, Tab::Accounts,
-        Tab::Usage, Tab::Backup, Tab::Memory, Tab::Help,
+        Tab::Usage, Tab::Pool, Tab::Backup, Tab::Memory, Tab::Help,
     ];
 
     pub fn title(&self) -> &'static str {
@@ -49,6 +50,7 @@ impl Tab {
             Tab::Providers => "Providers",
             Tab::Accounts => "Accounts",
             Tab::Usage => "Usage",
+            Tab::Pool => "Pool",
             Tab::Backup => "Backup",
             Tab::Memory => "Memory",
             Tab::Help => "Help",
@@ -227,6 +229,17 @@ pub struct App {
     pub usage: Option<UsageSummary>,
     pub usage_loading: bool,
     usage_rx: Option<mpsc::Receiver<Option<UsageSummary>>>,
+    /// Current pool-wide health snapshot — `None` until the first fetch
+    /// completes or when the daemon returned an error.
+    pub pool_status: Option<PoolStatusInfo>,
+    pub pool_status_loading: bool,
+    pool_status_rx: Option<mpsc::Receiver<Option<PoolStatusInfo>>>,
+    /// Per-platform free-pool key status rows — `None` until the first
+    /// fetch completes. `Some(vec![])` means the daemon answered but has
+    /// no keys configured, distinct from "never fetched".
+    pub provider_key_statuses: Option<Vec<PoolKeyStatusInfo>>,
+    pub provider_key_statuses_loading: bool,
+    provider_key_statuses_rx: Option<mpsc::Receiver<Option<Vec<PoolKeyStatusInfo>>>>,
     pub kg_entity_count: Option<usize>,
     pub cache_configured: bool,
     pub cache_reachable: bool,
@@ -305,6 +318,12 @@ impl App {
             usage: None,
             usage_loading: false,
             usage_rx: None,
+            pool_status: None,
+            pool_status_loading: false,
+            pool_status_rx: None,
+            provider_key_statuses: None,
+            provider_key_statuses_loading: false,
+            provider_key_statuses_rx: None,
             kg_entity_count: None,
             cache_configured: false,
             cache_reachable: false,
@@ -496,6 +515,14 @@ impl App {
         if self.tab == Tab::Usage {
             self.begin_usage_fetch();
         }
+        // Pool data is also polled independently: benched-key state and
+        // per-key headroom involve daemon-side RPD table reads that are
+        // cheap but orthogonal to the main bundle — kicked off only when
+        // the Pool tab is visible, same pattern as Usage.
+        if self.tab == Tab::Pool {
+            self.begin_pool_fetch();
+            self.begin_provider_key_status_fetch();
+        }
         self.last_refresh = Instant::now();
         self.loading = false;
         self.refresh_rx = None;
@@ -545,7 +572,7 @@ impl App {
             Tab::Tools => self.tools.len(),
             Tab::Providers => self.providers.len(),
             Tab::Accounts => self.accounts.len(),
-            Tab::Usage | Tab::Backup | Tab::Memory | Tab::Help => 0,
+            Tab::Usage | Tab::Pool | Tab::Backup | Tab::Memory | Tab::Help => 0,
         }
     }
 
@@ -565,6 +592,10 @@ impl App {
         if self.tab == Tab::Usage {
             self.begin_usage_fetch();
         }
+        if self.tab == Tab::Pool {
+            self.begin_pool_fetch();
+            self.begin_provider_key_status_fetch();
+        }
     }
 
     pub fn prev_tab(&mut self) {
@@ -573,6 +604,10 @@ impl App {
         self.task_view = TaskView::Workspaces;
         if self.tab == Tab::Usage {
             self.begin_usage_fetch();
+        }
+        if self.tab == Tab::Pool {
+            self.begin_pool_fetch();
+            self.begin_provider_key_status_fetch();
         }
     }
 
@@ -1228,6 +1263,71 @@ impl App {
         self.usage = result;
         self.usage_loading = false;
         self.usage_rx = None;
+        true
+    }
+
+    /// Fetches the Pool tab's health snapshot on a background thread.
+    /// Mirrors `begin_usage_fetch`: only one in-flight fetch at a time,
+    /// returns immediately without blocking the event loop. The daemon
+    /// reads the benched-key table and computes `healthy_ratio` on its
+    /// own side (`Request::PoolStatus`), so this is just a socket round
+    /// trip, not a live HTTP call — but it's still kept off the main
+    /// thread for consistency with the other tab-gated fetches.
+    fn begin_pool_fetch(&mut self) {
+        if self.pool_status_loading {
+            return;
+        }
+        self.pool_status_loading = true;
+        let socket_path = self.socket_path.clone();
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let result = match call(&socket_path, &Request::PoolStatus) {
+                Ok(Response::Ok { data: ResponseData::PoolStatus(s) }) => Some(s),
+                _ => None,
+            };
+            let _ = tx.send(result);
+        });
+        self.pool_status_rx = Some(rx);
+    }
+
+    /// Returns true if a new pool-status snapshot arrived this tick.
+    pub fn poll_pool(&mut self) -> bool {
+        let Some(rx) = &self.pool_status_rx else { return false };
+        let Ok(result) = rx.try_recv() else { return false };
+        self.pool_status = result;
+        self.pool_status_loading = false;
+        self.pool_status_rx = None;
+        true
+    }
+
+    /// Fetches per-platform free-pool key statuses on a background thread
+    /// (`Request::ProviderKeyStatus { platform: None }` — all platforms).
+    /// Same shape as `begin_pool_fetch`/`poll_pool`: one in-flight fetch,
+    /// non-blocking, Pool-tab-gated.
+    fn begin_provider_key_status_fetch(&mut self) {
+        if self.provider_key_statuses_loading {
+            return;
+        }
+        self.provider_key_statuses_loading = true;
+        let socket_path = self.socket_path.clone();
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let result = match call(&socket_path, &Request::ProviderKeyStatus { platform: None }) {
+                Ok(Response::Ok { data: ResponseData::PoolKeyStatuses(statuses) }) => Some(statuses),
+                _ => None,
+            };
+            let _ = tx.send(result);
+        });
+        self.provider_key_statuses_rx = Some(rx);
+    }
+
+    /// Returns true if new provider-key status data arrived this tick.
+    pub fn poll_provider_key_status(&mut self) -> bool {
+        let Some(rx) = &self.provider_key_statuses_rx else { return false };
+        let Ok(result) = rx.try_recv() else { return false };
+        self.provider_key_statuses = result;
+        self.provider_key_statuses_loading = false;
+        self.provider_key_statuses_rx = None;
         true
     }
 }

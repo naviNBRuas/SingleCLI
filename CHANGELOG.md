@@ -9,6 +9,17 @@ patch version (`0.0.x`) carries fixes, per [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## [Unreleased]
 
+## [0.14.12]
+
+- Added: Pool tab in the TUI (`single` → Pool) shows a live pool-wide
+  health snapshot — total/available/benched key counts and healthy ratio
+  — fetched via `Request::PoolStatus` on a background thread so the
+  event loop stays responsive. A second table lists per-platform
+  free-pool key statuses (platform, label, status, last-error) fetched
+  in the same round-trip. The tab refreshes automatically whenever it
+  becomes visible and on every `r` keypress; both queries are
+  deduplicated so a second press while a fetch is in flight is a no-op.
+
 ## [0.14.11]
 
 - Fixed: `stream_goal` read and wrote the shared `AcpSession::last_event_id`
