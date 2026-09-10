@@ -10,7 +10,7 @@
 //! dispatch shell (reconcile, real `task::run_background` handoff,
 //! `on_task_finished`) is plan Task 8.
 
-use crate::coordinator::graph::{Effort, Node, NodeStatus, TaskGraph};
+use crate::coordinator::graph::{Effort, Node, NodeKind, NodeStatus, TaskGraph};
 use crate::coordinator::routing::{self, CoordinatorConfig, PoolHealth, RoutingTable};
 use chrono::{DateTime, Utc};
 use std::collections::BTreeMap;
@@ -520,6 +520,7 @@ fn settle_finished_node(
     if completed {
         goal::update_node(conn, &goal_id, &node_id, NodeStatus::Done, None, artifact.as_deref(), None)?;
         events::append(conn, &goal.session_id, Some(&goal_id), EventKind::NodeDone, &node_id)?;
+        maybe_auto_merge(conn, &goal, &node_id)?;
     } else if rate_limited {
         // E28 spec §8 (Part D, auto-continue): a `pool_agent::Exhausted`
         // outcome (Task 14 mapped it onto this same `rate_limited` signal)
@@ -786,7 +787,8 @@ fn run_integrator(
     Ok(())
 }
 
-/// feeds a node its dependencies' outputs alongside its own description.
+/// feeds a node its dependencies' outputs and its siblings' current status
+/// alongside its own description.
 fn build_node_prompt(graph: &TaskGraph, node: &Node) -> String {
     let mut deps = String::new();
     for dep_id in &node.depends_on {
@@ -796,11 +798,75 @@ fn build_node_prompt(graph: &TaskGraph, node: &Node) -> String {
             }
         }
     }
-    if deps.is_empty() {
-        node.desc.clone()
-    } else {
-        format!("{}\n\nUPSTREAM RESULTS:{deps}", node.desc)
+    let mut prompt = node.desc.clone();
+    if !deps.is_empty() {
+        prompt.push_str(&format!("\n\nUPSTREAM RESULTS:{deps}"));
     }
+    let siblings = graph.sibling_status(&node.id);
+    if !siblings.is_empty() {
+        let list: String = siblings.iter().map(|(id, status)| format!("\n- {id}: {}", status.as_str())).collect();
+        prompt.push_str(&format!(
+            "\n\nSIBLING NODE STATUS (read-only, for context — you cannot affect these):{list}"
+        ));
+    }
+    prompt
+}
+
+/// opt-in auto-merge (goal-improvement #1): when a `review`-kind node
+/// finishes `Done` (a passing reviewer/verifier — a `Failed` review never
+/// reaches here, since only the `completed` branch of `settle_finished_node`
+/// calls this) on a goal that set `auto_merge`, this used to merge every
+/// worktree-backed dependency of that node straight in.
+///
+/// Live-verification finding (this goal's own review step): an upfront
+/// `auto_merge` flag set when the goal was created doesn't give a human
+/// visibility into the *actual diff* at the moment it lands, later, after
+/// arbitrary other work has happened — a real contradiction of
+/// `docs/architecture.md`'s "branches are never auto-merged; that stays a
+/// human decision" invariant, not just an implementation nit. Fixed:
+/// `auto_merge` now means "eligible to be offered a merge confirmation
+/// once review passes", not "skip human review". This function requests
+/// confirmation via `single_core::pending_merge` and stops — it never
+/// calls `worktree::merge` itself. Only `single goal merge confirm`
+/// (`Request::GoalMergeResolve`, `allow: true`) does, after a human has
+/// been shown the real diff (`single goal merge show`, backed by
+/// `worktree::diff`). A no-op for every other goal/node shape, so this
+/// changes nothing unless a human explicitly opted in.
+fn maybe_auto_merge(conn: &Connection, goal: &Goal, node_id: &str) -> Result<()> {
+    if !goal.auto_merge {
+        return Ok(());
+    }
+    let graph = goal::load_graph(conn, &goal.id)?;
+    let Some(node) = graph.find(node_id) else { return Ok(()) };
+    if node.kind != NodeKind::Review {
+        return Ok(());
+    }
+
+    // Confirm this goal is actually a git repo before queueing anything —
+    // a real branch to confirm requires a real repo root, even though
+    // confirm-time (`GoalMergeResolve`) resolves it fresh rather than
+    // trusting a value captured here.
+    if single_core::project_context::resolve(std::path::Path::new(&load_session_cwd(conn, &goal.session_id)?)).repo_root.is_none() {
+        return Ok(()); // not a git repo at all — nothing worktree-backed to merge
+    }
+
+    for dep_id in &node.depends_on {
+        let Some(dep) = graph.find(dep_id) else { continue };
+        if !dep.worktree || dep.status != NodeStatus::Done {
+            continue;
+        }
+        let Some(task_id) = dep.task_id else { continue };
+        let branch = format!("single/task-{task_id}");
+        let pending_id = single_core::pending_merge::request(conn, &goal.id, &goal.session_id, node_id, dep_id, &branch)?;
+        events::append(
+            conn,
+            &goal.session_id,
+            Some(&goal.id),
+            EventKind::MergeAwaitingConfirmation,
+            &format!("{dep_id} ({branch}) awaiting human merge confirmation after {node_id} passed review — see `single goal merge show {pending_id}`"),
+        )?;
+    }
+    Ok(())
 }
 
 fn load_session_cwd(conn: &Connection, session_id: &str) -> Result<String> {
@@ -1221,9 +1287,19 @@ mod tests {
     #[test]
     fn build_node_prompt_folds_in_upstream_output_when_present() {
         let g = TaskGraph { nodes: vec![node("s1", &[], Effort::Standard, "grok"), node("s2", &["s1"], Effort::Standard, "grok")] };
-        // no output_ref on s1 -> prompt is just the bare desc
+        // no output_ref on s1 -> no UPSTREAM RESULTS section, but s1 still
+        // shows up as a sibling for visibility.
         let p = build_node_prompt(&g, g.find("s2").unwrap());
-        assert_eq!(p, "s2");
+        assert!(!p.contains("UPSTREAM RESULTS"));
+        assert!(p.contains("SIBLING NODE STATUS"));
+        assert!(p.contains("s1: pending"));
+    }
+
+    #[test]
+    fn build_node_prompt_omits_sibling_section_when_alone() {
+        let g = TaskGraph { nodes: vec![node("s1", &[], Effort::Standard, "grok")] };
+        let p = build_node_prompt(&g, g.find("s1").unwrap());
+        assert_eq!(p, "s1");
     }
 
     // ---- careful mode (`single loop`) ----
@@ -1300,5 +1376,111 @@ mod tests {
         let after = goal::get(&conn, &g.id).unwrap().unwrap();
         assert_eq!(after.status, GoalStatus::Done);
         assert!(after.result_summary.unwrap().contains("without a DONE"));
+    }
+
+    // ---- opt-in auto-merge ----
+
+    fn init_repo() -> tempfile::TempDir {
+        let repo = tempfile::tempdir().unwrap();
+        let run = |args: &[&str]| {
+            let status = std::process::Command::new("git").current_dir(repo.path()).args(args).status().unwrap();
+            assert!(status.success(), "git {:?} failed", args);
+        };
+        run(&["init", "-q"]);
+        run(&["config", "user.email", "test@example.com"]);
+        run(&["config", "user.name", "Test"]);
+        std::fs::write(repo.path().join("README.md"), "hi").unwrap();
+        run(&["add", "."]);
+        run(&["commit", "-q", "-m", "initial"]);
+        repo
+    }
+
+    /// builds `code` (worktree, Done, real branch with one commit) ->
+    /// `review` (Done) on a goal whose session cwd is `repo`, wiring up
+    /// exactly what `maybe_auto_merge` reads.
+    fn code_then_review_goal(conn: &mut rusqlite::Connection, repo: &std::path::Path, code_task_id: i64, auto_merge: bool) -> Goal {
+        use crate::coordinator::{graph::GoalMode, session};
+        let s = session::new_session(conn, repo).unwrap();
+        let g = goal::create(conn, &s.id, "ship it", GoalMode::Auto, 25, 60).unwrap();
+        if auto_merge {
+            goal::set_auto_merge(conn, &g.id, true).unwrap();
+        }
+        let mut code = node("code", &[], Effort::Standard, "grok");
+        code.kind = NodeKind::Code;
+        code.worktree = true;
+        code.status = NodeStatus::Done;
+        code.task_id = Some(code_task_id);
+        let mut review = node("review", &["code"], Effort::Standard, "grok");
+        review.kind = NodeKind::Review;
+        review.status = NodeStatus::Done;
+        goal::save_graph(conn, &g.id, &TaskGraph { nodes: vec![code, review] }).unwrap();
+        goal::get(conn, &g.id).unwrap().unwrap()
+    }
+
+    #[test]
+    fn auto_merge_queues_a_confirmation_instead_of_merging_directly() {
+        // Live-verification finding: an upfront `auto_merge` flag merging
+        // immediately once review passes gives a human no chance to see
+        // the actual diff at landing time — this must only ever queue a
+        // `pending_merge` request, never touch the repo itself.
+        let repo = init_repo();
+        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::coordinator::ensure_coordinator_schema(&conn).unwrap();
+        crate::task::ensure_schema(&conn).unwrap();
+
+        let task_id = crate::task::create_for_cwd(&conn, "do the work", "grok", repo.path()).unwrap();
+        let branch = format!("single/task-{task_id}");
+        let worktree_path = tempfile::tempdir().unwrap().path().join(format!("task-{task_id}"));
+        single_core::worktree::add(repo.path(), &worktree_path, &branch).unwrap();
+        std::fs::write(worktree_path.join("new-file.txt"), "from the worktree").unwrap();
+        let run_in_worktree = |args: &[&str]| {
+            let status = std::process::Command::new("git").current_dir(&worktree_path).args(args).status().unwrap();
+            assert!(status.success(), "git {:?} failed", args);
+        };
+        run_in_worktree(&["add", "."]);
+        run_in_worktree(&["commit", "-q", "-m", "add new-file"]);
+
+        let g = code_then_review_goal(&mut conn, repo.path(), task_id, true);
+
+        maybe_auto_merge(&conn, &g, "review").unwrap();
+
+        assert!(!repo.path().join("new-file.txt").is_file(), "must not merge on its own — needs a human `merge confirm`");
+        let events = events::for_goal(&conn, &g.id, 10).unwrap();
+        assert!(events.iter().any(|e| e.kind == "merge_awaiting_confirmation" && e.body.contains(&branch)));
+        let pending = single_core::pending_merge::list_pending(&conn).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].goal_id, g.id);
+        assert_eq!(pending[0].branch, branch);
+
+        // and confirming it is what actually performs the merge
+        single_core::worktree::merge(repo.path(), &branch).unwrap();
+        assert!(repo.path().join("new-file.txt").is_file());
+    }
+
+    #[test]
+    fn auto_merge_is_a_noop_when_the_goal_never_opted_in() {
+        let repo = init_repo();
+        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::coordinator::ensure_coordinator_schema(&conn).unwrap();
+        crate::task::ensure_schema(&conn).unwrap();
+
+        let task_id = crate::task::create_for_cwd(&conn, "do the work", "grok", repo.path()).unwrap();
+        let branch = format!("single/task-{task_id}");
+        let worktree_path = tempfile::tempdir().unwrap().path().join(format!("task-{task_id}"));
+        single_core::worktree::add(repo.path(), &worktree_path, &branch).unwrap();
+        std::fs::write(worktree_path.join("new-file.txt"), "from the worktree").unwrap();
+        let run_in_worktree = |args: &[&str]| {
+            let status = std::process::Command::new("git").current_dir(&worktree_path).args(args).status().unwrap();
+            assert!(status.success(), "git {:?} failed", args);
+        };
+        run_in_worktree(&["add", "."]);
+        run_in_worktree(&["commit", "-q", "-m", "add new-file"]);
+
+        let g = code_then_review_goal(&mut conn, repo.path(), task_id, false);
+
+        maybe_auto_merge(&conn, &g, "review").unwrap();
+
+        assert!(!repo.path().join("new-file.txt").is_file());
+        assert!(!events::for_goal(&conn, &g.id, 10).unwrap().iter().any(|e| e.kind == "merged"));
     }
 }

@@ -172,6 +172,15 @@ impl TaskGraph {
         d
     }
 
+    /// read-only view of every other node's current status, keyed by id —
+    /// lets a dispatched node see what its siblings are doing without any
+    /// ability to affect them. Coordinator state (this graph) stays the
+    /// single source of truth; this is display-only, never consulted for
+    /// scheduling decisions.
+    pub fn sibling_status(&self, id: &str) -> Vec<(&str, NodeStatus)> {
+        self.nodes.iter().filter(|n| n.id != id).map(|n| (n.id.as_str(), n.status)).collect()
+    }
+
     pub fn is_all_terminal(&self) -> bool {
         self.nodes.iter().all(|n| {
             matches!(

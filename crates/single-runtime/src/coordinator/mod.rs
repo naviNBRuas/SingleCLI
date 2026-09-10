@@ -34,6 +34,7 @@ pub fn ensure_coordinator_schema(conn: &Connection) -> anyhow::Result<()> {
     session::ensure_schema(conn)?;
     goal::ensure_schema(conn)?; // goals + graph_nodes
     events::ensure_schema(conn)?;
+    single_core::pending_merge::ensure_schema(conn)?;
     Ok(())
 }
 

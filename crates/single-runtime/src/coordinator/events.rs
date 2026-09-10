@@ -30,6 +30,22 @@ pub enum EventKind {
     /// E28 spec §10 (Part F): `resume_interrupted` (daemon start) or
     /// `single goal resume` (manual) picked this goal back up.
     SessionResumed,
+    /// opt-in auto-merge (`goal.auto_merge`): a `review`-kind node came
+    /// back `Done` and a human then `single goal merge confirm`ed the
+    /// resulting `single_core::pending_merge` record, which called
+    /// `single_core::worktree::merge`.
+    Merged,
+    /// A confirmed merge attempt and `single_core::worktree::merge`
+    /// returned an error (e.g. a real conflict) — surfaced, never silently
+    /// dropped; the goal itself still finishes since the review passed.
+    MergeFailed,
+    /// opt-in auto-merge (`goal.auto_merge`): a `review`-kind node came
+    /// back `Done` and `scheduler::maybe_auto_merge` recorded a
+    /// `single_core::pending_merge` request for a dependency's worktree
+    /// branch instead of merging it — never merges on its own; a human
+    /// must `single goal merge confirm` it first. See
+    /// `docs/architecture.md`'s "branches are never auto-merged" invariant.
+    MergeAwaitingConfirmation,
 }
 
 impl EventKind {
@@ -49,6 +65,9 @@ impl EventKind {
             EventKind::CapacityWait => "capacity_wait",
             EventKind::CapacityResumed => "capacity_resumed",
             EventKind::SessionResumed => "session_resumed",
+            EventKind::Merged => "merged",
+            EventKind::MergeFailed => "merge_failed",
+            EventKind::MergeAwaitingConfirmation => "merge_awaiting_confirmation",
         }
     }
 }

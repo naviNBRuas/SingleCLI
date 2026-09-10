@@ -1853,6 +1853,12 @@ fn dispatch(
                 crate::coordinator::goal::raise_capacity_budget(&conn, &goal_id, n)?;
             } else if let Some(n) = text.strip_prefix("capacity-minutes=").and_then(|s| s.trim().parse::<u32>().ok()) {
                 crate::coordinator::goal::raise_capacity_wait_minutes(&conn, &goal_id, n)?;
+            } else if let Some(v) = text.strip_prefix("auto-merge=").map(|s| s.trim()) {
+                let enabled = v.eq_ignore_ascii_case("true");
+                if !enabled && !v.eq_ignore_ascii_case("false") {
+                    anyhow::bail!("auto-merge=... needs true or false, got {v:?}");
+                }
+                crate::coordinator::goal::set_auto_merge(&conn, &goal_id, enabled)?;
             } else {
                 crate::coordinator::events::append(
                     &conn,
@@ -1883,6 +1889,71 @@ fn dispatch(
             crate::coordinator::resume_goal(ctx, &mut conn, &goal_id)?;
             let _ = crate::coordinator::drive(ctx, &mut conn, registry);
             Ok(ResponseData::Empty)
+        }
+        Request::GoalMergeList => {
+            let conn = coordinator_db(ctx)?;
+            let out = single_core::pending_merge::list_pending(&conn)?
+                .into_iter()
+                .map(to_pending_merge_info)
+                .collect();
+            Ok(ResponseData::PendingMerges(out))
+        }
+        Request::GoalMergeShow { id } => {
+            let conn = coordinator_db(ctx)?;
+            let pm = single_core::pending_merge::get(&conn, id)?
+                .ok_or_else(|| anyhow::anyhow!("no such pending merge: {id}"))?;
+            let cwd = crate::coordinator::session::get(&conn, &pm.session_id)?
+                .map(|s| s.cwd)
+                .ok_or_else(|| anyhow::anyhow!("no such session: {}", pm.session_id))?;
+            let repo_root = single_core::project_context::resolve(std::path::Path::new(&cwd))
+                .repo_root
+                .ok_or_else(|| anyhow::anyhow!("goal {} has no resolvable repo root", pm.goal_id))?;
+            let diff = single_core::worktree::diff(std::path::Path::new(&repo_root), &pm.branch)?;
+            Ok(ResponseData::PendingMergeDiff(to_pending_merge_info(pm), diff))
+        }
+        Request::GoalMergeResolve { id, allow } => {
+            let conn = coordinator_db(ctx)?;
+            let pm = single_core::pending_merge::get(&conn, id)?
+                .ok_or_else(|| anyhow::anyhow!("no such pending merge: {id}"))?;
+            let resolved = single_core::pending_merge::resolve(&conn, id, allow)?;
+            if allow {
+                let cwd = crate::coordinator::session::get(&conn, &pm.session_id)?
+                    .map(|s| s.cwd)
+                    .ok_or_else(|| anyhow::anyhow!("no such session: {}", pm.session_id))?;
+                let repo_root = single_core::project_context::resolve(std::path::Path::new(&cwd))
+                    .repo_root
+                    .ok_or_else(|| anyhow::anyhow!("goal {} has no resolvable repo root", pm.goal_id))?;
+                match single_core::worktree::merge(std::path::Path::new(&repo_root), &pm.branch) {
+                    Ok(output) => {
+                        crate::coordinator::events::append(
+                            &conn,
+                            &pm.session_id,
+                            Some(&pm.goal_id),
+                            crate::coordinator::events::EventKind::Merged,
+                            &format!("{} ({}) merged after human confirmation:\n{output}", pm.dep_node_id, pm.branch),
+                        )?;
+                    }
+                    Err(e) => {
+                        crate::coordinator::events::append(
+                            &conn,
+                            &pm.session_id,
+                            Some(&pm.goal_id),
+                            crate::coordinator::events::EventKind::MergeFailed,
+                            &format!("{} ({}) confirmed merge failed: {e:#}", pm.dep_node_id, pm.branch),
+                        )?;
+                        return Err(e);
+                    }
+                }
+            } else {
+                crate::coordinator::events::append(
+                    &conn,
+                    &pm.session_id,
+                    Some(&pm.goal_id),
+                    crate::coordinator::events::EventKind::Message,
+                    &format!("{} ({}) merge rejected by human", pm.dep_node_id, pm.branch),
+                )?;
+            }
+            Ok(ResponseData::PendingMerges(vec![to_pending_merge_info(resolved)]))
         }
         Request::SessionEvents { session_id, since_event_id } => {
             let conn = coordinator_db(ctx)?;
@@ -2163,6 +2234,24 @@ fn to_approval_info(a: single_core::preferences::Approval) -> single_protocol::A
         status: status.to_string(),
         created_at: a.created_at,
         resolved_at: a.resolved_at,
+    }
+}
+
+fn to_pending_merge_info(pm: single_core::pending_merge::PendingMerge) -> single_protocol::PendingMergeInfo {
+    let status = match pm.status {
+        single_core::pending_merge::PendingMergeStatus::Pending => "pending",
+        single_core::pending_merge::PendingMergeStatus::Confirmed => "confirmed",
+        single_core::pending_merge::PendingMergeStatus::Rejected => "rejected",
+    };
+    single_protocol::PendingMergeInfo {
+        id: pm.id,
+        goal_id: pm.goal_id,
+        review_node_id: pm.review_node_id,
+        dep_node_id: pm.dep_node_id,
+        branch: pm.branch,
+        status: status.to_string(),
+        created_at: pm.created_at,
+        resolved_at: pm.resolved_at,
     }
 }
 

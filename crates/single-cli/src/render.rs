@@ -451,6 +451,25 @@ fn print_data(data: ResponseData) {
                 }
             }
         }
+        ResponseData::PendingMerges(merges) => {
+            if merges.is_empty() {
+                println!("(no pending merges)");
+            }
+            for m in merges {
+                println!("#{:<5} [{}] {} <- {} (after {})", m.id, m.status, m.branch, m.dep_node_id, m.review_node_id);
+                println!("        goal: {}", m.goal_id);
+            }
+        }
+        ResponseData::PendingMergeDiff(m, diff) => {
+            println!("#{:<5} [{}] {} <- {} (after {})", m.id, m.status, m.branch, m.dep_node_id, m.review_node_id);
+            println!("        goal: {}", m.goal_id);
+            println!();
+            if diff.is_empty() {
+                println!("(no diff — branch is even with HEAD)");
+            } else {
+                println!("{diff}");
+            }
+        }
         ResponseData::Preferences(prefs) => {
             if prefs.is_empty() {
                 println!("(no learned preferences yet)");

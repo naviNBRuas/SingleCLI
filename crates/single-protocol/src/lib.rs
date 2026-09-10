@@ -674,8 +674,10 @@ pub enum Request {
         #[serde(default)]
         session_id: Option<String>,
     },
-    /// Adds context / raises the budget (`budget=N`) / answers a blocked
-    /// question, then re-ticks.
+    /// Adds context / raises the budget (`budget=N`) / opts into merge
+    /// confirmation (`auto-merge=true|false` — see
+    /// `single_core::pending_merge`, `single goal merge`) / answers a
+    /// blocked question, then re-ticks.
     GoalAmend {
         goal_id: String,
         text: String,
@@ -697,6 +699,24 @@ pub enum Request {
     },
     /// Cross-thread snapshot: running/queued goals + pool capacity.
     CoordinatorStatus,
+    /// Pending merge confirmations from the coordinator's opt-in
+    /// auto-merge (`goal.auto_merge`) — see `single_core::pending_merge`.
+    /// "Branches are never auto-merged; that stays a human decision"
+    /// (`docs/architecture.md`): a review passing only queues one of
+    /// these, it never merges by itself.
+    GoalMergeList,
+    /// The real diff (`single_core::worktree::diff`) a pending merge
+    /// would land, computed fresh rather than cached from request time.
+    GoalMergeShow {
+        id: i64,
+    },
+    /// `allow: true` calls `single_core::worktree::merge` after marking
+    /// the record confirmed; `allow: false` marks it rejected and never
+    /// touches the repo.
+    GoalMergeResolve {
+        id: i64,
+        allow: bool,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -748,6 +768,9 @@ pub enum ResponseData {
     DockerContainerInfo(DockerContainerInfo),
     DockerContainerList(Vec<DockerContainerInfo>),
     Approvals(Vec<ApprovalInfo>),
+    PendingMerges(Vec<PendingMergeInfo>),
+    /// `GoalMergeShow`'s result: the record plus the real diff.
+    PendingMergeDiff(PendingMergeInfo, String),
     /// `(agent, enabled)` pairs — see `single_core::hooks::status`.
     HooksStatus(Vec<(String, bool)>),
     Preferences(Vec<PreferenceInfo>),
@@ -1271,6 +1294,21 @@ pub struct ApprovalInfo {
     pub resource: String,
     pub context: Option<String>,
     /// `"pending"` / `"allowed"` / `"denied"`.
+    pub status: String,
+    pub created_at: String,
+    pub resolved_at: Option<String>,
+}
+
+/// A merge awaiting (or given) human confirmation — see
+/// `single_core::pending_merge`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PendingMergeInfo {
+    pub id: i64,
+    pub goal_id: String,
+    pub review_node_id: String,
+    pub dep_node_id: String,
+    pub branch: String,
+    /// `"pending"` / `"confirmed"` / `"rejected"`.
     pub status: String,
     pub created_at: String,
     pub resolved_at: Option<String>,
@@ -2003,6 +2041,9 @@ mod tests {
             Request::GoalResume { goal_id: "goal_1".into() },
             Request::SessionEvents { session_id: "sess_1".into(), since_event_id: 4 },
             Request::CoordinatorStatus,
+            Request::GoalMergeList,
+            Request::GoalMergeShow { id: 1 },
+            Request::GoalMergeResolve { id: 1, allow: true },
         ];
         for r in reqs {
             let json = serde_json::to_string(&r).unwrap();

@@ -419,8 +419,9 @@ enum GoalCommand {
         json: bool,
     },
     /// Add context, `budget=N` to raise the dispatch cap, `minutes=N` to
-    /// raise the wall-clock cap, or `capacity-minutes=N` to raise the
-    /// capacity-wait wall-clock cap, and re-tick.
+    /// raise the wall-clock cap, `capacity-minutes=N` to raise the
+    /// capacity-wait wall-clock cap, or `auto-merge=true|false` to opt into
+    /// merge confirmation (`single goal merge`), and re-tick.
     Amend {
         goal_id: String,
         text: Vec<String>,
@@ -433,6 +434,33 @@ enum GoalCommand {
     /// daemon runs automatically on its own restart.
     Resume {
         goal_id: String,
+    },
+    /// Merges awaiting human confirmation from the coordinator's opt-in
+    /// auto-merge (`goal.auto_merge`) — a passing review queues one of
+    /// these, it never merges by itself. "Branches are never auto-merged;
+    /// that stays a human decision" (docs/architecture.md).
+    #[command(subcommand)]
+    Merge(GoalMergeCommand),
+}
+
+#[derive(Subcommand)]
+enum GoalMergeCommand {
+    /// List merges awaiting confirmation.
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show the real diff a pending merge would land.
+    Show {
+        id: i64,
+    },
+    /// Merge it (`git merge --no-ff`) after you've reviewed `merge show`.
+    Confirm {
+        id: i64,
+    },
+    /// Decline it — never touches the repo.
+    Reject {
+        id: i64,
     },
 }
 
@@ -2815,6 +2843,24 @@ fn main() -> anyhow::Result<()> {
                 let response = client::send(&socket_path, Request::GoalResume { goal_id })?;
                 render::print(response, false);
             }
+            GoalCommand::Merge(merge_cmd) => match merge_cmd {
+                GoalMergeCommand::List { json } => {
+                    let response = client::send(&socket_path, Request::GoalMergeList)?;
+                    render::print(response, json);
+                }
+                GoalMergeCommand::Show { id } => {
+                    let response = client::send(&socket_path, Request::GoalMergeShow { id })?;
+                    render::print(response, false);
+                }
+                GoalMergeCommand::Confirm { id } => {
+                    let response = client::send(&socket_path, Request::GoalMergeResolve { id, allow: true })?;
+                    render::print(response, false);
+                }
+                GoalMergeCommand::Reject { id } => {
+                    let response = client::send(&socket_path, Request::GoalMergeResolve { id, allow: false })?;
+                    render::print(response, false);
+                }
+            },
         },
         Command::Coordinator { action } => match action {
             CoordinatorCommand::Status { json } => {

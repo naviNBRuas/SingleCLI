@@ -12,6 +12,7 @@ pub mod lsp;
 pub mod mcp;
 pub mod notes;
 pub mod paths;
+pub mod pending_merge;
 pub mod permissions;
 pub mod plugins;
 pub mod pool_keys;

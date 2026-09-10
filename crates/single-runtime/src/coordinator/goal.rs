@@ -53,6 +53,15 @@ pub struct Goal {
     /// E28 spec §9.2: how many times self-heal's coordinator category has
     /// re-evaluated a `Blocked` goal — bounded by `max_auto_reevals_per_goal`.
     pub auto_reevals: u32,
+    /// opt-in only (`single goal amend <id> auto-merge=true`) — never set by
+    /// default. `docs/architecture.md`'s "branches are never auto-merged;
+    /// that stays a human decision" still holds: this is the human's
+    /// upfront decision to allow it for this goal, not a bypass of it. The
+    /// scheduler only acts on it once a `review`-kind node the merged
+    /// node depends on has itself finished `Done` (a passing
+    /// reviewer/verifier), and only via the existing
+    /// `single_core::worktree::merge` — no separate merge mechanism.
+    pub auto_merge: bool,
 }
 
 pub fn ensure_schema(conn: &Connection) -> Result<()> {
@@ -108,6 +117,7 @@ pub fn ensure_schema(conn: &Connection) -> Result<()> {
     // pass re-evaluates one `Blocked` goal.
     crate::task::add_column_if_missing(conn, "goals", "last_human_edit_at", "TEXT")?;
     crate::task::add_column_if_missing(conn, "goals", "auto_reevals", "INTEGER NOT NULL DEFAULT 0")?;
+    crate::task::add_column_if_missing(conn, "goals", "auto_merge", "INTEGER NOT NULL DEFAULT 0")?;
     Ok(())
 }
 
@@ -174,6 +184,7 @@ fn row_to_goal(row: &rusqlite::Row) -> rusqlite::Result<Goal> {
         capacity_wait_minutes_override: row.get("capacity_wait_minutes_override")?,
         last_human_edit_at: row.get("last_human_edit_at")?,
         auto_reevals: row.get("auto_reevals")?,
+        auto_merge: row.get::<_, i64>("auto_merge")? != 0,
     })
 }
 
@@ -358,6 +369,16 @@ pub fn raise_capacity_budget(conn: &Connection, id: &str, new_budget: u32) -> Re
     conn.execute(
         "UPDATE goals SET capacity_budget_override = ?2, updated_at = ?3 WHERE id = ?1",
         params![id, new_budget, now()],
+    )?;
+    Ok(())
+}
+
+/// `single goal amend <id> auto-merge=true|false` — the human's opt-in
+/// switch (default off) for `scheduler::maybe_auto_merge`.
+pub fn set_auto_merge(conn: &Connection, id: &str, enabled: bool) -> Result<()> {
+    conn.execute(
+        "UPDATE goals SET auto_merge = ?2, updated_at = ?3 WHERE id = ?1",
+        params![id, enabled as i64, now()],
     )?;
     Ok(())
 }

@@ -9,6 +9,42 @@ patch version (`0.0.x`) carries fixes, per [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## [Unreleased]
 
+## [0.15.0]
+
+- Added: two concrete, well-scoped improvements toward the coordinator
+  running independent agents "like a real team" (multiple agents/
+  providers, each in their own git worktree, on independent parts of one
+  goal) — found by a coordinator goal auditing SingleCLI's own
+  `coordinator::scheduler`/`graph`/`single_core::worktree` against that
+  aim:
+  - **Sibling-node status visibility.** `TaskGraph::sibling_status`
+    (read-only, pure) is now included in every dispatched node's prompt
+    as a `SIBLING NODE STATUS` section — an agent working on one node can
+    see what its siblings in the same goal are doing (id + status),
+    without any ability to affect them. Coordinator state stays the sole
+    source of truth; this is display-only, never consulted for
+    scheduling.
+  - **Opt-in merge confirmation.** A goal can now `single goal amend <id>
+    auto-merge=true` to have the coordinator offer to merge a node's
+    worktree branch once a `review`-kind node depending on it passes,
+    instead of the merge staying entirely manual (`single worktree
+    merge`). This does **not** merge automatically: `docs/architecture.md`
+    states "branches are never auto-merged; that stays a human decision"
+    as an explicit invariant, and a first pass at this feature (an
+    upfront flag that merged immediately once review passed) was caught
+    by this same goal's own review step as a real contradiction of that
+    invariant — an upfront flag gives a human no visibility into the
+    actual diff at the moment it lands, possibly much later. Fixed before
+    landing: a passing review now only queues a
+    `single_core::pending_merge` confirmation request (new `pending_merges`
+    table); `single goal merge list` shows what's waiting, `single goal
+    merge show <id>` prints the real diff (`git diff HEAD...branch`), and
+    only `single goal merge confirm <id>` calls `worktree::merge`.
+    `single goal merge reject <id>` declines without touching the repo.
+    The invariant holds exactly as documented — this just gives a human a
+    guided, low-friction way to exercise the decision instead of running
+    `worktree diff`/`merge` by hand.
+
 ## [0.14.13]
 
 - Fixed: the coordinator self-heal pass's `reroute_repeated_failures`
