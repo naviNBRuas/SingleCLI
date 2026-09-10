@@ -63,11 +63,26 @@ fn reeval_blocked_goals(conn: &Connection, cfg: &SelfHealConfig) -> Result<Strin
     Ok(format!("reevaluated: [{}]; bounded-out: {skipped_bounded}; human-edited (skipped): {skipped_human}", reevaluated.join(", ")))
 }
 
-/// A node pinned to a specific agent (`node.agent` non-empty) that's
-/// failed at least twice on that same pin gets its pin cleared, so the
-/// next tick's `select_agent` routes it through the kind's list fresh
-/// (potentially onto `single-pool`) instead of retrying the same broken
-/// agent forever. Never touches a goal amended in the last hour.
+/// A node whose retries are exhausted (`Failed`, `attempts >= 2`) gets
+/// its agent pin cleared and status reset to `Pending`, so the next
+/// tick's `select_agent` routes it through the kind's list fresh
+/// (potentially onto `single-pool`) instead of sitting dead forever.
+/// Never touches a goal amended in the last hour.
+///
+/// Live-verification finding: this previously required `node.agent`
+/// non-empty (i.e. only a node explicitly pinned via `/agent`) before
+/// acting. A node dispatched through ordinary kind-based routing
+/// (`routing.toml`, no pin) has an *empty* `agent` field once the
+/// scheduler gives up on it — `settle_finished_node`'s exhausted-retries
+/// path marks it `Failed` without ever setting `agent`. That's the
+/// common case, not the exception, so this substep silently never fired
+/// for the failures it exists to fix: such a node sat `Failed` with no
+/// `earliest_retry_at_ms` forever, invisible to both `goal resume`
+/// (only re-ticks `Pending` nodes) and this self-heal pass, needing a
+/// manual DB reset every time. Dropped the non-empty-agent requirement
+/// — `clear_node_agent_pin` is a no-op-safe reset (`agent=''` on an
+/// already-empty field, `status='pending'`) whether or not a pin was
+/// ever set.
 fn reroute_repeated_failures(_ctx: &Context, conn: &Connection) -> Result<String> {
     let mut rerouted = Vec::new();
 
@@ -77,7 +92,7 @@ fn reroute_repeated_failures(_ctx: &Context, conn: &Connection) -> Result<String
         }
         let graph = goal::load_graph(conn, &g.id)?;
         for node in &graph.nodes {
-            if node.status == NodeStatus::Failed && !node.agent.is_empty() && node.attempts >= 2 {
+            if node.status == NodeStatus::Failed && node.attempts >= 2 {
                 goal::clear_node_agent_pin(conn, &g.id, &node.id)?;
                 rerouted.push(format!("{}/{}", g.id, node.id));
             }
@@ -262,6 +277,40 @@ mod tests {
         let n = reloaded.find("s1").unwrap();
         assert!(n.agent.is_empty(), "the pin should be cleared");
         assert_eq!(n.status, NodeStatus::Pending);
+    }
+
+    #[test]
+    fn exhausted_kind_routed_failure_with_no_pin_still_reroutes() {
+        // Live-verification regression: a node dispatched through ordinary
+        // kind-based routing (never `/agent`-pinned) has an empty `agent`
+        // field once the scheduler exhausts its retries -- this must still
+        // get reset to `Pending`, not just the pinned-agent case.
+        let conn = test_conn();
+        let ctx = test_ctx(&tempfile::tempdir().unwrap().keep());
+        let s = crate::coordinator::session::new_session(&conn, std::path::Path::new("/tmp")).unwrap();
+        let g = goal::create(&conn, &s.id, "g", GoalMode::Auto, 25, 60).unwrap();
+        let node = Node {
+            id: "s6".into(),
+            desc: "d".into(),
+            kind: NodeKind::Code,
+            effort: Effort::Deep,
+            agent: String::new(), // never pinned -- kind-routed
+            depends_on: vec![],
+            status: NodeStatus::Failed,
+            task_id: Some(1469),
+            attempts: 2,
+            worktree: true,
+            output_ref: None,
+            earliest_retry_at_ms: None,
+        };
+        let mut conn = conn;
+        goal::save_graph(&mut conn, &g.id, &TaskGraph { nodes: vec![node] }).unwrap();
+
+        let detail = reroute_repeated_failures(&ctx, &conn).unwrap();
+        assert!(detail.contains("s6"), "{detail}");
+        let reloaded = goal::load_graph(&conn, &g.id).unwrap();
+        let n = reloaded.find("s6").unwrap();
+        assert_eq!(n.status, NodeStatus::Pending, "an unpinned exhausted node must also be reset, not left dead");
     }
 
     #[test]

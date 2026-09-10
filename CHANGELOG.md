@@ -9,6 +9,22 @@ patch version (`0.0.x`) carries fixes, per [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## [Unreleased]
 
+## [0.14.13]
+
+- Fixed: the coordinator self-heal pass's `reroute_repeated_failures`
+  substep (runs every 300s) only reset a `Failed`, retries-exhausted node
+  back to `Pending` when it had a non-empty `agent` field — i.e. only a
+  node explicitly pinned via `/agent`. Live-verification finding: a node
+  dispatched through ordinary kind-based routing (`routing.toml`, the
+  common case — no pin) has an *empty* `agent` field once the scheduler
+  gives up on it, since the exhausted-retries path marks it `Failed`
+  without ever setting `agent`. Such a node was invisible to this
+  self-heal step and to `goal resume`/`amend` (both only re-tick
+  `Pending` nodes) — it sat dead forever, needing a manual DB reset to
+  recover, which is exactly how two real overnight goals got stuck
+  tonight. Dropped the non-empty-agent requirement: any `Failed` node
+  with `attempts >= 2` now gets rerouted, pinned or not.
+
 ## [0.14.12]
 
 - Added: Pool tab in the TUI (`single` → Pool) shows a live pool-wide
