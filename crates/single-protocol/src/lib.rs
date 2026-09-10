@@ -499,6 +499,15 @@ pub enum Request {
     ProviderAddFree {
         id: String,
         key: String,
+        /// Distinguishes multiple keys for the same platform (e.g. keys
+        /// from separate accounts, added to grow the free-pool's real
+        /// capacity). Omit to auto-generate a fresh one — the very first
+        /// key added for a platform still becomes `"default"` for
+        /// backward compatibility, every one after that becomes
+        /// `key2`, `key3`, etc. Passing an *existing* key_id explicitly
+        /// intentionally overwrites that one key (key rotation).
+        #[serde(default)]
+        key_id: Option<String>,
     },
     /// Reconciles the vendored catalog into `providers.toml` as
     /// `single-<id>` presets and into `free-pool.toml`'s per-provider

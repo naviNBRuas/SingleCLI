@@ -9,6 +9,24 @@ patch version (`0.0.x`) carries fixes, per [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## [Unreleased]
 
+## [0.15.1]
+
+- Fixed: `single provider add-free <id> --key ...` hardcoded `key_id` to
+  `"default"` unconditionally. `pool_provider_keys` is keyed by
+  `(platform, key_id)` and `pool_keys::add` upserts on that pair, so a
+  *second* `add-free` call for a platform that already had a key (e.g.
+  adding a key from a different account to grow the free-pool's real
+  capacity) silently overwrote the first key instead of adding a second
+  one — the underlying storage already fully supported multiple keys per
+  platform, only this one call site never let you reach it.
+  Live-verification finding while preparing to add a large batch of
+  additional provider accounts. Added `single provider add-free
+  --key-id <ID>` to rotate (replace) one specific existing key on
+  purpose; omitting it now auto-picks a fresh, never-before-used id
+  (`pool_keys::next_free_key_id`: first key stays `"default"` for
+  backward compatibility, every one after that is `key2`, `key3`, ...)
+  instead of reusing `"default"`.
+
 ## [0.15.0]
 
 - Added: two concrete, well-scoped improvements toward the coordinator

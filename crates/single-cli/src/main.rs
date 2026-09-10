@@ -1144,11 +1144,19 @@ enum ProviderCommand {
         #[arg(long)]
         json: bool,
     },
-    /// Register one free-pool provider's key (prompted, hidden, if `--key` is omitted) and best-effort validate it.
+    /// Register one free-pool provider's key (prompted, hidden, if `--key`
+    /// is omitted) and best-effort validate it. Safe to call repeatedly
+    /// for the same provider with a different key (e.g. from another
+    /// account) — each call auto-picks a fresh key_id (default, key2,
+    /// key3, ...) instead of overwriting the previous key, growing the
+    /// pool's real capacity. Pass `--key-id` explicitly only to rotate
+    /// (replace) one specific existing key on purpose.
     AddFree {
         id: String,
         #[arg(long)]
         key: Option<String>,
+        #[arg(long)]
+        key_id: Option<String>,
     },
     /// Reconcile the vendored catalog into `providers.toml` (`single-<id>` presets) and `free-pool.toml` (enabled/disabled state). Idempotent.
     SyncPool,
@@ -2610,12 +2618,12 @@ fn main() -> anyhow::Result<()> {
                 let response = client::send(&socket_path, Request::ProviderListFree)?;
                 render::print(response, json);
             }
-            ProviderCommand::AddFree { id, key } => {
+            ProviderCommand::AddFree { id, key, key_id } => {
                 let key = match key {
                     Some(key) => key,
                     None => rpassword::prompt_password(format!("API key for '{id}': "))?,
                 };
-                let response = client::send(&socket_path, Request::ProviderAddFree { id, key })?;
+                let response = client::send(&socket_path, Request::ProviderAddFree { id, key, key_id })?;
                 render::print(response, false);
             }
             ProviderCommand::SyncPool => {
@@ -3494,9 +3502,10 @@ mod graph_task_parsing_tests {
     fn add_free_parses_with_key_flag() {
         let cli = Cli::try_parse_from(["single", "provider", "add-free", "groq", "--key", "gsk-abc"]).unwrap();
         match cli.command {
-            Some(Command::Provider { action: ProviderCommand::AddFree { id, key } }) => {
+            Some(Command::Provider { action: ProviderCommand::AddFree { id, key, key_id } }) => {
                 assert_eq!(id, "groq");
                 assert_eq!(key.as_deref(), Some("gsk-abc"));
+                assert!(key_id.is_none());
             }
             _ => panic!("expected Command::Provider(AddFree)"),
         }
@@ -3506,9 +3515,23 @@ mod graph_task_parsing_tests {
     fn add_free_parses_without_key_flag() {
         let cli = Cli::try_parse_from(["single", "provider", "add-free", "groq"]).unwrap();
         match cli.command {
-            Some(Command::Provider { action: ProviderCommand::AddFree { id, key } }) => {
+            Some(Command::Provider { action: ProviderCommand::AddFree { id, key, key_id } }) => {
                 assert_eq!(id, "groq");
                 assert!(key.is_none());
+                assert!(key_id.is_none());
+            }
+            _ => panic!("expected Command::Provider(AddFree)"),
+        }
+    }
+
+    #[test]
+    fn add_free_parses_with_explicit_key_id_for_rotation() {
+        let cli = Cli::try_parse_from(["single", "provider", "add-free", "groq", "--key", "gsk-new", "--key-id", "key2"]).unwrap();
+        match cli.command {
+            Some(Command::Provider { action: ProviderCommand::AddFree { id, key, key_id } }) => {
+                assert_eq!(id, "groq");
+                assert_eq!(key.as_deref(), Some("gsk-new"));
+                assert_eq!(key_id.as_deref(), Some("key2"));
             }
             _ => panic!("expected Command::Provider(AddFree)"),
         }

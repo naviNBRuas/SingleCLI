@@ -71,6 +71,30 @@ pub fn add(conn: &Connection, platform: &str, key_id: &str) -> Result<()> {
     Ok(())
 }
 
+/// Picks a fresh `key_id` for a new key on a platform that already has
+/// `existing` keys, so a second `single provider add-free` call for the
+/// same platform (e.g. a key from a different account) adds real pool
+/// capacity instead of overwriting the first key — see the live-
+/// verification finding in `handlers.rs`'s `Request::ProviderAddFree`.
+/// The very first key for a platform stays `"default"` (backward
+/// compatible with every already-registered single-key platform); every
+/// one after that is `key2`, `key3`, ... skipping any id already taken
+/// (defensive — `existing` should never contain a gap in practice, but
+/// this never picks a colliding id even if it does).
+pub fn next_free_key_id(existing: &[PoolProviderKey]) -> String {
+    if existing.is_empty() {
+        return "default".to_string();
+    }
+    let mut n = existing.len() + 1;
+    loop {
+        let candidate = format!("key{n}");
+        if !existing.iter().any(|k| k.key_id == candidate) {
+            return candidate;
+        }
+        n += 1;
+    }
+}
+
 pub fn list(conn: &Connection, platform: Option<&str>) -> Result<Vec<PoolProviderKey>> {
     let mut sql = String::from("SELECT platform, key_id, secret_ref, added_at, last_validated_at, valid, disabled FROM pool_provider_keys");
     if platform.is_some() {
@@ -168,6 +192,49 @@ mod tests {
         add(&conn, "groq", "default").unwrap();
         add(&conn, "groq", "default").unwrap();
         assert_eq!(list(&conn, Some("groq")).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn next_free_key_id_starts_at_default_then_grows() {
+        assert_eq!(next_free_key_id(&[]), "default");
+    }
+
+    #[test]
+    fn next_free_key_id_never_reuses_default_once_taken() {
+        // Live-verification finding: adding a second key for a platform
+        // that already has one must not overwrite it -- next_free_key_id
+        // must pick something other than "default" once one exists.
+        let conn = test_conn();
+        add(&conn, "groq", "default").unwrap();
+        let existing = list(&conn, Some("groq")).unwrap();
+        let picked = next_free_key_id(&existing);
+        assert_ne!(picked, "default");
+        assert_eq!(picked, "key2");
+    }
+
+    #[test]
+    fn next_free_key_id_skips_ids_already_taken() {
+        let conn = test_conn();
+        add(&conn, "groq", "default").unwrap();
+        add(&conn, "groq", "key2").unwrap();
+        add(&conn, "groq", "key3").unwrap();
+        let existing = list(&conn, Some("groq")).unwrap();
+        let picked = next_free_key_id(&existing);
+        assert_eq!(picked, "key4");
+        assert!(!existing.iter().any(|k| k.key_id == picked), "must not collide with an existing key_id");
+    }
+
+    #[test]
+    fn adding_a_second_free_pool_key_grows_the_pool_instead_of_overwriting() {
+        // End-to-end regression for the actual bug: two real add-free
+        // calls (simulated via add() + next_free_key_id, same shape the
+        // handler uses) for the same platform must leave TWO keys, not
+        // one overwritten key.
+        let conn = test_conn();
+        add(&conn, "groq", &next_free_key_id(&list(&conn, Some("groq")).unwrap())).unwrap();
+        add(&conn, "groq", &next_free_key_id(&list(&conn, Some("groq")).unwrap())).unwrap();
+        let keys = list(&conn, Some("groq")).unwrap();
+        assert_eq!(keys.len(), 2, "second add-free call must add a key, not overwrite the first");
     }
 
     #[test]

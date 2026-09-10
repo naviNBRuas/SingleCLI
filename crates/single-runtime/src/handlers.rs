@@ -1276,17 +1276,30 @@ fn dispatch(
                 .collect();
             Ok(ResponseData::FreeProviders(infos))
         }
-        Request::ProviderAddFree { id, key } => {
+        Request::ProviderAddFree { id, key, key_id } => {
             let provider = single_core::free_pool::by_id(&id).ok_or_else(|| {
                 anyhow::anyhow!("no such free provider: {id} (see `single provider list-free`)")
             })?;
             single_core::free_pool::validate_key_shape(provider, &key).map_err(|e| anyhow::anyhow!(e))?;
-            let store = single_core::secrets::SecretTool;
-            let secret_name = single_core::pool_keys::secret_name(&id, "default");
-            single_core::secrets::SecretStore::set(&store, &secret_name, &key)?;
             let conn = crate::state::open(&ctx.dirs.db_path())?;
             single_core::pool_keys::ensure_schema(&conn)?;
-            single_core::pool_keys::add(&conn, &id, "default")?;
+            // Live-verification finding: this used to hardcode key_id to
+            // "default" unconditionally, so a second `add-free` call for
+            // an already-keyed platform silently OVERWROTE the first key
+            // (pool_provider_keys is keyed by (platform, key_id), and
+            // pool_keys::add is an upsert on that pair) instead of adding
+            // a second key to the pool's real capacity. An explicit
+            // key_id still overwrites that one key on purpose (rotation);
+            // omitting it now auto-picks a fresh, never-before-used id
+            // for this platform instead of reusing "default".
+            let key_id = match key_id {
+                Some(explicit) => explicit,
+                None => single_core::pool_keys::next_free_key_id(&single_core::pool_keys::list(&conn, Some(&id))?),
+            };
+            let store = single_core::secrets::SecretTool;
+            let secret_name = single_core::pool_keys::secret_name(&id, &key_id);
+            single_core::secrets::SecretStore::set(&store, &secret_name, &key)?;
+            single_core::pool_keys::add(&conn, &id, &key_id)?;
 
             // Best-effort key validation — a failed/absent probe just
             // leaves the key unvalidated, it never fails the command
@@ -1302,7 +1315,7 @@ fn dispatch(
                         .send()
                         .map(|resp| resp.status().is_success())
                         .unwrap_or(false);
-                    single_core::pool_keys::mark_validated(&conn, &id, "default", ok)?;
+                    single_core::pool_keys::mark_validated(&conn, &id, &key_id, ok)?;
                 }
             }
             Ok(ResponseData::Empty)
