@@ -9,6 +9,29 @@ patch version (`0.0.x`) carries fixes, per [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## [Unreleased]
 
+## [0.15.4]
+
+- Fixed: `self_heal::infra::db_backup` forced `PRAGMA
+  wal_checkpoint(TRUNCATE)` before copying `single.db` to a timestamped
+  backup. TRUNCATE mode truncates the WAL file to zero as part of the
+  checkpoint, which removes SQLite's crash-safety net for the duration
+  of that operation. Live-verification finding: this daemon's systemd
+  unit caps its cgroup at `MemoryMax=6G` as a runaway backstop, and the
+  daemon's own journal shows repeated `status=9/KILL` under heavy
+  concurrent-agent load (91 tasks in one observed run) — including the
+  same night `single.db` was found corrupt twice (`PRAGMA
+  integrity_check` real page-level errors, then a second time not even
+  parsing as a SQLite file at all). A SIGKILL landing mid-TRUNCATE is a
+  textbook way to leave the main db file malformed. Switched to `PRAGMA
+  wal_checkpoint(PASSIVE)`, which never truncates or blocks and does as
+  much of the checkpoint as it safely can given concurrent readers —
+  the resulting backup can be very slightly stale (a few of the most
+  recent transactions might still be sitting in the WAL rather than
+  applied to the main file) but is never at risk of being corrupted by
+  an interrupted checkpoint. Combined with 0.15.3's restore-safety fix,
+  this addresses both the corruption trigger and the unsafe recovery
+  path found in the same incident.
+
 ## [0.15.3]
 
 - Fixed: `self_heal::infra::db_integrity`'s corruption-restore swapped the

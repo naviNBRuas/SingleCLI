@@ -153,7 +153,21 @@ fn db_backup(ctx: &Context, conn: &Connection, cfg: &SelfHealConfig) -> Result<S
     // A live WAL-mode SQLite file shouldn't be `fs::copy`d directly (the
     // WAL/SHM sidecars could be mid-checkpoint) -- force a checkpoint
     // first so the main db file is self-consistent before the copy.
-    conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)").ok();
+    //
+    // Live-verification finding: this used to be `wal_checkpoint(TRUNCATE)`.
+    // TRUNCATE mode truncates the WAL file to zero bytes as part of the
+    // checkpoint, which removes SQLite's own crash-safety net for the
+    // duration of that operation -- if the process is killed mid-TRUNCATE
+    // (confirmed live: this daemon's cgroup has a 6G `MemoryMax` backstop
+    // and its own journal shows repeated `status=9/KILL` under heavy
+    // concurrent-agent load, including the same night `single.db` was
+    // twice found corrupt / "file is not a database"), the main db file
+    // can be left genuinely malformed, not just stale. PASSIVE mode is
+    // crash-safe: it never truncates or blocks, does as much of the
+    // checkpoint as it safely can given concurrent readers, and simply
+    // leaves later frames in the WAL rather than risking the main file --
+    // a slightly-stale backup beats a corrupt one.
+    conn.execute_batch("PRAGMA wal_checkpoint(PASSIVE)").ok();
     let timestamp = chrono::Utc::now().format("%Y%m%dT%H%M%SZ");
     let backup_path = db_dir.join(format!("{db_name}.bak-{timestamp}"));
     std::fs::copy(&db_path, &backup_path).context("writing db backup")?;
