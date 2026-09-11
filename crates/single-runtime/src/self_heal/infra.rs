@@ -6,10 +6,10 @@ use crate::context::Context;
 use anyhow::{Context as _, Result};
 use rusqlite::Connection;
 
-pub fn run(ctx: &Context, conn: &Connection, cfg: &SelfHealConfig, report: &mut PassReport) -> Result<()> {
+pub fn run(ctx: &Context, conn: &Connection, cfg: &SelfHealConfig, report: &mut PassReport, allow_db_restore: bool) -> Result<()> {
     run_step(conn, report, Category::Infra, "stale_socket", || stale_socket(ctx));
     run_step(conn, report, Category::Infra, "corrupt_config", || corrupt_config(ctx));
-    run_step(conn, report, Category::Infra, "db_integrity", || db_integrity(ctx, conn));
+    run_step(conn, report, Category::Infra, "db_integrity", || db_integrity(ctx, conn, allow_db_restore));
     run_step(conn, report, Category::Infra, "db_backup", || db_backup(ctx, conn, cfg));
     run_step(conn, report, Category::Infra, "dead_agent_binaries", || dead_agent_binaries(ctx));
     run_step(conn, report, Category::Infra, "cooldown_probe", || cooldown_probe(conn));
@@ -93,13 +93,20 @@ fn newest_backup(dir: &std::path::Path, original_name: &str) -> Result<Option<st
     Ok(candidates.pop())
 }
 
-/// `PRAGMA integrity_check` on the open connection. On failure, restores
-/// from the newest `single.db.bak-*` (written by `db_backup` below); with
-/// no backup at all, this is a last-resort schema rebuild — logged
-/// loudly, since it loses history — but that path only triggers when
-/// integrity is ALREADY broken and there's nothing to restore from, so
-/// "loses history" beats "stays broken forever".
-fn db_integrity(ctx: &Context, conn: &Connection) -> Result<String> {
+/// `PRAGMA integrity_check` on the open connection. On failure, when
+/// `allow_db_restore` is set, restores from the newest `single.db.bak-*`
+/// (written by `db_backup` below); with no backup at all, this is a
+/// last-resort schema rebuild — logged loudly, since it loses history —
+/// but that path only triggers when integrity is ALREADY broken and
+/// there's nothing to restore from, so "loses history" beats "stays
+/// broken forever".
+///
+/// `allow_db_restore` must be `false` for every call except the
+/// daemon-startup pass (see `run_pass_with_restore`'s doc comment) —
+/// swapping the db file out from under other already-open connections is
+/// itself a corruption risk, not just a fix for one. When restore isn't
+/// allowed, a corruption finding is only reported, never acted on.
+fn db_integrity(ctx: &Context, conn: &Connection, allow_db_restore: bool) -> Result<String> {
     let result: String = conn.query_row("PRAGMA integrity_check", (), |r| r.get(0))?;
     if result == "ok" {
         return Ok("integrity_check: ok".to_string());
@@ -108,12 +115,14 @@ fn db_integrity(ctx: &Context, conn: &Connection) -> Result<String> {
     let db_path = ctx.dirs.db_path();
     let db_dir = db_path.parent().unwrap_or(&db_path);
     let db_name = db_path.file_name().and_then(|n| n.to_str()).unwrap_or("single.db");
+
+    if !allow_db_restore {
+        return Ok(format!(
+            "integrity_check failed ({result}); NOT restoring (other connections may be live) — restart the daemon to trigger the startup pass, which will restore from the newest single.db.bak-* automatically"
+        ));
+    }
+
     if let Some(backup) = newest_backup(db_dir, db_name)? {
-        // Restoring the live connection's own backing file while `conn`
-        // is open would corrupt WAL state further -- this substep reports
-        // the finding and the restore path; `db_backup`'s caller
-        // (`run_pass`) re-opens fresh connections on its next invocation,
-        // by which point the file swap below has already taken effect.
         std::fs::copy(&backup, &db_path).context("restoring db from backup")?;
         return Ok(format!("integrity_check failed ({result}); restored from {}", backup.display()));
     }
@@ -317,13 +326,49 @@ mod tests {
         std::fs::write(&db_path, &bytes).unwrap();
 
         let conn = Connection::open(&db_path).unwrap();
-        let detail = db_integrity(&ctx, &conn).unwrap();
+        let detail = db_integrity(&ctx, &conn, true).unwrap();
         assert!(detail.contains("restored"), "{detail}");
 
         drop(conn);
         let restored_conn = Connection::open(&db_path).unwrap();
         let count: i64 = restored_conn.query_row("SELECT COUNT(*) FROM t", (), |r| r.get(0)).unwrap();
         assert_eq!(count, 1, "the restored db should have the backup's data back");
+    }
+
+    #[test]
+    fn db_integrity_check_failure_only_reports_when_restore_not_allowed() {
+        // Live-verification regression: a periodic self-heal tick (or
+        // `doctor --fix`) runs while other connections to the same db
+        // file may be open elsewhere in the daemon -- swapping the file
+        // out from under them is itself a corruption risk. Only the
+        // daemon-startup pass may restore; everything else must leave the
+        // file untouched and just report.
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = test_ctx(tmp.path());
+        let conn = Connection::open(ctx.dirs.db_path()).unwrap();
+        conn.execute("CREATE TABLE t (x INTEGER)", ()).unwrap();
+        conn.execute("INSERT INTO t VALUES (1)", ()).unwrap();
+        drop(conn);
+
+        let db_path = ctx.dirs.db_path();
+        let backup_path = db_path.with_file_name(format!("{}.bak-20260101T000000Z", db_path.file_name().unwrap().to_str().unwrap()));
+        std::fs::copy(&db_path, &backup_path).unwrap();
+
+        let mut bytes = std::fs::read(&db_path).unwrap();
+        let corrupt_from = bytes.len().min(4096);
+        for b in bytes.iter_mut().skip(corrupt_from) {
+            *b ^= 0xff;
+        }
+        std::fs::write(&db_path, &bytes).unwrap();
+        let bytes_before = std::fs::read(&db_path).unwrap();
+
+        let conn = Connection::open(&db_path).unwrap();
+        let detail = db_integrity(&ctx, &conn, false).unwrap();
+        assert!(detail.contains("NOT restoring"), "{detail}");
+        drop(conn);
+
+        let bytes_after = std::fs::read(&db_path).unwrap();
+        assert_eq!(bytes_before, bytes_after, "the file must not be touched when restore isn't allowed");
     }
 
     #[test]
@@ -343,7 +388,7 @@ mod tests {
         let conn = test_conn();
         let cfg = crate::self_heal::SelfHealConfig { categories: Categories::default(), ..crate::self_heal::SelfHealConfig::load(&ctx.dirs) };
         let mut report = PassReport::default();
-        run(&ctx, &conn, &cfg, &mut report).unwrap();
+        run(&ctx, &conn, &cfg, &mut report, true).unwrap();
         assert_eq!(report.actions.len(), 6, "expected all 6 infra substeps to run: {report:?}");
         assert!(report.actions.iter().all(|a| a.ok), "a clean tempdir/fresh db should have nothing to repair: {report:?}");
 

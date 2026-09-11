@@ -198,6 +198,28 @@ pub fn recent_events(conn: &Connection, limit: u32) -> Result<Vec<SelfHealEventR
 /// wedge the rest" — so a panicking sub-step still lets every other one
 /// (in this category and any other) run.
 pub fn run_pass(ctx: &Context, conn: &Connection, category_filter: Option<Category>) -> Result<PassReport> {
+    run_pass_with_restore(ctx, conn, category_filter, false)
+}
+
+/// Same as `run_pass`, but `allow_db_restore` also controls whether
+/// `infra::db_integrity` is allowed to swap the live db file out from
+/// under the daemon on a corruption finding.
+///
+/// Live-verification finding: `db_integrity`'s restore-from-backup did a
+/// raw `fs::copy` over `single.db` on ANY corruption finding, including
+/// from the periodic self-heal tick and `doctor --fix` -- both of which
+/// run while the daemon's other request-handling threads may hold their
+/// own open `Connection`s to that same file. Swapping the file out from
+/// under those still-open connections is exactly the kind of concurrent,
+/// uncoordinated file-level mutation that corrupts SQLite further (this
+/// was very likely a real contributor to recurring "database disk image
+/// is malformed" corruption observed live, on top of whatever originally
+/// caused it). Restore-on-corruption is now only allowed during the
+/// daemon-startup pass, before the socket is opened and no other
+/// connections exist yet; every later pass (periodic tick, `doctor
+/// --fix`) only detects and reports corruption so a human can restart
+/// the daemon (which re-runs this same startup pass) to actually fix it.
+pub fn run_pass_with_restore(ctx: &Context, conn: &Connection, category_filter: Option<Category>, allow_db_restore: bool) -> Result<PassReport> {
     ensure_schema(conn)?;
     let cfg = SelfHealConfig::load(&ctx.dirs);
     let mut report = PassReport::default();
@@ -205,7 +227,7 @@ pub fn run_pass(ctx: &Context, conn: &Connection, category_filter: Option<Catego
     let wants = |c: Category| category_filter.map(|f| f == c).unwrap_or(true) && cfg.enabled(c);
 
     if wants(Category::Infra) {
-        infra::run(ctx, conn, &cfg, &mut report)?;
+        infra::run(ctx, conn, &cfg, &mut report, allow_db_restore)?;
     }
     if wants(Category::Coordinator) {
         coordinator::run(ctx, conn, &cfg, &mut report)?;

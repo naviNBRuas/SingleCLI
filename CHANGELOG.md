@@ -9,6 +9,26 @@ patch version (`0.0.x`) carries fixes, per [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## [Unreleased]
 
+## [0.15.3]
+
+- Fixed: `self_heal::infra::db_integrity`'s corruption-restore swapped the
+  live `single.db` file (a raw `fs::copy` from the newest backup) on
+  every corruption finding, including from the periodic self-heal tick
+  (every 300s) and `single doctor --fix` — both of which run while other
+  daemon threads may hold their own open connections to that same file.
+  Live-verification finding: this file-level swap racing against other
+  open connections is itself a plausible corruption mechanism, not just
+  a fix for one — confirmed live with a `single.db` that failed
+  `PRAGMA integrity_check` with real page-level corruption
+  (`btreeInitPage() returns error code 11`, duplicate page references)
+  after a heavy overnight run with ~90 concurrent coordinator tasks.
+  Restore-on-corruption is now only allowed from the daemon-startup
+  self-heal pass (`run_pass_with_restore(.., allow_db_restore: true)`,
+  before the coordinator tick loop ramps up); the periodic tick and
+  `doctor --fix` now only detect and report corruption, so a human
+  restarts the daemon to actually restore rather than the file being
+  mutated out from under a live multi-connection process.
+
 ## [0.15.2]
 
 - Fixed: a coordinator node pinned to a specific CLI agent (e.g. `grok`)

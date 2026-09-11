@@ -91,7 +91,14 @@ pub async fn serve(socket_path: &std::path::Path) -> Result<()> {
                         Ok(touched) => tracing::info!(count = touched, "resumed goal(s) interrupted by the previous daemon"),
                         Err(e) => tracing::warn!(error = %e, "resume_interrupted failed"),
                     }
-                    match crate::self_heal::run_pass(&ctx, &conn, None) {
+                    // `allow_db_restore: true` only here -- this runs
+                    // before the coordinator tick loop and its worker
+                    // threads have ramped up, so a db-integrity restore
+                    // has the fewest other connections to race against.
+                    // Every later pass (the periodic tick below, `doctor
+                    // --fix`) must NOT restore live -- see
+                    // `run_pass_with_restore`'s doc comment.
+                    match crate::self_heal::run_pass_with_restore(&ctx, &conn, None, true) {
                         Ok(report) => {
                             let failed = report.actions.iter().filter(|a| !a.ok).count();
                             if failed > 0 {
