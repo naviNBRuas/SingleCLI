@@ -9,6 +9,25 @@ patch version (`0.0.x`) carries fixes, per [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## [Unreleased]
 
+## [0.15.2]
+
+- Fixed: a coordinator node pinned to a specific CLI agent (e.g. `grok`)
+  that went rate-limited with no precise pool-internal recovery marker
+  kept retrying that exact same exhausted agent forever —
+  `handle_capacity_exhaustion` re-stamped the retry timer but never
+  cleared the node's agent pin, so the goal cycled `capacity_wait` →
+  `blocked` → self-heal `reeval_blocked_goals` resume → the same
+  `capacity_wait` again, permanently wedged (confirmed live: a goal
+  reported "waited 50.7h for capacity, still exhausted" with 4 other
+  nodes done and 3 downstream nodes stuck pending behind it). Now, when
+  no precise pool-internal ETA is present (i.e. a single CLI agent's own
+  rate limit tripped, not the whole free-pool being exhausted), the pin
+  is cleared so the next tick's `select_agent` routes past the
+  just-exhausted agent onto the next available agent/provider, with a
+  short 15s buffer instead of the old blind 5-minute hold on the same
+  dead agent. Only once every candidate is genuinely exhausted (budget/
+  wall-clock caps) does the goal still reach `Blocked`.
+
 ## [0.15.1]
 
 - Fixed: `single provider add-free <id> --key ...` hardcoded `key_id` to

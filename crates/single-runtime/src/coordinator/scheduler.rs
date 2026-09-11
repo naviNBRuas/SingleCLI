@@ -576,13 +576,7 @@ fn settle_finished_node(
 /// rather than waiting forever.
 fn handle_capacity_exhaustion(conn: &Connection, goal: &Goal, node_id: &str, artifact: Option<&str>, cfg: &CoordinatorConfig) -> Result<()> {
     let now_ms = chrono::Utc::now().timestamp_millis();
-    let earliest_recovery_ms = artifact
-        .and_then(|p| std::fs::read_to_string(p).ok())
-        .and_then(|text| parse_earliest_recovery_ms(&text))
-        // No precise stamp available (a CLI agent's fallback chain, not
-        // single-pool) -- a short heuristic hold beats failing outright;
-        // the next tick just tries again since this isn't authoritative.
-        .unwrap_or(now_ms + 5 * 60 * 1000);
+    let precise_recovery_ms = artifact.and_then(|p| std::fs::read_to_string(p).ok()).and_then(|text| parse_earliest_recovery_ms(&text));
 
     let max_waits = goal.capacity_budget_override.unwrap_or(cfg.max_capacity_waits_per_goal);
     let max_wait_minutes = goal.capacity_wait_minutes_override.unwrap_or(cfg.max_capacity_wait_minutes);
@@ -595,8 +589,30 @@ fn handle_capacity_exhaustion(conn: &Connection, goal: &Goal, node_id: &str, art
         return Ok(());
     }
 
-    let eta = chrono::DateTime::from_timestamp_millis(earliest_recovery_ms).map(|d| d.to_rfc3339()).unwrap_or_default();
-    let reason = format!("{node_id}: every routable candidate exhausted, resumes ~{eta}");
+    // A precise stamp (`earliest_recovery_ms` from the artifact) means
+    // single-pool itself gave up after trying every provider it has --
+    // there's nothing else to fail over to, so honor its ETA verbatim.
+    // No precise stamp means a single CLI agent's own rate limit tripped
+    // (grok, claude, codex, ...), not the whole pool -- retrying that same
+    // pinned agent every cycle is exactly the wedge this function used to
+    // cause (a node stayed bound to its dead agent forever, re-blocking
+    // the goal on every self-heal reeval). Clear the pin instead so the
+    // next tick's `select_agent` routes past the just-exhausted agent
+    // (tracked via `PoolHealth::rate_limited`) onto the next available
+    // agent/provider, with only a short buffer to avoid a tight retry
+    // loop. Only once every candidate is genuinely exhausted does the
+    // goal actually reach the `Blocked` branch above.
+    let (earliest_recovery_ms, reason) = match precise_recovery_ms {
+        Some(ms) => {
+            let eta = chrono::DateTime::from_timestamp_millis(ms).map(|d| d.to_rfc3339()).unwrap_or_default();
+            (ms, format!("{node_id}: every routable candidate exhausted, resumes ~{eta}"))
+        }
+        None => {
+            goal::clear_node_agent_pin(conn, &goal.id, node_id)?;
+            (now_ms + 15_000, format!("{node_id}: exhausted, rerouting to next available agent/provider"))
+        }
+    };
+
     goal::set_waiting_on_capacity(conn, &goal.id, &reason, earliest_recovery_ms)?;
     goal::stamp_node_retry(conn, &goal.id, node_id, Some(earliest_recovery_ms))?;
     events::append(conn, &goal.session_id, Some(&goal.id), EventKind::CapacityWait, &reason)?;
@@ -1253,6 +1269,44 @@ mod tests {
     }
 
     #[test]
+    fn exhausted_dispatch_on_pinned_cli_agent_clears_pin_for_failover() {
+        // Live-verification regression: a node pinned to a specific CLI
+        // agent (e.g. `grok`) that goes rate-limited with no precise
+        // pool-internal recovery marker used to keep retrying that same
+        // dead agent forever — the pin was never cleared, so every
+        // subsequent tick (and every self-heal `reeval_blocked_goals`
+        // resume) just hit the same exhausted candidate again. It should
+        // instead fail over to the next available agent/provider.
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = test_ctx(tmp.path());
+        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::coordinator::ensure_coordinator_schema(&conn).unwrap();
+        crate::task::ensure_schema(&conn).unwrap();
+
+        use crate::coordinator::{goal, graph::GoalMode};
+        let s = crate::coordinator::session::new_session(&conn, tmp.path()).unwrap();
+        let g = goal::create(&conn, &s.id, "g", GoalMode::Auto, 25, 60).unwrap();
+        let graph = TaskGraph { nodes: vec![node("s1", &[], Effort::Standard, "grok")] };
+        goal::save_graph(&mut conn, &g.id, &graph).unwrap();
+
+        let tid = 901i64;
+        conn.execute(
+            "INSERT INTO tasks (id, description, agent, status, timed_out, created_at, updated_at, cwd, workspace_id, rate_limited, artifact_path)
+             VALUES (?1, 'x', 'grok', 'failed', 0, '', '', '', '', 1, NULL)",
+            rusqlite::params![tid],
+        )
+        .unwrap();
+        goal::update_node(&conn, &g.id, "s1", NodeStatus::Running, Some(tid), None, None).unwrap();
+
+        settle_finished_node(&ctx, &mut conn, &CoordinatorConfig::default(), &RoutingTable::default(), &PoolHealth::default(), tid).unwrap();
+
+        let reloaded_graph = crate::coordinator::goal::load_graph(&conn, &g.id).unwrap();
+        let n = reloaded_graph.find("s1").unwrap();
+        assert!(n.agent.is_empty(), "the pin should be cleared so the next tick routes to a different agent");
+        assert_eq!(n.status, NodeStatus::Pending);
+    }
+
+    #[test]
     fn resume_budget_exhaustion_moves_goal_to_blocked_with_reason() {
         let tmp = tempfile::tempdir().unwrap();
         let ctx = test_ctx(tmp.path());
@@ -1482,5 +1536,37 @@ mod tests {
 
         assert!(!repo.path().join("new-file.txt").is_file());
         assert!(!events::for_goal(&conn, &g.id, 10).unwrap().iter().any(|e| e.kind == "merged"));
+    }
+
+    #[test]
+    fn auto_merge_ignores_a_non_review_node_even_when_opted_in() {
+        // settle_finished_node only calls maybe_auto_merge on the `completed`
+        // branch, but the function itself must also refuse to act on a
+        // `code`-kind node id -- it should never merge just because
+        // something in the graph finished, only when a review passed.
+        let repo = init_repo();
+        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::coordinator::ensure_coordinator_schema(&conn).unwrap();
+        crate::task::ensure_schema(&conn).unwrap();
+
+        let task_id = crate::task::create_for_cwd(&conn, "do the work", "grok", repo.path()).unwrap();
+        let branch = format!("single/task-{task_id}");
+        let worktree_path = tempfile::tempdir().unwrap().path().join(format!("task-{task_id}"));
+        single_core::worktree::add(repo.path(), &worktree_path, &branch).unwrap();
+        std::fs::write(worktree_path.join("new-file.txt"), "from the worktree").unwrap();
+        let run_in_worktree = |args: &[&str]| {
+            let status = std::process::Command::new("git").current_dir(&worktree_path).args(args).status().unwrap();
+            assert!(status.success(), "git {:?} failed", args);
+        };
+        run_in_worktree(&["add", "."]);
+        run_in_worktree(&["commit", "-q", "-m", "add new-file"]);
+
+        let g = code_then_review_goal(&mut conn, repo.path(), task_id, true);
+
+        // pass the "code" node id, not "review" -- must be a no-op
+        maybe_auto_merge(&conn, &g, "code").unwrap();
+
+        assert!(single_core::pending_merge::list_pending(&conn).unwrap().is_empty());
+        assert!(!repo.path().join("new-file.txt").is_file());
     }
 }
